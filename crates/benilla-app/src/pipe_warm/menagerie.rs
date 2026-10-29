@@ -730,14 +730,14 @@ fn warm_quad(colors: bool, skinned: bool) -> RenderSubmesh {
         two_sided: false,
         joints: if skinned { vec![[0; 4]; n] } else { Vec::new() },
         weights: if skinned {
-            vec![[1.0, 0.0, 0.0, 0.0]; n]
+            vec![[255, 0, 0, 0]; n]
         } else {
             Vec::new()
         },
         vertex_colors: if colors {
-            vec![[1.0, 1.0, 1.0, 1.0]; n]
+            benilla_formats::VertexColors::Tint([1.0; 4])
         } else {
-            Vec::new()
+            benilla_formats::VertexColors::None
         },
         interior: false,
         emissive: false,

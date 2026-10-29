@@ -125,8 +125,8 @@ fn build_submesh_mesh(sub: &RenderSubmesh, usages: RenderAssetUsages) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, sub.uvs.clone());
     mesh.insert_indices(Indices::U32(sub.indices.clone()));
-    if sub.vertex_colors.len() == sub.positions.len() {
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, sub.vertex_colors.clone());
+    if let Some(colors) = sub.vertex_colors_f32() {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     }
     if sub.normals.len() == sub.positions.len() {
         // Deviation: a card authored facing away from the viewer is lit on the face it presents,
@@ -200,7 +200,7 @@ pub fn submesh_to_skinned_mesh(sub: &RenderSubmesh) -> Mesh {
         );
         mesh.insert_attribute(
             ATTRIBUTE_WOW_JOINT_WEIGHT,
-            VertexAttributeValues::Float32x4(sub.weights.clone()),
+            VertexAttributeValues::Float32x4(sub.weights_f32()),
         );
     }
     mesh
@@ -722,9 +722,7 @@ fn merged_static_mesh_impl(
     parts: &[(std::sync::Arc<RenderSubmesh>, Transform)],
     extras: Option<(&[Vec4], Option<&[u32]>)>,
 ) -> (Mesh, Vec3, Vec3, Vec3) {
-    let any_colors = parts
-        .iter()
-        .any(|(s, _)| s.vertex_colors.len() == s.positions.len());
+    let any_colors = parts.iter().any(|(s, _)| s.has_vertex_colors());
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
@@ -752,8 +750,8 @@ fn merged_static_mesh_impl(
         }
         uvs.extend(sub.uvs.iter().copied());
         if any_colors {
-            if sub.vertex_colors.len() == sub.positions.len() {
-                colors.extend(sub.vertex_colors.iter().copied());
+            if let Some(c) = sub.vertex_colors_f32() {
+                colors.extend(c);
             } else {
                 colors.extend(std::iter::repeat_n(
                     [1.0, 1.0, 1.0, 1.0],
@@ -893,7 +891,11 @@ mod tests {
             build_animation_clip(&sequence(2.0, vec![late, single.clone()]), &skeleton);
         assert!(poses_bones);
         assert_eq!(clip.curves().len(), 0, "the shared clip is a clock only");
-        assert_eq!(clip.duration(), 2.5, "the late key outruns the sequence length");
+        assert_eq!(
+            clip.duration(),
+            2.5,
+            "the late key outruns the sequence length"
+        );
         let curved = curved_clip(&pose);
         assert_eq!(curved.duration(), clip.duration());
         assert_eq!(curved.curves().len(), 2, "both bones keyed in the twin");

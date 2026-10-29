@@ -691,7 +691,7 @@ fn skin_census(s: &benilla_formats::RenderSubmesh) -> Option<String> {
         *per_bone.entry(j[0]).or_default() += 1;
     }
     let split = s
-        .weights
+        .weights_f32()
         .iter()
         .filter(|w| w[0] < 0.999 && w[0] > 0.0)
         .count();
@@ -716,7 +716,7 @@ fn skin_census(s: &benilla_formats::RenderSubmesh) -> Option<String> {
     }
     // Distinct skin tuples and their vertex counts, capped at 8; a rigid card is one at weight 1.
     let mut tuples: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for (j, w) in s.joints.iter().zip(&s.weights) {
+    for (j, w) in s.joints.iter().zip(s.weights_f32()) {
         let key = (0..4)
             .filter(|&i| w[i] > 0.0)
             .map(|i| format!("{}@{:.2}", j[i], w[i]))

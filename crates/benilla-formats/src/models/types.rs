@@ -262,6 +262,36 @@ pub enum FogPolicy {
     Off = 4,
 }
 
+/// A submesh's vertex colours as their source holds them, so a byte colour is not widened to
+/// four floats per vertex nor a constant tint repeated per vertex. [`RenderSubmesh::vertex_color`]
+/// reads every form as the floats the renderer takes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum VertexColors {
+    /// Untinted: no colour attribute.
+    #[default]
+    None,
+    /// WMO MOCV bytes, alpha included; the colour is `byte / 255`.
+    Bytes(Vec<[u8; 4]>),
+    /// An M2's constant M2Color tint, on every vertex.
+    Tint([f32; 4]),
+    /// Per-vertex floats: a merge of parts whose colours are not all bytes.
+    Floats(Vec<[f32; 4]>),
+}
+
+/// The four M2 weight bytes normalized by their sum; an all-zero vertex is wholly bone 0.
+pub fn normalize_weights(w: [u8; 4]) -> [f32; 4] {
+    let sum = w.iter().map(|&x| f32::from(x)).sum::<f32>();
+    if sum <= 0.0 {
+        return [1.0, 0.0, 0.0, 0.0];
+    }
+    [
+        f32::from(w[0]) / sum,
+        f32::from(w[1]) / sum,
+        f32::from(w[2]) / sum,
+        f32::from(w[3]) / sum,
+    ]
+}
+
 /// One render batch: self-contained geometry and its material.
 #[derive(Debug, Clone)]
 pub struct RenderSubmesh {
@@ -288,12 +318,13 @@ pub struct RenderSubmesh {
     pub two_sided: bool,
     /// Per-vertex skin: 4 global M2 bone indices, used as joint indices; empty for WMO.
     pub joints: Vec<[u16; 4]>,
-    /// Summing to 1, parallel to [`Self::joints`].
-    pub weights: Vec<[f32; 4]>,
+    /// The M2 vertex's four weight bytes, parallel to [`Self::joints`], as the file stores them;
+    /// [`Self::weight`] normalizes them to sum to 1.
+    pub weights: Vec<[u8; 4]>,
     /// Per-vertex colour. WMO: the MOCV bake, modulating light outdoors and being the light
     /// indoors ([`Self::interior`]), its alpha lighting data on interior TRANS/INT batches and 1
-    /// elsewhere. M2: the constant M2Color tint. Empty is untinted.
-    pub vertex_colors: Vec<[f32; 4]>,
+    /// elsewhere. M2: the constant M2Color tint. [`VertexColors::None`] is untinted.
+    pub vertex_colors: VertexColors,
     /// A WMO interior-group batch: with neither exterior bit of `groupFlags & 0x48` (`0x6b3f90`),
     /// lit by its MOCV with the sun off. The combine is matched to captures; its gx layer is
     /// untraced.
@@ -419,7 +450,7 @@ impl Default for RenderSubmesh {
             two_sided: false,
             joints: Vec::new(),
             weights: Vec::new(),
-            vertex_colors: Vec::new(),
+            vertex_colors: VertexColors::None,
             interior: false,
             emissive: false,
             icon_slot: false,
@@ -444,6 +475,47 @@ impl Default for RenderSubmesh {
             combine: 1,
             section: None,
         }
+    }
+}
+
+impl RenderSubmesh {
+    /// Vertex `i`'s weights, summing to 1.
+    pub fn weight(&self, i: usize) -> [f32; 4] {
+        normalize_weights(self.weights[i])
+    }
+
+    /// Every vertex's weights, summing to 1, for the skin attribute.
+    pub fn weights_f32(&self) -> Vec<[f32; 4]> {
+        self.weights.iter().map(|&w| normalize_weights(w)).collect()
+    }
+
+    /// Whether every vertex has a colour, so the mesh carries a colour attribute.
+    pub fn has_vertex_colors(&self) -> bool {
+        match &self.vertex_colors {
+            VertexColors::None => false,
+            VertexColors::Tint(_) => true,
+            VertexColors::Bytes(c) => c.len() == self.positions.len(),
+            VertexColors::Floats(c) => c.len() == self.positions.len(),
+        }
+    }
+
+    /// Vertex `i`'s colour as floats, `None` without one.
+    pub fn vertex_color(&self, i: usize) -> Option<[f32; 4]> {
+        match &self.vertex_colors {
+            VertexColors::None => None,
+            VertexColors::Tint(t) => Some(*t),
+            VertexColors::Bytes(c) => c.get(i).map(|b| b.map(|x| f32::from(x) / 255.0)),
+            VertexColors::Floats(c) => c.get(i).copied(),
+        }
+    }
+
+    /// Every vertex's colour as floats, `None` unless [`Self::has_vertex_colors`].
+    pub fn vertex_colors_f32(&self) -> Option<Vec<[f32; 4]>> {
+        self.has_vertex_colors().then(|| {
+            (0..self.positions.len())
+                .map(|i| self.vertex_color(i).unwrap_or([1.0; 4]))
+                .collect()
+        })
     }
 }
 
@@ -509,7 +581,7 @@ impl RenderSubmesh {
         if self
             .joints
             .iter()
-            .zip(&self.weights)
+            .zip(self.weights.iter().map(|&w| normalize_weights(w)))
             .any(|(j, w)| j[0] != bone || w[0] < 0.999)
         {
             return None;
@@ -558,8 +630,7 @@ impl RenderSubmesh {
         }
         // The constant M2Color off the vertex bake, which all four share; white when none.
         let tint = self
-            .vertex_colors
-            .first()
+            .vertex_color(0)
             .map_or([1.0; 3], |c| [c[0], c[1], c[2]]);
         Some((
             GroundQuad {

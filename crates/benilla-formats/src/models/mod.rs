@@ -35,7 +35,7 @@ pub use wmo::*;
 /// index, from which the M2 path fills [`RenderSubmesh::joints`].
 fn remap_submesh(
     global_indices: impl Iterator<Item = u32>,
-    vertex: impl Fn(u32) -> ([f32; 3], [f32; 3], [f32; 2], [f32; 4]),
+    vertex: impl Fn(u32) -> ([f32; 3], [f32; 3], [f32; 2], [u8; 4]),
     texture: Option<String>,
     blend: ModelBlend,
     two_sided: bool,
@@ -75,7 +75,7 @@ fn remap_submesh(
             wrap_x: true,
             wrap_y: true,
             two_sided,
-            vertex_colors,
+            vertex_colors: VertexColors::Bytes(vertex_colors),
             joints: Vec::new(),
             weights: Vec::new(),
             interior,

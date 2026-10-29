@@ -14,7 +14,7 @@ use super::anim::parse_m2_animations;
 use super::key_anim::SeqSlot;
 use super::mat_anim;
 use super::tex_anim;
-use super::{le_u16, le_u32, model_path, remap_submesh};
+use super::{le_u16, le_u32, model_path, remap_submesh, VertexColors};
 use super::{
     AlphaAnim, Billboard, BillboardKind, BoneScaleAnim, CharSkinSlot, FogPolicy, ModelBlend,
     RenderSubmesh, TextureStage,
@@ -70,20 +70,6 @@ fn track_constant(track: &benilla_m2::M2ScalarTrack) -> Option<f32> {
         return Some(1.0);
     }
     track.constant()
-}
-
-/// The 4 raw `u8` weights as `f32` summing to 1; a weightless vertex binds wholly to bone 0.
-fn normalize_weights(w: [u8; 4]) -> [f32; 4] {
-    let sum = w.iter().map(|&x| f32::from(x)).sum::<f32>();
-    if sum <= 0.0 {
-        return [1.0, 0.0, 0.0, 0.0];
-    }
-    [
-        f32::from(w[0]) / sum,
-        f32::from(w[1]) / sum,
-        f32::from(w[2]) / sum,
-        f32::from(w[3]) / sum,
-    ]
 }
 
 /// Bone `bone_idx`'s scale track (`+0x44`) as a global-sequence [`BoneScaleAnim`], at the offsets
@@ -306,7 +292,7 @@ pub fn parse_m2_render_submeshes(
             [v.position.x, v.position.y, v.position.z],
             [v.normal.x, v.normal.y, v.normal.z],
             [v.tex_coords.x, v.tex_coords.y],
-            [1.0, 1.0, 1.0, 1.0], // M2 has no MOCV; cleared below so no ATTRIBUTE_COLOR is emitted
+            [255; 4], // M2 has no MOCV; replaced below, so no ATTRIBUTE_COLOR is emitted untinted
         )
     };
     // `triangles` index into `indices`, which index the global vertices.
@@ -600,13 +586,13 @@ pub fn parse_m2_render_submeshes(
                 .collect();
             sub.weights = globals
                 .iter()
-                .map(|&g| normalize_weights(model.vertices[g as usize].bone_weights))
+                .map(|&g| model.vertices[g as usize].bone_weights)
                 .collect();
 
             // No tint leaves the vec empty, so the renderer emits no `ATTRIBUTE_COLOR`.
             match color_tint {
-                Some(c) => sub.vertex_colors = vec![c; sub.positions.len()],
-                None => sub.vertex_colors.clear(),
+                Some(c) => sub.vertex_colors = VertexColors::Tint(c),
+                None => sub.vertex_colors = VertexColors::None,
             }
             sub.alpha_anim = alpha_anim.clone();
             sub.uv_anim = uv_anim.clone();
@@ -981,7 +967,7 @@ mod tests {
         assert_eq!(subs[0].positions.len(), 152, "every vertex is present");
         // The seam is present, or a build that dropped the spikes would pass.
         let seam = subs[0]
-            .weights
+            .weights_f32()
             .iter()
             .filter(|w| w.iter().any(|&x| x > 0.0 && x < 0.999))
             .count();

@@ -17,12 +17,11 @@ fn bonfire_glow_carries_warm_m2color_tint() {
         .iter()
         .find(|s| s.additive && s.billboard.is_some())
         .expect("bonfire has an additive billboard glow card");
-    assert_eq!(
-        glow.vertex_colors.len(),
-        glow.positions.len(),
-        "the glow card's M2Color must be baked as a per-vertex tint"
+    assert!(
+        glow.has_vertex_colors(),
+        "the glow card's M2Color must reach every vertex as its tint"
     );
-    let c = glow.vertex_colors[0];
+    let c = glow.vertex_color(0).unwrap();
     // M2Color[0] as authored.
     assert!(
         (c[0] - 0.925).abs() < 0.02 && (c[1] - 0.663).abs() < 0.02 && (c[2] - 0.098).abs() < 0.02,
@@ -35,7 +34,7 @@ fn bonfire_glow_carries_warm_m2color_tint() {
 
     let untinted = subs
         .iter()
-        .filter(|s| !s.additive && s.vertex_colors.is_empty())
+        .filter(|s| !s.additive && !s.has_vertex_colors())
         .count();
     assert!(
         untinted >= 2,

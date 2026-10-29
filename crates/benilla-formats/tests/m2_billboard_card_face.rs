@@ -89,7 +89,7 @@ fn the_shape_ignores_edge_on_correct_and_degenerate_batches() {
         two_sided: true,
         joints: vec![],
         weights: vec![],
-        vertex_colors: vec![],
+        vertex_colors: benilla_formats::VertexColors::None,
         interior: false,
         emissive: false,
         icon_slot: false,

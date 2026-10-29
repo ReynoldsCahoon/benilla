@@ -274,6 +274,7 @@ pub use ribbons::{parse_m2_ribbon_emitters, RibbonEmitterDef, RibbonVisibility};
 mod value_track;
 pub use value_track::{TrackValue, ValueTrack};
 mod models;
+pub use models::normalize_weights;
 pub use models::ERROR_CUBE;
 pub use models::{
     accumulate_wmo_group_camera_collision, accumulate_wmo_group_camera_only_collision,
@@ -296,9 +297,10 @@ pub use models::{
     GlobalSeqBone, GlobalSeqChannel, GroundQuad, KeyAnim, M2AnimSummary, M2Attachment, M2Bounds,
     M2CameraTracks, M2Light, M2PaneCamera, M2PortraitCamera, ModelAnimation, ModelBlend, ParentArm,
     ParentBasis, PlayableAnim, RenderSubmesh, RgbAnim, ScalarAnim, SeqLoops, Skeleton,
-    SkeletonBone, StringAnchors, TextureStage, UvAnim, UvRotAnim, WmoBatchClass, WmoDoodad,
-    WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef,
-    WmoPortals, WmoRoot, DEGENERATE_RING_FOOTPRINT, NO_GROUP_LIQUID, OWNER_RUNG_BUCKETS,
+    SkeletonBone, StringAnchors, TextureStage, UvAnim, UvRotAnim, VertexColors, WmoBatchClass,
+    WmoDoodad, WmoDoodadSet, WmoFog, WmoGroupHeader, WmoGroupInfo, WmoLight, WmoPortalInfo,
+    WmoPortalRef, WmoPortals, WmoRoot, DEGENERATE_RING_FOOTPRINT, NO_GROUP_LIQUID,
+    OWNER_RUNG_BUCKETS,
 };
 mod terrain;
 pub use terrain::{

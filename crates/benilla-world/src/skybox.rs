@@ -277,7 +277,11 @@ fn sole_bone(sub: &benilla_formats::RenderSubmesh) -> Option<u16> {
         && sub
             .joints
             .iter()
-            .zip(&sub.weights)
+            .zip(
+                sub.weights
+                    .iter()
+                    .map(|&w| benilla_formats::normalize_weights(w)),
+            )
             // Not `== 1.0`: the weights are bytes normalised by their sum.
             .all(|(j, w)| j[0] == bone && w[0] > 0.999))
     .then_some(bone)

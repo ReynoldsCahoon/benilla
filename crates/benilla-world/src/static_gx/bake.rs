@@ -198,7 +198,7 @@ fn bake_cell(items: &[GxItem], meshes: &mut Assets<Mesh>) -> render::GxCellDraw 
         let sub = &item.geometry;
         let base = u32::try_from(positions64.len()).expect("gx cell under u32 vertices");
         // Low 16 bits: the item index, which the render side's record table maps to a layer.
-        let has_vc = sub.vertex_colors.len() == sub.positions.len();
+        let has_vc = sub.has_vertex_colors();
         let word_flags = u32::try_from(item_idx).expect("gx cell under u16 items")
             | (u32::from(item.wrap_x) * WORD_WRAP_X)
             | (u32::from(item.wrap_y) * WORD_WRAP_Y)
@@ -245,7 +245,7 @@ fn bake_cell(items: &[GxItem], meshes: &mut Assets<Mesh>) -> render::GxCellDraw 
             uvs.push(*sub.uvs.get(vi).unwrap_or(&[0.0, 0.0]));
             // MOCV or the baked constant tint, raw as on the entity mesh; white where none.
             colors.push(if has_vc {
-                sub.vertex_colors[vi]
+                sub.vertex_color(vi).unwrap_or([1.0; 4])
             } else {
                 [1.0, 1.0, 1.0, 1.0]
             });
@@ -671,7 +671,7 @@ mod tests {
             normals: vec![[0.0, 0.0, 1.0]; 3],
             uvs: vec![[0.0, 0.0]; 3],
             indices: vec![0, 1, 2],
-            vertex_colors: vec![[0.25, 0.5, 0.75, 0.5]; 3],
+            vertex_colors: benilla_formats::VertexColors::Floats(vec![[0.25, 0.5, 0.75, 0.5]; 3]),
             ..Default::default()
         });
         assert!(gx.divert(batch(&g, Vec3::ZERO, None, ModelBlend::Opaque)));

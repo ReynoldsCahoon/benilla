@@ -265,7 +265,8 @@ fn main() -> anyhow::Result<()> {
         );
         for (si, s) in subs.iter().enumerate() {
             let (mut up, mut other) = (Stat::new(), Stat::new());
-            for (vi, c) in s.vertex_colors.iter().enumerate() {
+            for vi in 0..s.positions.len() {
+                let Some(c) = s.vertex_color(vi) else { break };
                 let c = c.map(|v| v * 255.0);
                 if s.normals.get(vi).is_some_and(|n| n[2] > 0.7) {
                     up.add(c);

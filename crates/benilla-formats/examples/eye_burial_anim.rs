@@ -98,7 +98,7 @@ fn shell(subs: &[RenderSubmesh], pal: &[Mat4], probe: Vec3) -> (Vec<[Vec3; 3]>, 
             continue;
         }
         let pos: Vec<Vec3> = (0..s.positions.len())
-            .map(|i| skin(s.positions[i], s.joints[i], s.weights[i], pal))
+            .map(|i| skin(s.positions[i], s.joints[i], s.weight(i), pal))
             .collect();
         for &p in &pos {
             near = near.min(p.distance(probe));
@@ -186,7 +186,7 @@ fn main() -> anyhow::Result<()> {
             if s.no_depth_write || s.no_depth_test {
                 continue;
             }
-            for (j, w) in s.joints.iter().zip(&s.weights) {
+            for (j, w) in s.joints.iter().zip(s.weights_f32()) {
                 for k in 0..4 {
                     if w[k] > 0.0 && !shell_bones.contains(&(j[k] as usize)) {
                         shell_bones.push(j[k] as usize);

@@ -293,7 +293,7 @@ mod tests {
                 "batch {i}: mid-life tint is red (got {mid:?})"
             );
             assert!(
-                s.vertex_colors.is_empty(),
+                s.vertex_colors == crate::models::VertexColors::None,
                 "batch {i}: the static vertex tint is skipped when the RGB animates"
             );
         }

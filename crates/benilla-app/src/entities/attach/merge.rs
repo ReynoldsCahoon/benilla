@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use benilla_formats::{ModelBlend, RenderSubmesh};
+use benilla_formats::{ModelBlend, RenderSubmesh, VertexColors};
 use bevy::asset::AssetId;
 use bevy::camera::primitives::{Aabb, MeshAabb};
 use bevy::prelude::*;
@@ -125,13 +125,32 @@ fn concat_geometry(first: &RenderSubmesh, rest: &[&RenderSubmesh]) -> RenderSubm
         extend_matched(&mut out.normals, &sub.normals, out.positions.len());
         extend_matched(&mut out.joints, &sub.joints, out.positions.len());
         extend_matched(&mut out.weights, &sub.weights, out.positions.len());
-        extend_matched(
-            &mut out.vertex_colors,
-            &sub.vertex_colors,
-            out.positions.len(),
-        );
     }
+    out.vertex_colors = merged_colors(first, rest);
     out
+}
+
+/// The merged parts' colours, kept only when every part has them, as [`extend_matched`] keeps a
+/// channel: bytes while every part's are bytes, else floats.
+fn merged_colors(first: &RenderSubmesh, rest: &[&RenderSubmesh]) -> VertexColors {
+    let parts = || std::iter::once(first).chain(rest.iter().copied());
+    if !parts().all(RenderSubmesh::has_vertex_colors) {
+        return VertexColors::None;
+    }
+    if parts().all(|s| matches!(s.vertex_colors, VertexColors::Bytes(_))) {
+        let mut out = Vec::new();
+        for s in parts() {
+            if let VertexColors::Bytes(c) = &s.vertex_colors {
+                out.extend_from_slice(c);
+            }
+        }
+        return VertexColors::Bytes(out);
+    }
+    VertexColors::Floats(
+        parts()
+            .flat_map(|s| s.vertex_colors_f32().unwrap_or_default())
+            .collect(),
+    )
 }
 
 /// Extend a per-vertex attribute so it stays full-length or empty: one member without it drops it
@@ -280,7 +299,7 @@ mod tests {
             uvs: vec![[0.0, 0.0]; 3],
             indices: vec![0, 1, 2],
             joints: vec![[1, 0, 0, 0]; 3],
-            weights: vec![[1.0, 0.0, 0.0, 0.0]; 3],
+            weights: vec![[255, 0, 0, 0]; 3],
             ..Default::default()
         }
     }
@@ -295,7 +314,11 @@ mod tests {
         assert_eq!(m.normals.len(), 6);
         assert_eq!(m.joints.len(), 6);
         assert_eq!(m.weights.len(), 6);
-        assert!(m.vertex_colors.is_empty(), "absent on both ⇒ absent");
+        assert_eq!(
+            m.vertex_colors,
+            VertexColors::None,
+            "absent on both ⇒ absent"
+        );
     }
 
     fn part(material: u128, geoset: u16) -> EntityPart {

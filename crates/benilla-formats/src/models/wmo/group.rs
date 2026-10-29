@@ -8,7 +8,7 @@ use benilla_wmo::{parse_wmo, Color, ParsedWmo, WmoGroup, WmoLiquid};
 
 use super::{find_wmo_chunk, WmoRoot};
 use crate::liquid::{LiquidKind, LiquidMesh};
-use crate::models::{remap_submesh, ModelBlend, RenderSubmesh, WmoBatchClass};
+use crate::models::{remap_submesh, ModelBlend, RenderSubmesh, VertexColors, WmoBatchClass};
 
 /// MLIQ grid spacing in yards, the reference's `[0x810cc0]` (`0x40855555`): the water
 /// (`0x6b6420`/`0x6b6630`) and magma/slime (`0x6b68f0`) kernels both place vertex `(i, j)` at
@@ -509,14 +509,9 @@ pub fn wmo_group_submeshes(group_bytes: &[u8], root: &WmoRoot) -> Result<Vec<Ren
                 .map_or([0.0, 0.0], |t| [t.u, t.v]);
             // MOCV RGB is the shade multiplier; the alpha rides along and is forced opaque below
             // where it is not lighting data. No MOCV is white.
-            let c = colors.get(g as usize).map_or([1.0, 1.0, 1.0, 1.0], |c| {
-                [
-                    c.r as f32 / 255.0,
-                    c.g as f32 / 255.0,
-                    c.b as f32 / 255.0,
-                    c.a as f32 / 255.0,
-                ]
-            });
+            let c = colors
+                .get(g as usize)
+                .map_or([255; 4], |c| [c.r, c.g, c.b, c.a]);
             ([p.x, p.y, p.z], n, uv, c)
         };
         for (bi, batch) in group.render_batches.iter().enumerate() {
@@ -581,14 +576,16 @@ pub fn wmo_group_submeshes(group_bytes: &[u8], root: &WmoRoot) -> Result<Vec<Ren
                 submesh.normals.clear(); // no MONR: the renderer computes flat normals
             }
             if !has_colors {
-                submesh.vertex_colors.clear(); // no MOCV: untinted
+                submesh.vertex_colors = VertexColors::None; // no MOCV: untinted
             }
             // MOCV alpha is lighting data on interior batches: TRANS reads it as the lit-to-bake
             // lerp factor, INT as the self-illumination mask (the reference's
             // `tex·MOCV·(1 + 4·a)`). Elsewhere it is blend state, forced opaque.
             if !(interior && matches!(class, WmoBatchClass::Trans | WmoBatchClass::Int)) {
-                for c in &mut submesh.vertex_colors {
-                    c[3] = 1.0;
+                if let VertexColors::Bytes(colors) = &mut submesh.vertex_colors {
+                    for c in colors {
+                        c[3] = 255;
+                    }
                 }
             }
             out.push(submesh);
