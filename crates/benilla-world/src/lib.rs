@@ -119,6 +119,7 @@ pub mod ffx_glow;
 pub mod final_pass;
 pub mod frame_pace;
 pub mod ground_fx;
+pub mod horizon;
 pub mod instance_tint;
 pub mod interact;
 pub mod interior;
