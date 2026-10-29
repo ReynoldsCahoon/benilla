@@ -1,5 +1,5 @@
 //! The one model `Visibility` authority: dev toggles, the far-clip wall, the distance fade, the
-//! portal PVS and the exterior window gate compose in one system. The first-person self-avatar
+//! portal PVS, the exterior window gate and the horizon compose in one system. The first-person self-avatar
 //! hide runs after [`super::ModelVisSet`] and wins on the self body.
 
 use bevy::camera::primitives::Aabb;
@@ -45,6 +45,9 @@ pub(super) fn apply_model_visibility(
     // Billboard card owners (a model root or a rig joint): a card is a world root, so nothing
     // else carries its owner's hide to it.
     card_owners: Query<&InheritedVisibility>,
+    // The terrain's horizon this frame, built before this set (`exterior_cull::build_horizon`).
+    horizon: Option<Res<crate::horizon::HorizonFrame>>,
+    mut horizon_counts: Option<ResMut<crate::horizon::HorizonCounts>>,
     mut q: Query<(
         Entity,
         &ModelPart,
@@ -88,7 +91,11 @@ pub(super) fn apply_model_visibility(
         && !claim.is_changed()
         && !far_twins.is_changed()
         && new_portals.is_empty()
-        && owner_flips.is_empty();
+        && owner_flips.is_empty()
+        && !horizon.as_ref().is_some_and(|h| h.is_changed());
+    let horizon = horizon.as_deref().filter(|h| h.active());
+    let behind_horizon = std::sync::atomic::AtomicUsize::new(0);
+    let behind_horizon = &behind_horizon;
     let cam_pos = cam_t.map(|t| t.translation());
     let cam_fwd = cam_t.map(|t| Vec3::from(t.forward()));
     let gate = crate::exterior_cull::ExteriorGate::build(
@@ -190,6 +197,27 @@ pub(super) fn apply_model_visibility(
             let own_building = group_vis.is_some_and(|gv| Some(gv.instance) == own_instance);
             let exterior_ok = !exterior || own_building || gate.admits(&xf, aabb);
 
+            // An ADT doodad def's horizon term (`0x683700` → `0x686000`, flags 0), on the
+            // placement's sphere (`rec+0x5c`, `+0x68`) where the fade carries it, else this
+            // submesh's. A WMO's own doodads ride its group walk, which the horizon does not reach.
+            let behind = exterior
+                && group_vis.is_none()
+                && matches!(part.kind, ModelKind::Doodad)
+                && horizon.is_some_and(|h| {
+                    let sphere = match (fade, aabb) {
+                        (Some(f), _) => Some((
+                            benilla_assets::coords::bevy_to_wow(xf.transform_point(f.local_center)),
+                            f.radius,
+                        )),
+                        (None, Some(a)) => Some(crate::exterior_cull::sphere_wow(&xf, a)),
+                        (None, None) => None,
+                    };
+                    sphere.is_some_and(|(c, r)| h.sphere_hidden(c, r))
+                });
+            if behind {
+                behind_horizon.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+
             // A billboard card draws only while its model does, by the owner's last-frame verdict.
             // Entity-lane cards only: a placement's card is `ExteriorScene` and gated above. An
             // unreadable owner fails open, as that is `face_billboards`' despawn case.
@@ -205,6 +233,7 @@ pub(super) fn apply_model_visibility(
                 && mat_factor > 0.0
                 && portal_visible
                 && exterior_ok
+                && !behind
                 && !owner_hidden
             {
                 Visibility::Inherited
@@ -256,6 +285,11 @@ pub(super) fn apply_model_visibility(
             }
         },
     );
+
+    // A still scene skips its parts, so only a full walk's count is the frame's.
+    if let (false, Some(counts)) = (scene_still, horizon_counts.as_deref_mut()) {
+        counts.doodad_parts_hidden = behind_horizon.load(std::sync::atomic::Ordering::Relaxed);
+    }
 
     // A building's MLIQ surfaces, gated by the ever-visited latch, not this frame's PVS: a group's
     // liquid draws from its first visit for the rest of the placement's residency. An index past

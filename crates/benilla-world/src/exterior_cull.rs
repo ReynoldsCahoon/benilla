@@ -15,8 +15,17 @@
 //! them all to pass 2 (`0x680390`). An object in a WMO group rides `0x6834e0`, which submits a
 //! group's members only while the group renders, frustum-testing each: an in-room body draws when
 //! its room, or one a portal hop away (our doorway-straddle guard), is in the PVS and its box is
-//! in view. `WOW_NO_DRAW_ELECTION=1` keeps only the window leg. The horizon-occlusion term
-//! (`0x686000`) is not built.
+//! in view. `WOW_NO_DRAW_ELECTION=1` keeps only the window leg.
+//!
+//! Outdoors the walk also drops what the terrain's horizon hides ([`crate::horizon`]):
+//! [`build_horizon`] runs `0x683bf0`'s chunk pass band by band, each band's visible hole-free
+//! chunks raising the buffer after its own tests, and the cell, liquid (`0x686180`), body and
+//! doodad (`0x686000`) verdicts read the buffer as it stood at their band. `WOW_NO_HORIZON_CULL=1`
+//! turns it off for an A/B. Inside a building the reference resets the horizon per window with
+//! the window's plane distance as the occluders' near bound (`0x6811a9`); our windows carry no
+//! distance, so that leg is not built and the horizon admits everything indoors. Nor is it built
+//! for world WMO defs (`0x6856c0`, flags 1) or the members of a WMO group (`0x6834e0`,
+//! `0x6838f0`), which have no def box or band here.
 //!
 //! Per window the reference bilerps the camera's corner rays (`0xc7bcd8`) into 6 planes
 //! (`0x6865f0`→`0x686640`): a sub-frustum over the portal chain's screen-space AABB, tested per
@@ -34,8 +43,12 @@ use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::camera::visibility::VisibilitySystems;
 use bevy::prelude::*;
 
-use crate::view::WorldCamera;
+use benilla_assets::coords::bevy_to_wow;
+
+use crate::horizon::{self, HorizonCell, HorizonCounts, HorizonFrame, HorizonView};
+use crate::view::{ViewDistance, WorldCamera};
 use crate::wmo_portal::{ExteriorWindows, Rect, WmoPvsSet};
+use crate::world_flags::WorldFlags;
 
 /// The open-world walk drops a window narrower than this in either axis: `0x682fa0` tests against
 /// `[0x8029d0]`, 0.01 of a 0..1 screen, which is 0.02 in NDC.
@@ -82,17 +95,32 @@ impl Plugin for ExteriorCullPlugin {
         if std::env::var_os("WOW_CULL_TRACE").is_some() {
             app.insert_resource(CullTrace);
         }
-        app.init_resource::<ExteriorCullVerdict>().add_systems(
-            PostUpdate,
-            apply_exterior_cull
-                .in_set(ExteriorCullSet)
-                // The flood writes the windows in `Update`. Running before visibility propagation
-                // lets a root verdict reach `InheritedVisibility` the same frame.
-                .after(WmoPvsSet)
-                .after(bevy::transform::TransformSystems::Propagate)
-                .before(VisibilitySystems::VisibilityPropagate)
-                .before(VisibilitySystems::CheckVisibility),
-        );
+        app.init_resource::<ExteriorCullVerdict>()
+            .init_resource::<HorizonFrame>()
+            .init_resource::<HorizonCounts>()
+            .add_systems(
+                Update,
+                build_horizon
+                    // This frame's camera pose and windows; before the model authority reads it.
+                    .after(crate::view::CameraPoseSet)
+                    .after(WmoPvsSet)
+                    .before(crate::model_render::ModelVisSet),
+            )
+            .add_systems(
+                PostUpdate,
+                (
+                    apply_exterior_cull
+                        .in_set(ExteriorCullSet)
+                        // The flood writes the windows in `Update`. Running before visibility
+                        // propagation lets a root verdict reach `InheritedVisibility` the same
+                        // frame.
+                        .after(WmoPvsSet)
+                        .after(bevy::transform::TransformSystems::Propagate)
+                        .before(VisibilitySystems::VisibilityPropagate)
+                        .before(VisibilitySystems::CheckVisibility),
+                    log_horizon.after(ExteriorCullSet),
+                ),
+            );
     }
 }
 
@@ -194,6 +222,7 @@ impl ExteriorGate {
 
 /// What [`apply_exterior_cull`] reads per object.
 type UnownedScene = (
+    Entity,
     &'static GlobalTransform,
     Option<&'static Aabb>,
     &'static mut Visibility,
@@ -263,6 +292,237 @@ type ElectedBody = (
     &'static mut Visibility,
 );
 
+/// `WOW_NO_HORIZON_CULL=1`: the horizon never runs, as `showCull` clearing world flag 0x20 does,
+/// for an A/B of what it hides and what it costs.
+fn horizon_cull_disabled() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("WOW_NO_HORIZON_CULL").is_some())
+}
+
+/// A WoW-space box as the Bevy `Aabb` the frustum tests: `bevy = (−y, z, −x)`.
+fn wow_box_to_bevy(min: [f32; 3], max: [f32; 3]) -> Aabb {
+    Aabb::from_min_max(
+        Vec3::new(-max[1], min[2], -max[0]),
+        Vec3::new(-min[1], max[2], -min[0]),
+    )
+}
+
+/// A placed `Aabb`'s world box in WoW space, through its eight corners.
+fn world_box_wow(gt: &GlobalTransform, aabb: &Aabb) -> ([f32; 3], [f32; 3]) {
+    let (c, h) = (Vec3::from(aabb.center), Vec3::from(aabb.half_extents));
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for i in 0..8 {
+        let s = Vec3::new(
+            if i & 1 == 0 { -1.0 } else { 1.0 },
+            if i & 2 == 0 { -1.0 } else { 1.0 },
+            if i & 4 == 0 { -1.0 } else { 1.0 },
+        );
+        let p = gt.transform_point(c + h * s);
+        (lo, hi) = (lo.min(p), hi.max(p));
+    }
+    let (a, b) = (bevy_to_wow(lo), bevy_to_wow(hi));
+    (
+        [0, 1, 2].map(|i| a[i].min(b[i])),
+        [0, 1, 2].map(|i| a[i].max(b[i])),
+    )
+}
+
+/// A placed `Aabb`'s bounding sphere in WoW space: the box centre and its half diagonal, scaled.
+pub(crate) fn sphere_wow(gt: &GlobalTransform, aabb: &Aabb) -> ([f32; 3], f32) {
+    let center = gt.transform_point(Vec3::from(aabb.center));
+    let radius = Vec3::from(aabb.half_extents).length() * gt.affine().matrix3.x_axis.length();
+    (bevy_to_wow(center), radius)
+}
+
+/// The terrain chunk pass `0x683bf0` and the horizon it raises, outdoors, before anything reads
+/// it. The buffer starts at −1,000,000 (`0x685fe0`); the chunks are filed by their far corner
+/// (`0x6afca6`) into the 32 bands and walked nearest first. Per band each chunk the frustum
+/// admits takes the box test (flags 0, `0x683c4d`) against the buffer as the earlier bands left
+/// it; then each visible chunk with no holes whose view depth, `f·(c − eye) − r` on the camera's
+/// view plane (`0x6afb03`), lies in [0, far clip − 33.333332) (`0x683d53`, `0x683d67`) adds its
+/// two rows. The frame keeps the buffer before every band, so the verdicts taken later, in
+/// [`apply_exterior_cull`] and the model authority, read what the in-order walk would have.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_horizon(
+    windows: Res<ExteriorWindows>,
+    cam: Query<(&GlobalTransform, &Projection), With<WorldCamera>>,
+    view: Option<Res<ViewDistance>>,
+    flags: Option<Res<WorldFlags>>,
+    cells: Query<(Entity, &HorizonCell)>,
+    mut frame: ResMut<HorizonFrame>,
+    mut counts: ResMut<HorizonCounts>,
+    mut bands: Local<Vec<Vec<(Entity, usize)>>>,
+) {
+    let t0 = std::time::Instant::now();
+    let flags = flags.map_or(WorldFlags::default(), |f| *f);
+    let farclip = view.as_ref().map_or(350.0, |v| v.farclip);
+    // The gates: `showCull`, the outside leg (`0x6811ca`), a perspective camera, and the forward
+    // z band `HorizonView::new` checks.
+    let horizon_view = cam
+        .iter()
+        .next()
+        .filter(|_| {
+            !horizon_cull_disabled()
+                && flags.has(WorldFlags::CULL)
+                && matches!(*windows, ExteriorWindows::Unrestricted)
+        })
+        .and_then(|(cam_t, proj)| {
+            let Projection::Perspective(p) = proj else {
+                return None;
+            };
+            let device = horizon::projection(p.fov, p.aspect_ratio, p.near, farclip);
+            let eye = bevy_to_wow(cam_t.translation());
+            let fwd = bevy_to_wow(Vec3::from(cam_t.forward()));
+            let v = HorizonView::new(eye, fwd, device)?;
+            let clip_from_world = proj.get_clip_from_view() * cam_t.to_matrix().inverse();
+            let frustum = scene_window_frustum([-1.0, -1.0, 1.0, 1.0], &clip_from_world)?;
+            Some((v, frustum, eye, fwd))
+        });
+    let Some((hv, frustum, eye, fwd)) = horizon_view else {
+        if frame.active() {
+            *frame = HorizonFrame::default();
+        }
+        *counts = HorizonCounts::default();
+        return;
+    };
+
+    // File every drawable chunk by its far corner; a band of 32 or more is not filed.
+    bands.resize_with(horizon::BANDS, Vec::new);
+    for band in bands.iter_mut() {
+        band.clear();
+    }
+    for (e, cell) in &cells {
+        for (i, chunk) in cell.0.iter().enumerate() {
+            // `0x683c28`: an all-hole chunk is dropped.
+            if chunk.holes == 0xffff {
+                continue;
+            }
+            if let Some(b) = hv.band(chunk.band_corner(&hv), 0.0) {
+                bands[b].push((e, i));
+            }
+        }
+    }
+
+    // The view plane `0xc7bcb0`: the unit forward, distance −f·eye.
+    let f = Vec3::from(fwd).normalize_or_zero();
+    let plane_d = -f.dot(Vec3::from(eye));
+    let occluder_far = farclip - horizon::BAND_DEPTH;
+    // The feed `0xc7b66c`, 0 outdoors (`0x6811ca`).
+    let occluder_near = 0.0;
+
+    let mut columns: horizon::Columns = [horizon::CLEARED; horizon::COLUMNS];
+    let mut before = Vec::with_capacity(horizon::BANDS + 1);
+    // Per cell: whether any chunk drew, and whether the horizon hid any.
+    let mut cell_state: bevy::platform::collections::HashMap<Entity, (bool, bool)> =
+        bevy::platform::collections::HashMap::default();
+    let mut tally = HorizonCounts::default();
+    let mut occluders: Vec<(Entity, usize)> = Vec::new();
+    for band in bands.iter() {
+        before.push(columns);
+        occluders.clear();
+        for &(e, i) in band {
+            let Ok((_, cell)) = cells.get(e) else {
+                continue;
+            };
+            let chunk = &cell.0[i];
+            if !frustum.intersects_obb(
+                &wow_box_to_bevy(chunk.min, chunk.max),
+                &bevy::math::Affine3A::IDENTITY,
+                true,
+                true,
+            ) {
+                continue;
+            }
+            tally.chunks += 1;
+            let state = cell_state.entry(e).or_default();
+            if horizon::box_hidden(chunk.min, chunk.max, 0, &hv, &columns) {
+                tally.chunks_hidden += 1;
+                state.1 = true;
+            } else {
+                state.0 = true;
+                if chunk.holes == 0 {
+                    occluders.push((e, i));
+                }
+            }
+        }
+        // The band's occluders go in after its own tests and before the next band's.
+        for &(e, i) in &occluders {
+            let Ok((_, cell)) = cells.get(e) else {
+                continue;
+            };
+            let chunk = &cell.0[i];
+            let depth = f.dot(Vec3::from(chunk.center)) + plane_d - chunk.radius;
+            // `0x683d53` needs it below the far bound and `0x683d67` not below the feed.
+            if depth.partial_cmp(&occluder_far) != Some(std::cmp::Ordering::Less)
+                || depth < occluder_near
+            {
+                continue;
+            }
+            for row in chunk.occluder_rows(horizon::CHUNK_LEVEL, &hv) {
+                horizon::insert(&row, &hv.view, &mut columns);
+            }
+            tally.occluders += 1;
+        }
+    }
+    before.push(columns);
+
+    let next = HorizonFrame {
+        view: Some(hv),
+        before,
+        hidden_cells: cell_state
+            .into_iter()
+            .filter(|(_, (drawn, hidden))| !drawn && *hidden)
+            .map(|(e, _)| e)
+            .collect(),
+    };
+    // Written only on a change, so the model authority's still-scene skip holds while nothing
+    // moves.
+    if *frame != next {
+        *frame = next;
+    }
+    tally.build_us = t0.elapsed().as_micros() as u64;
+    *counts = HorizonCounts {
+        // The later legs' counts are theirs to write.
+        cells_hidden: counts.cells_hidden,
+        bodies_hidden: counts.bodies_hidden,
+        liquid_hidden: counts.liquid_hidden,
+        doodad_parts_hidden: counts.doodad_parts_hidden,
+        ..tally
+    };
+}
+
+/// One `info!` a second while the horizon runs, when its counts moved: the A/B line for
+/// `WOW_NO_HORIZON_CULL`.
+fn log_horizon(
+    frame: Res<HorizonFrame>,
+    counts: Res<HorizonCounts>,
+    mut last: Local<Option<(std::time::Instant, HorizonCounts)>>,
+) {
+    let now = std::time::Instant::now();
+    if last.is_some_and(|(at, _)| now - at < std::time::Duration::from_secs(1)) {
+        return;
+    }
+    let c = *counts;
+    let untimed = |c: HorizonCounts| HorizonCounts { build_us: 0, ..c };
+    let moved = last.is_none_or(|(_, prev)| untimed(prev) != untimed(c));
+    *last = Some((now, c));
+    if !moved || !frame.active() {
+        return;
+    }
+    info!(
+        "horizon: chunks hidden {}/{} occluders {} | hidden cells {} bodies {} liquid {} \
+         doodad parts {} | build {} us",
+        c.chunks_hidden,
+        c.chunks,
+        c.occluders,
+        c.cells_hidden,
+        c.bodies_hidden,
+        c.liquid_hidden,
+        c.doodad_parts_hidden,
+        c.build_us,
+    );
+}
+
 /// Hides every [`ExteriorScene`] object no window admits, of those with no other `Visibility`
 /// owner (terrain cells, the far band, open-world liquid), and elects each net body
 /// ([`ElectedBody`]), whose root nothing else writes. A `ModelPart` or `WmoGroupVis` belongs to
@@ -278,6 +538,8 @@ fn apply_exterior_cull(
     mut verdict: ResMut<ExteriorCullVerdict>,
     trace: Option<Res<CullTrace>>,
     mut no_election: Local<Option<bool>>,
+    horizon: Option<Res<HorizonFrame>>,
+    mut horizon_counts: Option<ResMut<HorizonCounts>>,
 ) {
     // `WOW_NO_DRAW_ELECTION=1` disables the frustum and room legs; the window leg stays.
     let no_election =
@@ -302,16 +564,37 @@ fn apply_exterior_cull(
     };
     let (mut tested, mut hidden, mut unbounded) = (0usize, 0usize, 0usize);
     let (mut liquid, mut liquid_hidden) = (0usize, 0usize);
-    for (gt, aabb, mut vis, is_liquid) in &mut scene {
+    let horizon = horizon.as_deref().filter(|h| h.active());
+    let (mut cells_behind, mut liquid_behind) = (0usize, 0usize);
+    for (e, gt, aabb, mut vis, is_liquid) in &mut scene {
         tested += 1;
         unbounded += usize::from(aabb.is_none());
         let admitted = gate.admits(gt, aabb);
         hidden += usize::from(!admitted);
         liquid += usize::from(is_liquid);
         liquid_hidden += usize::from(is_liquid && !admitted);
+        // The horizon: a terrain cell by its chunks' verdicts, a liquid slot by its box
+        // (`0x683ab0`, flags 0). Counted apart from `hidden`, which is the window leg's.
+        let behind = admitted
+            && horizon.is_some_and(|h| {
+                if h.cell_hidden(e) {
+                    cells_behind += 1;
+                    true
+                } else if is_liquid
+                    && aabb.is_some_and(|a| {
+                        let (lo, hi) = world_box_wow(gt, a);
+                        h.box_hidden(lo, hi)
+                    })
+                {
+                    liquid_behind += 1;
+                    true
+                } else {
+                    false
+                }
+            });
         set(
             &mut vis,
-            if admitted {
+            if admitted && !behind {
                 Visibility::Inherited
             } else {
                 Visibility::Hidden
@@ -319,7 +602,7 @@ fn apply_exterior_cull(
         );
     }
     // The body leg: one whole-object test per net body.
-    let (mut body_n, mut body_hidden) = (0usize, 0usize);
+    let (mut body_n, mut body_hidden, mut bodies_behind) = (0usize, 0usize, 0usize);
     for (e, gt, body, room, mut vis) in &mut bodies {
         let Some(bound) = body.bound.as_ref() else {
             // No bound: not this cull's to decide. Traced, as no counter below sees it.
@@ -356,9 +639,18 @@ fn apply_exterior_cull(
             admitted,
         );
         body_hidden += usize::from(!admitted);
+        // `0x683340`'s horizon term on an outdoor body's sphere (flags 0); an in-room body rides
+        // its building's walk, which this horizon does not reach.
+        let behind = admitted
+            && !in_room
+            && horizon.is_some_and(|h| {
+                let (c, r) = sphere_wow(gt, bound);
+                h.sphere_hidden(c, r)
+            });
+        bodies_behind += usize::from(behind);
         set(
             &mut vis,
-            if admitted {
+            if admitted && !behind {
                 Visibility::Inherited
             } else {
                 Visibility::Hidden
@@ -379,6 +671,11 @@ fn apply_exterior_cull(
         liquid,
         liquid_hidden,
     };
+    if let Some(counts) = horizon_counts.as_deref_mut() {
+        counts.cells_hidden = cells_behind;
+        counts.bodies_hidden = bodies_behind;
+        counts.liquid_hidden = liquid_behind;
+    }
 }
 
 #[cfg(test)]
@@ -890,5 +1187,123 @@ mod tests {
             (0, 0),
             "`Without<WmoGroupVis>` must exclude it from the walk, not just from the verdict"
         );
+    }
+
+    /// One frame of the chunk pass and the verdicts: a camera at the origin facing WoW north
+    /// (Bevy's −Z) at `pitch`, the cells given as one chunk each, and one outdoor body.
+    fn run_horizon(
+        windows: ExteriorWindows,
+        pitch: f32,
+        cells: &[crate::horizon::HorizonChunk],
+        body_at_wow: [f32; 3],
+    ) -> (Vec<Visibility>, Visibility, HorizonCounts) {
+        let mut app = App::new();
+        app.init_resource::<ExteriorCullVerdict>()
+            .init_resource::<HorizonFrame>()
+            .init_resource::<HorizonCounts>()
+            .insert_resource(Assets::<benilla_assets::WmoModel>::default())
+            .insert_resource(windows)
+            .add_systems(Update, (build_horizon, apply_exterior_cull).chain());
+        app.world_mut().spawn((
+            WorldCamera,
+            GlobalTransform::from(Transform::from_rotation(Quat::from_rotation_x(pitch))),
+            Projection::Perspective(PerspectiveProjection {
+                fov: std::f32::consts::FRAC_PI_4,
+                aspect_ratio: 16.0 / 9.0,
+                near: 0.1,
+                far: 3000.0,
+                ..default()
+            }),
+        ));
+        let ids: Vec<Entity> = cells
+            .iter()
+            .map(|chunk| {
+                app.world_mut()
+                    .spawn((
+                        GlobalTransform::IDENTITY,
+                        wow_box_to_bevy(chunk.min, chunk.max),
+                        ExteriorScene,
+                        HorizonCell(vec![chunk.clone()]),
+                        Visibility::Inherited,
+                    ))
+                    .id()
+            })
+            .collect();
+        let body = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::from_translation(benilla_assets::coords::wow_to_bevy(body_at_wow)),
+                crate::world_unit::WorldUnit {
+                    wades: true,
+                    scale: 1.0,
+                    height: 2.0,
+                    bound: Some(creature_box()),
+                },
+                outdoors().unwrap(),
+                Visibility::Inherited,
+            ))
+            .id();
+        app.update();
+        let vis = |e: Entity| *app.world().entity(e).get::<Visibility>().unwrap();
+        (
+            ids.iter().map(|e| vis(*e)).collect(),
+            vis(body),
+            *app.world().resource::<HorizonCounts>(),
+        )
+    }
+
+    /// A ridge 100 yd ahead and 20 yd above the eye, low ground and a body 300 yd behind it, and
+    /// a hill 100 yd tall at the same range.
+    fn ridge_and_beyond() -> Vec<crate::horizon::HorizonChunk> {
+        use crate::horizon::flat_chunk;
+        vec![
+            flat_chunk(130.0, 16.0, 20.0),
+            flat_chunk(330.0, 16.0, 0.0),
+            flat_chunk(330.0, 16.0, 100.0),
+        ]
+    }
+
+    /// `0x683bf0` band by band: the ridge draws and occludes, and the low ground and the body
+    /// behind it are hidden; the tall hill reaches over it.
+    #[test]
+    fn the_horizon_hides_the_ground_and_the_body_behind_a_ridge() {
+        let (cells, body, counts) = run_horizon(
+            ExteriorWindows::Unrestricted,
+            0.0,
+            &ridge_and_beyond(),
+            [305.0, 0.0, 0.0],
+        );
+        assert_eq!(
+            cells,
+            vec![
+                Visibility::Inherited,
+                Visibility::Hidden,
+                Visibility::Inherited
+            ],
+            "ridge drawn, the ground behind it hidden, the hill over it drawn"
+        );
+        assert_eq!(body, Visibility::Hidden, "the body behind the ridge");
+        assert_eq!((counts.chunks, counts.chunks_hidden), (3, 1));
+        assert_eq!(
+            counts.occluders, 2,
+            "the ridge and the hill, both hole-free and in range"
+        );
+        assert_eq!((counts.cells_hidden, counts.bodies_hidden), (1, 1));
+    }
+
+    /// A camera pitched past forward z 0.9 runs no horizon (`0x681b79`), nor does the indoor leg,
+    /// whose per-window feed is not built: everything stays drawn.
+    #[test]
+    fn a_steep_camera_and_an_indoor_one_run_no_horizon() {
+        let steep = -70f32.to_radians();
+        for (windows, pitch) in [
+            (ExteriorWindows::Unrestricted, steep),
+            (ExteriorWindows::Windows(vec![[-1.0, -1.0, 1.0, 1.0]]), 0.0),
+        ] {
+            let (cells, _, counts) =
+                run_horizon(windows, pitch, &ridge_and_beyond(), [305.0, 0.0, 0.0]);
+            assert_eq!(cells, vec![Visibility::Inherited; 3]);
+            assert_eq!(counts, HorizonCounts::default());
+        }
     }
 }

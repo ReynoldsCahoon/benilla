@@ -97,6 +97,15 @@ pub(super) fn furnish_tile_cells(
             let Some(mesh) = chunks_to_mesh(&parts) else {
                 continue;
             };
+            // The horizon walks the cell's chunks one by one (`0x683bf0`): their boxes, spheres,
+            // hole words and the edge rows `0x6c15d0` adds. An all-hole chunk draws nothing.
+            let horizon = crate::horizon::HorizonCell(
+                parts
+                    .iter()
+                    .filter(|(c, _)| c.indices.len() >= 3)
+                    .filter_map(|(c, _)| crate::horizon::HorizonChunk::new(&c.positions, c.holes))
+                    .collect(),
+            );
             // The Aabb is computed here: the mesh is `RENDER_WORLD`-only, so `calculate_bounds`
             // may find it already extracted, and the exterior cull fails open on a missing Aabb.
             let aabb = mesh.compute_aabb();
@@ -109,6 +118,7 @@ pub(super) fn furnish_tile_cells(
                     // Exterior scene: from inside a WMO a cell draws only through a portal window
                     // (`0x683bf0`, fed only by the per-window walk `0x682fa0`).
                     crate::exterior_cull::ExteriorScene,
+                    horizon,
                 ));
                 if let Some(aabb) = aabb {
                     cell.insert(aabb);
