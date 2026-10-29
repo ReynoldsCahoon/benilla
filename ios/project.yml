@@ -14,7 +14,8 @@ targets:
   Benilla:
     type: application
     platform: iOS
-    sources: [main.m]
+    # Assets.xcassets holds the app icon, made by make-icon.sh from the player's own WoW.exe.
+    sources: [main.m, Assets.xcassets]
     info:
       path: Info.plist
       properties:
@@ -42,6 +43,7 @@ targets:
         SUPPORTED_PLATFORMS: iphoneos
         ARCHS: arm64
         ENABLE_USER_SCRIPT_SANDBOXING: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # One executable: Xcode's debug-dylib split would put the code in a dylib, where the
         # stack size below cannot apply.
         ENABLE_DEBUG_DYLIB: NO

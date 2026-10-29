@@ -3,3 +3,5 @@
 /Info.plist
 /build/
 xcuserdata/
+# Made by make-icon.sh from the player's own WoW.exe: never committed.
+/Assets.xcassets/AppIcon.appiconset/*.png
