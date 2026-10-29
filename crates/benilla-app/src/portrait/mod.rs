@@ -1740,8 +1740,10 @@ fn gate_booth_cameras(
         let live_scene = token.as_str() == GLUE_SLOT && preview.scene.is_some() && !preview.hidden;
         // The glue screens publish no pane and stay on `live_scene`.
         let live_pane = booth.live && panes.0.contains_key(token.as_str());
+        // The warm pass needs only the booth its menagerie rigs: the rest share its view key, and
+        // fourteen booth chains in one frame exhaust the iPad Air 2's GPU memory.
         let active = test
-            || warming
+            || (warming && warm.anchors(cam_entity))
             || live_scene
             || live_pane
             || booth.wake > 0

@@ -279,6 +279,12 @@ impl WarmPass {
     pub(crate) fn satisfied(&self) -> bool {
         self.done
     }
+
+    /// Whether the menagerie renders through `camera`: the world camera, the twin booths and the
+    /// one real booth it rigs; every other booth shares that booth's view key.
+    pub(crate) fn anchors(&self, camera: Entity) -> bool {
+        self.anchors.contains(&camera)
+    }
 }
 
 /// How long after the last reveal `pending == 0` means drained: the counters cross worlds a frame
