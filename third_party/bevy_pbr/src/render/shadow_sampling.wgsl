@@ -9,7 +9,10 @@
 
 // Do the lookup, using HW 2x2 PCF and comparison
 fn sample_shadow_map_hardware(light_local: vec2<f32>, depth: f32, array_index: i32) -> f32 {
-#ifdef NO_ARRAY_TEXTURES_SUPPORT
+#ifdef NO_COMPARISON_SAMPLERS_SUPPORT
+    // benilla: no comparison sample on this GPU; unshadowed (see BENILLA.md).
+    return 1.0;
+#else ifdef NO_ARRAY_TEXTURES_SUPPORT
     return textureSampleCompare(
         view_bindings::directional_shadow_textures,
         view_bindings::directional_shadow_textures_comparison_sampler,
@@ -315,7 +318,10 @@ fn sample_shadow_map_pcss(
 // processed not being sampled, and this messing with mip-mapping functionality.
 // The shadow maps have no mipmaps so Level just samples from LOD 0.
 fn sample_shadow_cubemap_hardware(light_local: vec3<f32>, depth: f32, light_id: u32) -> f32 {
-#ifdef NO_CUBE_ARRAY_TEXTURES_SUPPORT
+#ifdef NO_COMPARISON_SAMPLERS_SUPPORT
+    // benilla: no comparison sample on this GPU; unshadowed (see BENILLA.md).
+    return 1.0;
+#else ifdef NO_CUBE_ARRAY_TEXTURES_SUPPORT
     return textureSampleCompare(
         view_bindings::point_shadow_textures,
         view_bindings::point_shadow_textures_comparison_sampler,

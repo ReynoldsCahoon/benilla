@@ -282,6 +282,9 @@ impl PipelineCache {
 
         if cfg!(target_os = "ios") {
             global_shader_defs.push("NO_CUBE_ARRAY_TEXTURES_SUPPORT".into());
+            // benilla: Metal GPU family 2 compiles a comparison sample only from a constant
+            // sampler, and Bevy binds its shadow samplers as arguments (see BENILLA.md).
+            global_shader_defs.push("NO_COMPARISON_SAMPLERS_SUPPORT".into());
         }
 
         global_shader_defs.push(ShaderDefVal::UInt(
