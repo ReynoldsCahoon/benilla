@@ -73,6 +73,17 @@ fn message(looked_in: &[PathBuf]) -> String {
 /// is `unattended`, so an instrumented run never waits on a click.
 pub(crate) fn fail(err: &NoInstall, unattended: bool) -> AppExit {
     eprintln!("benilla: {}", err.message());
+    // iOS discards stderr and has no dialog backend, and this runs before the log plugin: the
+    // device log (`syslog`, which iOS routes into the unified log) carries it.
+    #[cfg(target_os = "ios")]
+    {
+        let _ = unattended;
+        if let Ok(line) = std::ffi::CString::new(format!("benilla: {}", err.message())) {
+            // SAFETY: a constant `%s` format and one NUL-terminated argument.
+            unsafe { libc::syslog(libc::LOG_ERR, c"%s".as_ptr(), line.as_ptr()) };
+        }
+    }
+    #[cfg(not(target_os = "ios"))]
     if !unattended {
         // Linux shows it through `zenity` and logs nothing when that is missing, which stderr covers.
         rfd::MessageDialog::new()

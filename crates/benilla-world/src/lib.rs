@@ -127,6 +127,10 @@ pub mod lighting;
 pub mod liquid;
 pub mod log_ring;
 
+/// The iOS boot's engine settings for the iPad Air 2's GPU.
+#[cfg(target_os = "ios")]
+pub mod ios_boot;
+
 /// macOS `Cmd+Q`, re-pointed at the window close so the shutdown systems run.
 pub mod mac_quit;
 pub mod map_proj;

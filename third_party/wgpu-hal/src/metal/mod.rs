@@ -825,6 +825,10 @@ struct PipelineStageInfo {
 
     /// Info on all bound vertex buffers.
     vertex_buffer_mappings: Vec<naga::back::msl::VertexBufferMapping>,
+
+    /// iPad: the vertex-stage slot taking each draw's first instance, on GPUs without base-instance
+    /// draws (naga's `EntryPointResources::first_instance_buffer`); `None` elsewhere.
+    first_instance_slot: Option<naga::back::msl::Slot>,
 }
 
 impl PipelineStageInfo {
@@ -833,6 +837,7 @@ impl PipelineStageInfo {
         self.sizes_slot = None;
         self.sized_bindings.clear();
         self.vertex_buffer_mappings.clear();
+        self.first_instance_slot = None;
     }
 
     fn assign_from(&mut self, other: &Self) {
@@ -843,6 +848,7 @@ impl PipelineStageInfo {
         self.vertex_buffer_mappings.clear();
         self.vertex_buffer_mappings
             .extend_from_slice(&other.vertex_buffer_mappings);
+        self.first_instance_slot = other.first_instance_slot;
     }
 }
 

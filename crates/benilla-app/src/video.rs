@@ -728,7 +728,10 @@ fn log_display_session(windows: Query<&Window, With<PrimaryWindow>>) {
 /// The display-server facts as a trailing clause; empty except on Linux/BSD, where the windowing
 /// backend is chosen at runtime.
 fn display_session() -> String {
-    #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
     {
         let set = |k: &str| std::env::var_os(k).is_some();
         // winit prefers Wayland when `WAYLAND_DISPLAY` is set, else X11 (XWayland under a
@@ -750,7 +753,10 @@ fn display_session() -> String {
             std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unset".into()),
         )
     }
-    #[cfg(not(all(unix, not(any(target_os = "macos", target_os = "android")))))]
+    #[cfg(not(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    )))]
     String::new()
 }
 

@@ -1,0 +1,22 @@
+[package]
+name = "benilla-ios"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The iOS launcher: a static library Xcode links into the app (`ios/`), whose `main_rs` hands the build stamp to benilla-app as the desktop `benilla` binary does"
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+# Nothing to test, and a test build would link the whole app.
+test = false
+doctest = false
+
+[dependencies]
+# The player build: `default-features = false` keeps `dev` (and the source-tree paths) out.
+benilla-app = { path = "../benilla-app", default-features = false }
+
+[build-dependencies]
+benilla-buildstamp = { path = "../benilla-buildstamp" }

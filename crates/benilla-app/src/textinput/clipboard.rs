@@ -46,7 +46,10 @@ impl Pasteboard for arboard::Clipboard {
 }
 
 /// The Wayland half; the gate must match `smithay-clipboard`'s target in `Cargo.toml`.
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+))]
 mod wl {
     use super::Pasteboard;
 
@@ -77,7 +80,10 @@ mod wl {
 /// The primary window's `wl_display`, or `None` off Wayland, which selects [`arboard`]. Read from
 /// the window handle, not `WAYLAND_DISPLAY`, because `smithay-clipboard` needs winit's own
 /// connection.
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+))]
 pub(crate) fn wayland_display(handle: Option<&RawHandleWrapper>) -> Option<*mut c_void> {
     match handle?.get_display_handle() {
         raw_window_handle::RawDisplayHandle::Wayland(wl) => Some(wl.display.as_ptr()),
@@ -86,7 +92,10 @@ pub(crate) fn wayland_display(handle: Option<&RawHandleWrapper>) -> Option<*mut 
 }
 
 /// Off the Wayland-capable platforms the backend is always [`arboard`].
-#[cfg(not(all(unix, not(any(target_os = "macos", target_os = "android")))))]
+#[cfg(not(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+)))]
 pub(crate) fn wayland_display(_handle: Option<&RawHandleWrapper>) -> Option<*mut c_void> {
     None
 }
@@ -96,13 +105,19 @@ pub(crate) fn wayland_display(_handle: Option<&RawHandleWrapper>) -> Option<*mut
 /// # Safety
 /// `display` must be a live `wl_display` that outlives the returned backend; the window handle's
 /// `Arc` keeps the connection alive until app teardown drops the backend.
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+))]
 fn open_wayland(display: *mut c_void) -> Box<dyn Pasteboard> {
     // SAFETY: `display` is winit's own live `wl_display`, per the doc comment.
     Box::new(unsafe { smithay_clipboard::Clipboard::new(display) })
 }
 
-#[cfg(not(all(unix, not(any(target_os = "macos", target_os = "android")))))]
+#[cfg(not(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+)))]
 fn open_wayland(_display: *mut c_void) -> Box<dyn Pasteboard> {
     unreachable!("wayland_display() only yields Some on Wayland-capable platforms")
 }

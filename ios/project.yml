@@ -1,0 +1,63 @@
+# XcodeGen spec for the iPad app: `cd ios && xcodegen` writes Benilla.xcodeproj (not committed).
+# Built and run on an iPad Air 2 (A8X, iPadOS 15); `crates/benilla-world/src/ios_boot.rs` holds
+# the engine settings that GPU needs.
+name: Benilla
+options:
+  deploymentTarget:
+    iOS: "15.0"
+settings:
+  base:
+    # The free personal team the iPad is provisioned under.
+    DEVELOPMENT_TEAM: 3T6T8R5WA8
+    CODE_SIGN_STYLE: Automatic
+targets:
+  Benilla:
+    type: application
+    platform: iOS
+    sources: [main.m]
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Wallcraft
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: true
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiredDeviceCapabilities: [arm64, metal]
+        # The player copies their 1.12.1 `Data` folder into the app's Documents through Finder;
+        # benilla reads it there and keeps `benilla-config/` beside it
+        # (`benilla_formats::resident_folder`).
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: local.3T6T8R5WA8.wallcraft
+        TARGETED_DEVICE_FAMILY: "2"
+        SUPPORTED_PLATFORMS: iphoneos
+        ARCHS: arm64
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        # One executable: Xcode's debug-dylib split would put the code in a dylib, where the
+        # stack size below cannot apply.
+        ENABLE_DEBUG_DYLIB: NO
+        LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/../target/aarch64-apple-ios/release
+        # The main thread runs the whole app (winit's loop lives there) and the login screen
+        # needs more than iOS's default 1 MB main stack; 8 MB, as the desktop launcher gives it.
+        OTHER_LDFLAGS:
+          - "-lbenilla_ios"
+          - "-Wl,-stack_size,0x800000"
+    preBuildScripts:
+      - name: Build Rust
+        script: ./build-rust.sh
+        basedOnDependencyAnalysis: false
+    dependencies:
+      - sdk: UIKit.framework
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: CoreGraphics.framework
+      - sdk: Foundation.framework
+      - sdk: AudioToolbox.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreAudio.framework
+      - sdk: Security.framework

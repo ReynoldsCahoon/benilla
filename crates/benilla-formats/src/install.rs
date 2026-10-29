@@ -4,7 +4,8 @@
 //! 1. `$WOW_DATA`. Set and empty (`WOW_DATA=`) means no install and ends the search, so the
 //!    no-install path runs on a machine that has one.
 //! 2. `<project folder>/WoW/Data`, `dev` builds only ([`project_folder`]).
-//! 3. `<exe dir>/Data`, then `<exe dir>/WoW/Data`, the release layouts.
+//! 3. `<exe dir>/Data`, then `<exe dir>/WoW/Data`, the release layouts; on iOS the app's
+//!    `Documents` stands in for the exe dir ([`resident_folder`]).
 //!
 //! `dev` is a default feature here, so every dependent declares `default-features = false` and
 //! re-exports it; otherwise feature unification puts the source-tree path in a player build.
@@ -62,10 +63,22 @@ pub fn candidates() -> Vec<PathBuf> {
     candidates_from(
         std::env::var_os("WOW_DATA").map(PathBuf::from),
         project_folder(),
-        std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(Path::to_path_buf)),
+        resident_folder(),
     )
+}
+
+/// The folder a player build looks for its install in and keeps its state in: the executable's
+/// own, or on iOS, where the app bundle is signed and read-only, the app's `Documents`
+/// (`$HOME/Documents`, the container iOS gives the app), which the player fills through Finder's
+/// file sharing. `None` when that does not resolve.
+pub fn resident_folder() -> Option<PathBuf> {
+    #[cfg(target_os = "ios")]
+    let folder = std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Documents"));
+    #[cfg(not(target_os = "ios"))]
+    let folder = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf));
+    folder
 }
 
 /// [`candidates`] with the environment passed in: a test that set `$WOW_DATA` would change the

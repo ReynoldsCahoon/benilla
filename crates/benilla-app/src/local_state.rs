@@ -11,7 +11,8 @@
 //!    launcher's): a shipped binary must not carry the build machine's source tree. A linked
 //!    worktree resolves to its primary checkout's folder, unless it declares its own probe account
 //!    ([`shared_root`]).
-//! 4. `<exe dir>/benilla-config/`.
+//! 4. `<exe dir>/benilla-config/`, or on iOS the app's `Documents/benilla-config/`
+//!    ([`benilla_formats::resident_folder`]).
 //!
 //! With `$WOW_CAPTURE` set every path resolves to `None`: a capture neither reads nor writes
 //! player state.
@@ -65,11 +66,8 @@ fn resident_home() -> Option<PathBuf> {
     if let Some(root) = dev_project_root() {
         return Some(root.join(STATE_DIR));
     }
-    // 4 · beside the binary; a dev build never reaches here.
-    std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(Path::to_path_buf))
-        .map(|dir| dir.join(STATE_DIR))
+    // 4 · beside the binary (on iOS, in `Documents`); a dev build never reaches here.
+    benilla_formats::resident_folder().map(|dir| dir.join(STATE_DIR))
 }
 
 /// The project folder a dev build keeps its state in ([`benilla_formats::project_folder`]), through

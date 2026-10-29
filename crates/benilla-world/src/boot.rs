@@ -8,7 +8,15 @@ use crate::thread_qos;
 
 /// `DefaultPlugins` with benilla's engine tuning applied, around the caller's primary window.
 pub fn tuned_default_plugins(primary_window: Window) -> PluginGroupBuilder {
-    DefaultPlugins
+    // iOS: the whole screen. Bevy's default 1280x720 pt window overruns the iPad Air 2's 1024x768.
+    #[cfg(target_os = "ios")]
+    let primary_window = Window {
+        mode: bevy::window::WindowMode::BorderlessFullscreen(
+            bevy::window::MonitorSelection::Primary,
+        ),
+        ..primary_window
+    };
+    let plugins = DefaultPlugins
         .set(WindowPlugin {
             primary_window: Some(primary_window),
             ..default()
@@ -68,5 +76,15 @@ pub fn tuned_default_plugins(primary_window: Window) -> PluginGroupBuilder {
         // No bevy AA: no Fxaa/TAA/SMAA/CAS component anywhere (MSAA is core render, unaffected).
         .disable::<bevy::anti_alias::AntiAliasPlugin>()
         // No gamepad input; 1.12's bindings are keyboard/mouse.
-        .disable::<bevy::gilrs::GilrsPlugin>()
+        .disable::<bevy::gilrs::GilrsPlugin>();
+    // iOS: mesh instance data built on the CPU, and the rest of the A8X's settings
+    // (`crate::ios_boot`).
+    #[cfg(target_os = "ios")]
+    let plugins = plugins
+        .set(bevy::pbr::PbrPlugin {
+            use_gpu_instance_buffer_builder: false,
+            ..default()
+        })
+        .add(crate::ios_boot::IosBootPlugin);
+    plugins
 }

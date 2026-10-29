@@ -1047,6 +1047,11 @@ impl crate::CommandEncoder for super::CommandEncoder {
         instance_count: u32,
     ) {
         let encoder = self.state.render.as_ref().unwrap();
+        let first_instance = emulate_first_instance(
+            encoder,
+            self.state.stage_infos.vs.first_instance_slot,
+            first_instance,
+        );
         if first_instance != 0 {
             encoder.draw_primitives_instanced_base_instance(
                 self.state.raw_primitive_type,
@@ -1080,6 +1085,11 @@ impl crate::CommandEncoder for super::CommandEncoder {
         instance_count: u32,
     ) {
         let encoder = self.state.render.as_ref().unwrap();
+        let first_instance = emulate_first_instance(
+            encoder,
+            self.state.stage_infos.vs.first_instance_slot,
+            first_instance,
+        );
         let index = self.state.index.as_ref().unwrap();
         let offset = index.offset + index.stride * first_index as wgt::BufferAddress;
         if base_vertex != 0 || first_instance != 0 {
@@ -1371,5 +1381,25 @@ impl Drop for super::CommandEncoder {
             self.discard_encoding();
         }
         self.counters.command_encoders.sub(1);
+    }
+}
+
+/// iPad: on GPUs without base-instance draws (Metal GPU family < 3, which throws on one), the
+/// pipeline's vertex stage has a first-instance slot: the draw's first instance goes there as 4
+/// inline bytes, naga's MSL adds it to `instance_index`, and Metal draws from instance 0. Set on
+/// every draw, as the slot keeps the previous draw's value. Per-instance vertex buffers would still
+/// fetch from instance 0: Bevy and benilla read instance data from storage buffers instead.
+#[inline]
+fn emulate_first_instance(
+    encoder: &metal::RenderCommandEncoderRef,
+    slot: Option<naga::back::msl::Slot>,
+    first_instance: u32,
+) -> u32 {
+    match slot {
+        Some(slot) => {
+            encoder.set_vertex_bytes(slot as _, 4, core::ptr::from_ref(&first_instance).cast());
+            0
+        }
+        None => first_instance,
     }
 }

@@ -45,6 +45,12 @@ alsa = { path = "third_party/alsa-0.9" }
 # wgpu-hal 27.0.4, patched so a presentation stall past wgpu-core's 1 s frame timeout is waited out
 # and not turned into a lost device (`third_party/wgpu-hal/BENILLA.md`).
 wgpu-hal = { path = "third_party/wgpu-hal" }
+# The iPad (Metal GPU family 2): naga 27.0.3's MSL backend takes an emulated base instance from
+# wgpu-hal (`third_party/naga/BENILLA.md`); bevy_pbr/bevy_render 0.18.1 take Bevy's cube-array
+# fallback on all of iOS, not only the simulator (`third_party/bevy_pbr/BENILLA.md`).
+naga = { path = "third_party/naga" }
+bevy_pbr = { path = "third_party/bevy_pbr" }
+bevy_render = { path = "third_party/bevy_render" }
 
 # Dependencies at opt-level 3 in dev: at opt-level 0, avian/parry collision drops a run to <1 fps.
 [profile.dev.package."*"]

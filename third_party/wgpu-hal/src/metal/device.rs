@@ -665,6 +665,7 @@ impl crate::Device for super::Device {
             pc_limit: u32,
             sizes_buffer: Option<super::ResourceIndex>,
             need_sizes_buffer: bool,
+            first_instance_buffer: Option<super::ResourceIndex>,
             resources: naga::back::msl::BindingMap,
         }
 
@@ -675,6 +676,7 @@ impl crate::Device for super::Device {
             pc_limit: 0,
             sizes_buffer: None,
             need_sizes_buffer: false,
+            first_instance_buffer: None,
             resources: Default::default(),
         });
         let mut bind_group_infos = arrayvec::ArrayVec::new();
@@ -802,6 +804,14 @@ impl crate::Device for super::Device {
                 info.sizes_buffer = Some(info.counters.buffers);
                 info.counters.buffers += 1;
             }
+            // iPad: Metal GPU family < 3 has no base-instance draws; the vertex stage takes the
+            // draw's first instance in a slot of its own instead (`command::draw`).
+            if info.stage == naga::ShaderStage::Vertex
+                && !self.shared.private_caps.base_vertex_first_instance_drawing
+            {
+                info.first_instance_buffer = Some(info.counters.buffers);
+                info.counters.buffers += 1;
+            }
 
             if info.counters.buffers > self.shared.private_caps.max_buffers_per_stage
                 || info.counters.textures > self.shared.private_caps.max_textures_per_stage
@@ -827,6 +837,9 @@ impl crate::Device for super::Device {
                 .map(|buffer_index| buffer_index as naga::back::msl::Slot),
             sizes_buffer: info
                 .sizes_buffer
+                .map(|buffer_index| buffer_index as naga::back::msl::Slot),
+            first_instance_buffer: info
+                .first_instance_buffer
                 .map(|buffer_index| buffer_index as naga::back::msl::Slot),
             resources: info.resources,
         });
@@ -1188,6 +1201,7 @@ impl crate::Device for super::Device {
                     sizes_slot: desc.layout.per_stage_map.vs.sizes_buffer,
                     sized_bindings: vs.sized_bindings,
                     vertex_buffer_mappings,
+                    first_instance_slot: desc.layout.per_stage_map.vs.first_instance_buffer,
                 };
 
                 (vs.library, info)
@@ -1217,6 +1231,7 @@ impl crate::Device for super::Device {
                         sizes_slot: desc.layout.per_stage_map.fs.sizes_buffer,
                         sized_bindings: fs.sized_bindings,
                         vertex_buffer_mappings: vec![],
+                        first_instance_slot: None,
                     };
 
                     (Some(fs.library), Some(info))
@@ -1436,6 +1451,7 @@ impl crate::Device for super::Device {
                 sizes_slot: desc.layout.per_stage_map.cs.sizes_buffer,
                 sized_bindings: cs.sized_bindings,
                 vertex_buffer_mappings: vec![],
+                first_instance_slot: None,
             };
 
             if let Some(name) = desc.label {

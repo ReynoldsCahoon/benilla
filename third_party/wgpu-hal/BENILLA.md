@@ -63,3 +63,19 @@ this path, at the lock's version, with the hunks present.
 
 When wgpu-hal handles the timeout itself ([gfx-rs/wgpu#9029](https://github.com/gfx-rs/wgpu/issues/9029)),
 or when wgpu leaves 27: delete this directory and the `wgpu-hal` line under `[patch.crates-io]`.
+
+## The iPad patch — emulated base instance, `src/metal/{mod,device,command}.rs`
+
+Metal GPU family < 3 (the iPad Air 2's A8X) has no base-vertex/base-instance draws and throws an
+Objective-C exception on one, which Bevy issues for every mesh batch after the first. On such a
+device (`!private_caps.base_vertex_first_instance_drawing`) a pipeline layout reserves a
+vertex-stage buffer slot after the sizes buffer, handed to naga as
+`EntryPointResources::first_instance_buffer` (`third_party/naga/BENILLA.md`) and kept in
+`PipelineStageInfo::first_instance_slot`; every draw writes its first instance there with
+`setVertexBytes` and draws from instance 0. Hunks are marked `iPad:`. Devices with base-instance
+draws, every Mac included, take no new path. Per-instance vertex buffers would still fetch from
+instance 0; nothing in benilla uses one. Base vertex is not emulated: the iOS boot gives each mesh
+its own buffer (`benilla_world::boot`).
+
+Measured on the iPad Air 2 (the `vanilla-ipad` spike, 1000 separate draws): 18.5 ms on the render
+thread, against 22.4 ms for rebinding the per-object buffer at an offset per draw in Bevy.
