@@ -10,6 +10,9 @@
 //! - The window counts as focused: winit never reports focus on iOS, and benilla mutes audio and
 //!   gates input on an unfocused window. Written without marking the window changed (bevy_winit
 //!   would ask winit to focus it, which iOS has no call for), and announced once (`WindowFocused`).
+//! - Shadow maps of one texel: Bevy allocates its point and directional shadow maps at full size
+//!   (1024² by six faces, 2048²; 40 MB on the device) whether or not a light casts, and benilla
+//!   spawns no Bevy light.
 //! - A frame whenever the last is done, paced by vsync. Bevy's default runs iOS as
 //!   `ControlFlow::Wait` plus a redraw request UIKit never answers for a Metal-backed view, so frames
 //!   only come when a touch wakes the loop; reactive with no wait runs as `ControlFlow::Poll`.
@@ -51,6 +54,8 @@ impl Plugin for IosBootPlugin {
             unfocused_mode: every_frame,
         });
         app.add_systems(PreUpdate, hold_focus);
+        app.insert_resource(bevy::light::PointLightShadowMap { size: 1 })
+            .insert_resource(bevy::light::DirectionalLightShadowMap { size: 1 });
         app.sub_app_mut(RenderApp)
             .insert_resource(GpuPreprocessingSupport {
                 max_supported_mode: GpuPreprocessingMode::None,
