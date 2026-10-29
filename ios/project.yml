@@ -31,6 +31,10 @@ targets:
         # (`benilla_formats::resident_folder`).
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        # iOS 14+ asks before an app reaches a device on the local network (a LAN server).
+        NSLocalNetworkUsageDescription: Connects to a World of Warcraft server on your local network.
+        # iOS 14+ asks before an app reaches a device on the local network (a LAN server).
+        NSLocalNetworkUsageDescription: Connects to a World of Warcraft server on your local network.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: local.3T6T8R5WA8.wallcraft
