@@ -2,7 +2,11 @@
 //! touches become the mouse benilla already reads (the window's cursor, the button state, motion
 //! and the wheel), written before Bevy's input pass each frame.
 //!
-//! - One finger moves the cursor. A tap is a left click; a finger that moves past [`SLOP_PX`] or
+//! - One finger moves the cursor. A tap is a click a frame after the cursor reaches it
+//!   ([`MouseOut::Tap`]): a right-click over a world object (a unit, a corpse, a GameObject) with
+//!   no interface frame above it, so a tap talks, loots, uses or attacks as 1.12's right-click does
+//!   (selecting too), and a left click anywhere else. Deviation: benilla's own touch rule; 1.12
+//!   selects on the left click and interacts on the right. A finger that moves past [`SLOP_PX`] or
 //!   stays down [`DWELL_S`] holds the left button from where it landed, so it drags.
 //! - Two fingers put the cursor at their midpoint and hold the right button: a two-finger drag is
 //!   a right-drag (the camera), a two-finger tap a right-click.
@@ -50,6 +54,8 @@ pub(crate) enum MouseOut {
     Release(MouseButton),
     /// Wheel lines, positive up (zoom in).
     Wheel(f32),
+    /// A one-finger tap at the cursor: its button is the system's, by what the pick found there.
+    Tap,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -148,6 +154,11 @@ impl Gesture {
         vec![MouseOut::Cursor(start), MouseOut::Press(button)]
     }
 
+    /// Hold `action` for the next frame: a tap's release.
+    pub(crate) fn next_frame(&mut self, action: MouseOut) {
+        self.next_frame.push(action);
+    }
+
     /// The stick's finger, while one is down.
     pub(crate) fn stick(&self) -> Option<StickFinger> {
         self.stick
@@ -179,8 +190,8 @@ impl Gesture {
                 let center = stick.center;
                 self.stick = None;
                 if tap && self.mode == Mode::Idle {
-                    self.next_frame.push(MouseOut::Release(MouseButton::Left));
-                    vec![MouseOut::Cursor(center), MouseOut::Press(MouseButton::Left)]
+                    self.next_frame.push(MouseOut::Tap);
+                    vec![MouseOut::Cursor(center)]
                 } else {
                     Vec::new()
                 }
@@ -271,10 +282,9 @@ impl Gesture {
                 self.fingers.remove(&id);
                 match self.mode {
                     Mode::Pending { .. } => {
-                        // A tap: the click, its release a frame later.
+                        // A tap: the cursor now, the click once the pick has seen it there.
                         out.push(MouseOut::Cursor(at));
-                        out.push(MouseOut::Press(MouseButton::Left));
-                        self.next_frame.push(MouseOut::Release(MouseButton::Left));
+                        self.next_frame.push(MouseOut::Tap);
                         self.mode = Mode::Idle;
                     }
                     Mode::Drag(button) => {
@@ -360,13 +370,35 @@ impl Plugin for TouchMousePlugin {
     }
 }
 
-/// What decides a stick finger and where the stick goes: the interface's hover, the client
-/// state, and the published stick.
+/// What decides a stick finger, a tap's button and where the stick goes: the interface's hover,
+/// the world's, the client state, and the published stick.
 #[derive(bevy::ecs::system::SystemParam)]
 struct StickGate<'w> {
     hover: Option<Res<'w, crate::ui_script::PlayerUiHover>>,
+    world_unit: Option<Res<'w, crate::target::Hovered>>,
+    world_object: Option<Res<'w, crate::target::HoveredObject>>,
     client_state: Option<Res<'w, State<crate::client_state::ClientState>>>,
     stick: ResMut<'w, crate::virtual_stick::VirtualStick>,
+}
+
+impl StickGate<'_> {
+    /// A tap's button: the right over a world object with no interface frame above it.
+    fn tap_button(&self) -> MouseButton {
+        let over_ui = self.hover.as_ref().is_some_and(|h| h.0.is_some());
+        let over_object = self
+            .world_unit
+            .as_ref()
+            .is_some_and(|h| h.target.is_some() || h.corpse.is_some())
+            || self
+                .world_object
+                .as_ref()
+                .is_some_and(|o| o.target.is_some());
+        if over_object && !over_ui {
+            MouseButton::Right
+        } else {
+            MouseButton::Left
+        }
+    }
 }
 
 /// The touches, as mouse input for this frame.
@@ -384,23 +416,21 @@ fn touch_to_mouse(
     mut gesture: Local<Gesture>,
     stick_gate: StickGate,
 ) {
-    let StickGate {
-        hover,
-        client_state,
-        stick: mut stick_out,
-    } = stick_gate;
+    let mut stick_gate = stick_gate;
     let now = time.elapsed_secs();
     let Some((window_entity, mut window)) = windows.iter_mut().next() else {
         return;
     };
-    let in_world =
-        client_state.is_some_and(|s| *s.get() == crate::client_state::ClientState::InWorld);
+    let in_world = stick_gate
+        .client_state
+        .as_ref()
+        .is_some_and(|s| *s.get() == crate::client_state::ClientState::InWorld);
     gesture.stick_zone = in_world.then(|| window.width() * crate::virtual_stick::ZONE_WIDTH);
     let mut out = gesture.begin_frame();
     // Last frame's hover saw the cursor where the pending finger landed: the world under it makes
     // it the stick, a frame keeps it for the mouse.
     if gesture.pending_start(now).is_some() {
-        if hover.is_none_or(|h| h.0.is_none()) {
+        if stick_gate.hover.as_ref().is_none_or(|h| h.0.is_none()) {
             gesture.claim_stick();
         } else {
             out.extend(gesture.decline_stick());
@@ -412,11 +442,19 @@ fn touch_to_mouse(
     out.extend(gesture.frame(now));
     let stick = if in_world { gesture.stick() } else { None };
     let published = stick.map(|s| (s.center, s.at));
-    if stick_out.0 != published {
-        stick_out.0 = published;
+    if stick_gate.stick.0 != published {
+        stick_gate.stick.0 = published;
     }
     let (buttons, motion, wheel, moved) = &mut typed;
     for action in out {
+        // A tap is its button's press now and its release next frame.
+        let action = if action == MouseOut::Tap {
+            let button = stick_gate.tap_button();
+            gesture.next_frame(MouseOut::Release(button));
+            MouseOut::Press(button)
+        } else {
+            action
+        };
         match action {
             MouseOut::Cursor(at) => {
                 // Not marked changed: see the module docs.
@@ -448,6 +486,7 @@ fn touch_to_mouse(
                 buttons.write(ev);
                 stream.write(WindowEvent::MouseButtonInput(ev));
             }
+            MouseOut::Tap => unreachable!("resolved to a press above"),
             MouseOut::Wheel(lines) => {
                 let ev = MouseWheel {
                     unit: MouseScrollUnit::Line,
@@ -508,11 +547,8 @@ mod tests {
         let at = Vec2::new(100.0, 500.0);
         g.touch(1, TouchPhase::Started, at, 0.0);
         g.claim_stick();
-        assert_eq!(
-            g.touch(1, TouchPhase::Ended, at, 0.1),
-            vec![Cursor(at), Press(L)]
-        );
-        assert_eq!(g.begin_frame(), vec![Release(L)]);
+        assert_eq!(g.touch(1, TouchPhase::Ended, at, 0.1), vec![Cursor(at)]);
+        assert_eq!(g.begin_frame(), vec![Tap]);
     }
 
     #[test]
@@ -560,16 +596,14 @@ mod tests {
     }
 
     #[test]
-    fn a_tap_moves_the_cursor_then_clicks_and_releases_a_frame_later() {
+    fn a_tap_moves_the_cursor_then_taps_a_frame_later() {
         let mut g = Gesture::default();
         let at = Vec2::new(100.0, 200.0);
         assert_eq!(g.touch(1, TouchPhase::Started, at, 0.0), vec![Cursor(at)]);
         assert_eq!(g.frame(0.03), vec![]);
-        assert_eq!(
-            g.touch(1, TouchPhase::Ended, at, 0.08),
-            vec![Cursor(at), Press(L)]
-        );
-        assert_eq!(g.begin_frame(), vec![Release(L)]);
+        // The click waits a frame, so the pick has seen the cursor where the finger lifted.
+        assert_eq!(g.touch(1, TouchPhase::Ended, at, 0.08), vec![Cursor(at)]);
+        assert_eq!(g.begin_frame(), vec![Tap]);
         assert_eq!(g.begin_frame(), vec![]);
     }
 
