@@ -79,3 +79,12 @@ its own buffer (`benilla_world::boot`).
 
 Measured on the iPad Air 2 (the `vanilla-ipad` spike, 1000 separate draws): 18.5 ms on the render
 thread, against 22.4 ms for rebinding the per-object buffer at an offset per draw in Bevy.
+
+## The iPad GPU meter — `src/metal/mod.rs`, `Queue::submit`
+
+Apple GPUs before the A11 cannot take timestamps at pass boundaries, so bevy's render diagnostics
+and benilla's `WOW_GPU_MS` read nothing on the iPad Air 2. Every Apple GPU does record a command
+buffer's `GPUStartTime`/`GPUEndTime`. With `GPU_TIMING` set (benilla's iOS `WOW_IOS_PERF=1`), each
+submitted command buffer gets a completed handler that adds the part of its span past the latest
+end seen to `GPU_BUSY_NS` (the union, so buffers the GPU overlaps are not counted twice), by label
+in `GPU_BUSY_BY_LABEL`, and counts itself in `GPU_BUFFERS`. Off, nothing is added to a submit.

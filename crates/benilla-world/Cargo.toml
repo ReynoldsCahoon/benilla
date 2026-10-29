@@ -27,6 +27,10 @@ bevy.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# iOS: `ios_boot`'s GPU meter switch, in the vendored copy (`third_party/wgpu-hal/BENILLA.md`).
+[target.'cfg(target_os = "ios")'.dependencies]
+wgpu-hal = { version = "27", features = ["metal"] }
+
 # macOS AppKit calls, at `benilla-app`'s pins so the graph has one objc2.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.2", features = [

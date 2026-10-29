@@ -39,6 +39,21 @@ use metal::{
     MTLSize, MTLTexture, MTLTextureType, MTLTriangleFillMode, MTLWinding,
 };
 use naga::FastHashMap;
+
+/// iPad instrument: when set, every submitted command buffer adds its GPU time
+/// (`GPUStartTime`..`GPUEndTime`, which every Apple GPU records, unlike in-pass timestamps) to
+/// [`GPU_BUSY_NS`] on completion, counting only the part past the latest end seen, so overlapping
+/// buffers add their union, the wall time the GPU was busy. Off unless benilla's `WOW_IOS_PERF`
+/// turns it on.
+pub static GPU_TIMING: atomic::AtomicBool = atomic::AtomicBool::new(false);
+/// The GPU busy wall time of command buffers completed since the reader last swapped it to 0.
+pub static GPU_BUSY_NS: atomic::AtomicU64 = atomic::AtomicU64::new(0);
+/// Command buffers completed since the reader last swapped it to 0.
+pub static GPU_BUFFERS: atomic::AtomicU64 = atomic::AtomicU64::new(0);
+/// [`GPU_BUSY_NS`] split by command-buffer label, since the reader last took it.
+pub static GPU_BUSY_BY_LABEL: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+/// The latest `GPUEndTime` seen, as `f64` bits (positive doubles order as their bits).
+static GPU_LAST_END: atomic::AtomicU64 = atomic::AtomicU64::new(0);
 use parking_lot::{Mutex, RwLock};
 
 #[derive(Clone, Debug)]
@@ -461,6 +476,36 @@ impl crate::Queue for Queue {
                 }
             };
 
+            // iPad: the GPU meter (`GPU_TIMING`).
+            if GPU_TIMING.load(atomic::Ordering::Relaxed) {
+                for cmd_buffer in command_buffers {
+                    let timed = block::ConcreteBlock::new(|cmd_buf: &metal::CommandBufferRef| {
+                        use objc::{msg_send, sel, sel_impl};
+                        // SAFETY: plain `CFTimeInterval` getters on a completed command buffer.
+                        let (start, end): (f64, f64) = unsafe {
+                            (
+                                msg_send![cmd_buf, GPUStartTime],
+                                msg_send![cmd_buf, GPUEndTime],
+                            )
+                        };
+                        GPU_BUFFERS.fetch_add(1, atomic::Ordering::Relaxed);
+                        let last_end = f64::from_bits(
+                            GPU_LAST_END.fetch_max(end.to_bits(), atomic::Ordering::Relaxed),
+                        );
+                        if end > last_end {
+                            let busy = ((end - start.max(last_end)) * 1.0e9) as u64;
+                            GPU_BUSY_NS.fetch_add(busy, atomic::Ordering::Relaxed);
+                            *GPU_BUSY_BY_LABEL
+                                .lock()
+                                .get_or_insert_with(HashMap::new)
+                                .entry_ref(cmd_buf.label())
+                                .or_insert(0) += busy;
+                        }
+                    })
+                    .copy();
+                    cmd_buffer.raw.add_completed_handler(&timed);
+                }
+            }
             for cmd_buffer in command_buffers {
                 cmd_buffer.raw.commit();
             }

@@ -14,6 +14,8 @@ pub fn tuned_default_plugins(primary_window: Window) -> PluginGroupBuilder {
         mode: bevy::window::WindowMode::BorderlessFullscreen(
             bevy::window::MonitorSelection::Primary,
         ),
+        prefers_status_bar_hidden: true,
+        prefers_home_indicator_hidden: true,
         ..primary_window
     };
     let plugins = DefaultPlugins
