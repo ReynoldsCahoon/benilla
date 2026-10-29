@@ -111,6 +111,12 @@ impl BindingsState {
         }
     }
 
+    /// Apply a device's binding calls, as a key's binding body would make them: the movement
+    /// stick's ([`crate::virtual_stick`]).
+    pub(crate) fn apply_device_input(&mut self, inputs: Vec<BindingInput>) {
+        self.apply_script_input(inputs);
+    }
+
     /// The state after `earlier` frames' calls and this frame's `now`: the earlier edges are
     /// spent, as the frame start clears them, and the earlier holds stay.
     #[cfg(test)]

@@ -195,6 +195,7 @@ mod ui_unit;
 mod ui_world_enter;
 mod ui_world_map;
 mod video;
+mod virtual_stick;
 mod vm_pass;
 mod vplates;
 mod wdb;

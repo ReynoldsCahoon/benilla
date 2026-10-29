@@ -248,7 +248,10 @@ impl Plugin for BindingsPlugin {
                     // runs in `load_ingame_ui_on_world_entry`, before FrameXML and every addon;
                     // the commands come with the load.
                     (sync_dispatch, begin_dispatch).chain().in_set(BindingHead),
-                    end_dispatch.in_set(BindingTail),
+                    // The movement stick after the bodies' calls, so its Starts land last.
+                    (end_dispatch, crate::virtual_stick::hold_directions)
+                        .chain()
+                        .in_set(BindingTail),
                     // After the tick: the requests are Lua's own (`SaveBindings`), queued by
                     // handlers the tick dispatched, and a save must not wait a frame.
                     drain_binding_requests.in_set(crate::ui_script::UiDrain),
