@@ -1,9 +1,10 @@
 //! Overhead unit names, the 1.12 world-text name system.
 //!
-//! - Geometry: a camera-facing glyph mesh in the world pass, depth-tested like the reference's name
-//!   batch (`0x6c7470` calls `0x5c1d60(1,1)`), so walls occlude names. Deviation:
-//!   `AlphaMode::Blend` writes no depth where the reference does, because overlapping names
-//!   resolving by sort order look the same.
+//! - Geometry: a glyph mesh seated at the anchor and drawn in the player-UI pass at the window's
+//!   resolution ([`crate::name_pass`]), depth-tested against the world like the reference's name
+//!   batch (`0x6c7470` calls `0x5c1d60(1,1)`), so walls occlude names. Deviation: the block writes
+//!   no depth where the reference does, because overlapping names resolving by distance order
+//!   look the same.
 //! - Colour: the render `0x6c6e90` calls the ground ring's selector (`0x605960`).
 //! - Anchor: the posed PlayerName attachment, re-read every frame with no smoothing, as the
 //!   reference does.
@@ -271,7 +272,7 @@ impl NamePaint {
 /// UVs, so they die when the glyph sheet resets; the sheet's texture handle never changes.
 #[derive(Resource, Default)]
 pub(crate) struct Nameplates {
-    materials: HashMap<NamePaint, Handle<StandardMaterial>>,
+    materials: HashMap<NamePaint, Handle<crate::name_pass::NameMaterial>>,
     meshes: HashMap<Vec<String>, Handle<Mesh>>,
     /// unit → its live plate and the inputs the stack was built from.
     live: bevy::ecs::entity::EntityHashMap<LiveName>,
@@ -293,9 +294,17 @@ impl Nameplates {
     }
 }
 
-/// Marker on a plate entity (a world-pass billboard mesh, root-level, following its unit).
+/// Marker on a plate entity (a player-UI pass mesh, root-level, following its unit).
 #[derive(Component)]
 struct NamePlate;
+
+/// A plate's seat in the world: the anchor and the block's world scale, written by
+/// [`place_nameplates`] only when they move, projected each frame by [`project_nameplates`].
+#[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
+struct NameSeat {
+    anchor: Vec3,
+    scale: f32,
+}
 
 /// Deviation: a mounted plate keeps only this fraction of its seat's oscillation about a slow
 /// mean, because the raw seat, which the reference also rides, read more intense than the
@@ -436,7 +445,6 @@ pub(crate) fn drive_nameplates(
         Entity,
         &NetEntity,
         &Guid,
-        &Transform,
         Option<&ObjectStore>,
         Has<SelfPlayer>,
         // Whether the body is drawn: a unit outside the scene has nothing to float a name over.
@@ -466,22 +474,14 @@ pub(crate) fn drive_nameplates(
     net_commands: Res<NetCommands>,
     // Each race's PvP side, the a4 rank title's team digit.
     teams: Option<Res<crate::chr_classes::RacePvpTeams>>,
-    camera: Query<&Transform, With<WorldCamera>>,
     mut atlas: Option<ResMut<UiFontAtlas>>,
     mut plates: ResMut<Nameplates>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    // The `overhead_anchor` inputs, for the spawn-frame seat only.
-    anchor_q: (
-        Query<&BoneAttach>,
-        Query<&benilla_world::rig_anim::RigPose>,
-        Query<&OverheadFallback>,
-        Query<&GlobalTransform>,
-        Query<(), With<crate::entities::mount::MountChild>>,
-    ),
+    mut materials: ResMut<Assets<crate::name_pass::NameMaterial>>,
+    world_depth: Res<crate::name_pass::WorldDepth>,
 ) {
     let (selection, flash, rig, vplates, bubbles, name_cfg, pvp_strings, self_guid) = gates;
-    let (Ok(cam_tf), Some(atlas)) = (camera.single(), atlas.as_mut()) else {
+    let Some(atlas) = atlas.as_mut() else {
         return;
     };
     // A glyph-sheet reset moves every cached UV.
@@ -494,19 +494,14 @@ pub(crate) fn drive_nameplates(
             .into_iter()
             .chain([NamePaint::Flash])
         {
+            // Drawn after the whole world, liquid included, as the reference draws world text
+            // after the liquid: water cannot cover a name.
             plates.materials.insert(
                 kind,
-                materials.add(StandardMaterial {
-                    base_color: kind.color(),
-                    base_color_texture: Some(image.clone()),
-                    unlit: true,
-                    // Depth-tested; Blend skips the depth write (the module doc's deviation).
-                    alpha_mode: AlphaMode::Blend,
-                    cull_mode: None,
-                    // Sorted after every ordinary transparent (sign law in `sky_order`), as the
-                    // reference draws world text after the liquid; water cannot cover a name.
-                    depth_bias: benilla_world::sky_order::Rung::NAMEPLATE,
-                    ..default()
+                materials.add(crate::name_pass::NameMaterial {
+                    color: paint_bytes(kind.color()),
+                    glyphs: image.clone(),
+                    world_depth: world_depth.image.clone(),
                 }),
             );
         }
@@ -518,14 +513,12 @@ pub(crate) fn drive_nameplates(
             .get(&NamePaint::Flash)
             .and_then(|h| materials.get_mut(h))
         {
-            mat.base_color = flash.color;
+            mat.color = paint_bytes(flash.color);
         }
     }
-    // The billboard facing: screen-aligned (the camera's own rotation), this frame's camera.
-    let facing = cam_tf.rotation;
     let (rel, me) = (relations.get(), relations.me());
     let mut seen = bevy::ecs::entity::EntityHashSet::default();
-    for (entity, net, guid, tf, store, is_self, drawn) in &units {
+    for (entity, net, guid, store, is_self, drawn) in &units {
         // A name needs a drawn body; this precedes the ShouldShowName ladder.
         if !drawn.is_none_or(|v| v.get()) {
             continue;
@@ -635,25 +628,19 @@ pub(crate) fn drive_nameplates(
                     .or_insert_with(|| meshes.add(build_name_mesh(atlas, &lines)))
                     .clone();
                 let material = plates.materials[&color].clone();
-                // The spawn-frame seat: placement can miss a plate whose unit despawns later
-                // this Update, and a plate must never render at the origin.
-                let anchor = overhead_anchor(
-                    entity,
-                    tf,
-                    &anchor_q.0,
-                    &anchor_q.1,
-                    &anchor_q.2,
-                    &anchor_q.3,
-                    &anchor_q.4,
-                );
-                let scale = height_scale(anchor.y - tf.translation.y);
-                let place = Transform {
-                    translation: anchor,
-                    rotation: facing,
-                    scale: Vec3::splat(scale),
-                };
+                // Hidden until [`project_nameplates`] seats it this frame, so a plate never
+                // draws at the screen's centre.
                 let plate = commands
-                    .spawn((Mesh3d(mesh), MeshMaterial3d(material), place, NamePlate))
+                    .spawn((
+                        Mesh2d(mesh),
+                        MeshMaterial2d(material),
+                        Transform::default(),
+                        NameSeat::default(),
+                        bevy::mesh::MeshTag(0),
+                        Visibility::Hidden,
+                        crate::ui_pass::ui_render_layers(),
+                        NamePlate,
+                    ))
                     .id();
                 plates.live.insert(
                     entity,
@@ -683,19 +670,18 @@ pub(crate) fn drive_nameplates(
     });
 }
 
-/// Seat every live plate from this frame's propagated pose, so a moving name does not trail;
-/// plates are roots, so writing `GlobalTransform` directly is exact.
+/// Seat every live plate from this frame's propagated pose, so a moving name does not trail.
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
 fn place_nameplates(
     plates: Res<Nameplates>,
     camera: Query<&Transform, (With<WorldCamera>, Without<NamePlate>)>,
     units: Query<&Transform, (Without<NamePlate>, Without<WorldCamera>)>,
-    mut plate_tfs: Query<(&mut Transform, &mut GlobalTransform), With<NamePlate>>,
+    mut seats: Query<&mut NameSeat, With<NamePlate>>,
     anchor_q: (
         Query<&BoneAttach>,
         Query<&benilla_world::rig_anim::RigPose>,
         Query<&OverheadFallback>,
-        Query<&GlobalTransform, Without<NamePlate>>, // disjoint from the plate global write
+        Query<&GlobalTransform, Without<NamePlate>>,
         Query<(), With<crate::entities::mount::MountChild>>,
     ),
     trace: (
@@ -709,11 +695,9 @@ fn place_nameplates(
     let Ok(cam_tf) = camera.single() else {
         return;
     };
-    let facing = cam_tf.rotation;
     let blend = 1.0 - (-ROCK_MEAN_RATE * trace.1.delta_secs()).exp();
     for (&unit, live) in plates.live.iter() {
-        let (Ok(tf), Ok((mut ptf, mut pglobal))) = (units.get(unit), plate_tfs.get_mut(live.plate))
-        else {
+        let (Ok(tf), Ok(mut seat)) = (units.get(unit), seats.get_mut(live.plate)) else {
             continue; // spawned this frame and not yet flushed, or the unit is despawning
         };
         let raw = overhead_anchor(
@@ -746,28 +730,84 @@ fn place_nameplates(
                 trace.1.elapsed_secs(), r.x, r.y, r.z, a.x, a.y, a.z, c.x, c.y, c.z, raw.x, raw.y, raw.z
             );
         }
-        let scale = height_scale(anchor.y - tf.translation.y);
-        let place = Transform {
-            translation: anchor,
-            rotation: facing,
-            scale: Vec3::splat(scale),
+        let place = NameSeat {
+            anchor,
+            scale: height_scale(anchor.y - tf.translation.y),
         };
         // Write only on a bit-level change, so a parked plate is not marked changed every frame.
-        {
-            let t = ptf.bypass_change_detection();
-            if *t != place {
-                *t = place;
-                ptf.set_changed();
-                *pglobal = GlobalTransform::from(place);
-            }
-        }
+        seat.set_if_neq(place);
     }
     // Dismounted or despawned units drop their damping state (a re-mount starts fresh).
     rock.retain(|e, _| anchor_q.4.contains(*e));
 }
 
-/// Registers the plate driver (Update) and the per-frame placer (PostUpdate, after propagation,
-/// before visibility culling).
+/// The paint as the material's bytes: `NamePaint::color` holds the authored bytes as linear values.
+fn paint_bytes(color: Color) -> Vec4 {
+    let c = color.to_linear();
+    Vec4::new(c.red, c.green, c.blue, c.alpha)
+}
+
+/// A seat on the player-UI camera's plane: its 2-D transform and the anchor's reverse-Z depth, or
+/// `None` when the anchor is behind the camera. The plane is the window's logical px, centred and
+/// y-up (`ui_pass`), which the world camera's NDC spans; the block's size is its world scale times
+/// the anchor's pixels per world unit, so it shrinks with distance as the world batch did.
+fn screen_seat(
+    seat: NameSeat,
+    camera: &Camera,
+    cam_gt: &GlobalTransform,
+    half: Vec2,
+) -> Option<(Transform, f32)> {
+    let ndc = camera.world_to_ndc(cam_gt, seat.anchor)?;
+    let up = camera.world_to_ndc(cam_gt, seat.anchor + *cam_gt.up())?;
+    if !(ndc.z > 0.0 && ndc.z <= 1.0) {
+        return None;
+    }
+    let px_per_unit = (up.y - ndc.y) * half.y;
+    // Nearer names draw over farther ones: reverse-Z depth grows toward the camera.
+    let z = crate::name_pass::NAME_Z + ndc.z.clamp(0.0, 1.0) * 10.0;
+    let size = seat.scale * px_per_unit;
+    Some((
+        Transform::from_xyz(ndc.x * half.x, ndc.y * half.y, z)
+            .with_scale(Vec3::new(size, size, 1.0)),
+        ndc.z,
+    ))
+}
+
+/// Project every seat through this frame's world camera onto the player-UI plane.
+#[allow(clippy::type_complexity)] // one Bevy system's full input set
+fn project_nameplates(
+    camera: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut plates: Query<
+        (
+            &NameSeat,
+            &mut Transform,
+            &mut bevy::mesh::MeshTag,
+            &mut Visibility,
+        ),
+        With<NamePlate>,
+    >,
+) {
+    let (Ok((camera, cam_gt)), Ok(window)) = (camera.single(), windows.single()) else {
+        return;
+    };
+    let half = window.size() * 0.5;
+    for (seat, mut tf, mut tag, mut vis) in &mut plates {
+        match screen_seat(*seat, camera, cam_gt, half) {
+            Some((place, depth)) => {
+                tf.set_if_neq(place);
+                tag.set_if_neq(bevy::mesh::MeshTag(depth.to_bits()));
+                vis.set_if_neq(Visibility::Inherited);
+            }
+            None => {
+                vis.set_if_neq(Visibility::Hidden);
+            }
+        }
+    }
+}
+
+/// Registers the plate driver (Update), the per-frame placer and its projection (PostUpdate, after
+/// propagation, before visibility culling).
 pub(crate) struct NameplatesPlugin;
 
 /// `WOW_PROBE_NAME_TRACE=1`: per-frame `NAME_TRACE` lines for the self player's plate seat.
@@ -808,7 +848,8 @@ impl Plugin for NameplatesPlugin {
         .add_systems(Update, evict_name_meshes)
         .add_systems(
             PostUpdate,
-            place_nameplates
+            (place_nameplates, project_nameplates)
+                .chain()
                 .after(bevy::transform::TransformSystems::Propagate)
                 .before(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
         );
@@ -1242,9 +1283,7 @@ mod tests {
         world.insert_resource(NameAnchorTrace(false));
         world.spawn((Transform::default(), WorldCamera));
         let unit = world.spawn(Transform::from_xyz(3.0, -1.0, 5.0)).id();
-        let plate = world
-            .spawn((Transform::default(), GlobalTransform::default(), NamePlate))
-            .id();
+        let plate = world.spawn((NameSeat::default(), NamePlate)).id();
         let mut plates = Nameplates::default();
         plates.live.insert(
             unit,
@@ -1263,7 +1302,7 @@ mod tests {
         // First seat: the anchor fallback (no model) is the unit's own translation.
         world.run_system_once(place_nameplates).unwrap();
         assert_eq!(
-            world.get::<Transform>(plate).unwrap().translation,
+            world.get::<NameSeat>(plate).unwrap().anchor,
             Vec3::new(3.0, -1.0, 5.0),
         );
 
@@ -1272,12 +1311,8 @@ mod tests {
         world.run_system_once(place_nameplates).unwrap();
         let e = world.entity(plate);
         assert!(
-            !e.get_ref::<Transform>().unwrap().is_changed(),
-            "an unchanged seat must not re-mark the plate's transform"
-        );
-        assert!(
-            !e.get_ref::<GlobalTransform>().unwrap().is_changed(),
-            "…nor its global"
+            !e.get_ref::<NameSeat>().unwrap().is_changed(),
+            "an unchanged seat must not re-mark the plate"
         );
 
         // A real move still lands, and marks.
@@ -1286,11 +1321,10 @@ mod tests {
         world.run_system_once(place_nameplates).unwrap();
         let e = world.entity(plate);
         assert_eq!(
-            e.get::<Transform>().unwrap().translation,
+            e.get::<NameSeat>().unwrap().anchor,
             Vec3::new(5.0, -1.0, 5.0)
         );
-        assert!(e.get_ref::<Transform>().unwrap().is_changed());
-        assert!(e.get_ref::<GlobalTransform>().unwrap().is_changed());
+        assert!(e.get_ref::<NameSeat>().unwrap().is_changed());
     }
 
     /// A populated cache, as a re-bake finds it: one live plate, its mesh, its material.

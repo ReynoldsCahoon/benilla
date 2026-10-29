@@ -91,7 +91,13 @@ pub(super) fn setup_player(
     let spawn = wow_to_bevy([SPAWN_XY.0, SPAWN_XY.1, 100.0]);
     let cam_far = CAM_FAR;
     let mut world_cam = commands.spawn((
-        Camera3d::default(),
+        // Its depth is also read: the overhead names test against it ([`crate::name_pass`]).
+        Camera3d {
+            depth_texture_usages: (bevy::render::render_resource::TextureUsages::RENDER_ATTACHMENT
+                | bevy::render::render_resource::TextureUsages::TEXTURE_BINDING)
+                .into(),
+            ..default()
+        },
         // The portrait booths are `Camera3d`s too: viewer queries filter on this marker.
         WorldCamera,
         // `gxMultisample` is read once: the reference latches it, pending until the next launch,

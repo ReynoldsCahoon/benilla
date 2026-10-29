@@ -8,6 +8,8 @@ use bevy::prelude::*;
 /// creates the registry it fills.
 pub(crate) fn plugin(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/ui_quad.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/name_text.wgsl");
+    bevy::asset::embedded_asset!(app, "shaders/name_depth_resolve.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/ui_add.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/ui_gamma.wgsl");
     bevy::asset::embedded_asset!(app, "shaders/ui_node_gamma.wgsl");

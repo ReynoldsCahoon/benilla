@@ -76,6 +76,7 @@ mod loading_screen;
 mod local_state;
 mod minimap;
 mod nameplates;
+mod name_pass;
 mod names;
 mod net;
 mod no_install;
