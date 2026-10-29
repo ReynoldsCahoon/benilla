@@ -10,7 +10,6 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{OrthographicProjection, PerspectiveProjection};
 use bevy::prelude::*;
 use bevy::render::render_resource::Extent3d;
-use bevy::window::PrimaryWindow;
 
 use crate::entities::Creatures;
 use benilla_assets::materials::WowModelMaterial;
@@ -869,7 +868,8 @@ fn glue_ffx(
 }
 
 /// Drive the background scene ([`CreateScene`]): load and spawn the pane's file, size the target
-/// to the window, seat the character, and hold the booth camera on the pane's camera of the
+/// to the window at the 3D's render scale ([`crate::world_backdrop::SceneTarget`]), seat the
+/// character, and hold the booth camera on the pane's camera of the
 /// scene's table, or with none on the orthographic leg.
 #[allow(clippy::type_complexity)]
 pub(super) fn sync_glue_scene(
@@ -884,7 +884,7 @@ pub(super) fn sync_glue_scene(
     mut images: ResMut<Assets<Image>>,
     anim_data: Option<Res<crate::creature_anim::AnimData>>,
     mut cams: Query<(&BoothCam, &mut Transform, &mut Projection)>,
-    window: Query<&Window, With<PrimaryWindow>>,
+    target: crate::world_backdrop::SceneTarget,
     device: Res<bevy::render::renderer::RenderDevice>,
     queue: Res<bevy::render::renderer::RenderQueue>,
     // One tuple for the 16-SystemParam ceiling.
@@ -934,15 +934,10 @@ pub(super) fn sync_glue_scene(
         return;
     };
 
-    // The target is the window's, before the file resolves; a pane is a viewport inside it
-    // ([`pillarbox_glue_scene`]).
-    if let Ok(w) = window.single() {
-        resize_target(
-            &mut images,
-            &booth.target,
-            w.physical_width().max(1),
-            w.physical_height().max(1),
-        );
+    // The target is the window's at the render scale, before the file resolves; a pane is a
+    // viewport inside it ([`pillarbox_glue_scene`]). The glue frames stretch it over the page.
+    if let Some(px) = target.px() {
+        resize_target(&mut images, &booth.target, px.x, px.y);
     }
 
     scene.evict(&mut commands, &preview.live);
@@ -1266,10 +1261,11 @@ pub(super) fn sync_glue_scene(
     // The installed camera owns the booth camera while the scene shows, every frame: the pane's
     // camera of the file's table, or with none the orthographic leg (`0x76ceeb` installs no
     // camera, `0x76ce80(NULL)`), never the last scene's aim.
-    let w = window.single().ok();
-    let pane = w
+    let w = target.window();
+    let target_px = target.px();
+    let pane = target_px
         .zip(preview.pane)
-        .and_then(|(w, pane)| stock_pane_view(w.physical_width(), w.physical_height(), pane));
+        .and_then(|(px, pane)| stock_pane_view(px.x, px.y, pane));
     let chosen = preview.camera.as_ref();
     let standing = scene.file.clone().zip(scene.handle.clone());
     let CreateScene {
@@ -1313,8 +1309,8 @@ pub(super) fn sync_glue_scene(
             }),
         );
         aim(&mut cams, GLUE_SLOT, &rig);
-    } else if let Some(w) = w.filter(|_| scene.spawned) {
-        let window_px = UVec2::new(w.physical_width(), w.physical_height()).max(UVec2::ONE);
+    } else if let Some(window_px) = target_px.filter(|_| scene.spawned) {
+        let window_px = window_px.max(UVec2::ONE);
         // The projection spans the pane's raw rectangle, unclamped and unrounded, which the
         // clamped viewport then squashes (`modelview#viewport-and-clamp`).
         let rect = preview
@@ -1422,15 +1418,15 @@ fn scene_vert_fov(fov: f32, window_aspect: f32, pane: Option<super::framing::Pan
 /// window; writes only on change.
 pub(super) fn pillarbox_glue_scene(
     preview: Res<GluePreview>,
-    window: Query<&Window, With<PrimaryWindow>>,
+    target: crate::world_backdrop::SceneTarget,
     mut cams: Query<(&BoothCam, &mut Camera)>,
 ) {
-    let Ok(w) = window.single() else {
+    // The pane in the scene's target, which renders at the 3D's render scale.
+    let Some(px) = target.px() else {
         return;
     };
-    let full_h = w.physical_height().max(1);
     let viewport = preview.pane.and_then(|pane| {
-        stock_pane_view(w.physical_width(), full_h, pane).map(|view| bevy::camera::Viewport {
+        stock_pane_view(px.x, px.y.max(1), pane).map(|view| bevy::camera::Viewport {
             physical_position: view.position,
             physical_size: view.size,
             ..default()
@@ -2308,6 +2304,7 @@ mod tests {
     use super::*;
     use benilla_assets::ModelLight;
     use benilla_formats::M2Light;
+    use bevy::window::PrimaryWindow;
 
     /// `GlueParent`'s rect on a window of `aspect` (`GlueParent.lua:78-84`): the whole screen up to
     /// 16:9, a centred 16:9 box past it; as window fractions from the top-left.

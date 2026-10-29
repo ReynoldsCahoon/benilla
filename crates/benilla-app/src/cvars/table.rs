@@ -842,6 +842,24 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "benilla's own — the reference has no off-screen buffer to hang a resolution dial \
          on; its nearest equivalent, `gxResolution`, drops the interface with the world",
     ),
+    // benilla's own: [`crate::dynamic_scale`] moves a factor on `renderScale` to hold
+    // `dynamicRenderScaleFPS`, never below `dynamicRenderScaleMin`. On by default on iOS only,
+    // where the iPad Air 2's GPU cost follows the 3D's pixel count.
+    ours(
+        "dynamicRenderScale",
+        if cfg!(target_os = "ios") { "1" } else { "0" },
+        "benilla's own — the reference renders at the window's resolution, fixed",
+    ),
+    ours(
+        "dynamicRenderScaleFPS",
+        "30",
+        "benilla's own — the frame rate dynamicRenderScale holds",
+    ),
+    ours(
+        "dynamicRenderScaleMin",
+        "0.5",
+        "benilla's own — the lowest factor dynamicRenderScale may reach",
+    ),
     // benilla's own: `/console fpsJournal 1` appends a per-second row of position, frame cost and
     // per-pass GPU time to `benilla-config/Diagnostics/fps-journal.csv`. The knob is
     // [`crate::perf::FpsJournalSetting`].

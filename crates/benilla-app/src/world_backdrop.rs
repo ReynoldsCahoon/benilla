@@ -14,7 +14,10 @@
 //!
 //! [`RenderScale`] renders the world at `window × scale` while the UI stays native. At exactly 2.0
 //! the combine's bilinear read is a 2×2 box average, so supersampling needs no filter of its own.
-//! The camera's logical viewport must not move with it ([`render_target_for`]).
+//! The camera's logical viewport must not move with it ([`render_target_for`]). The scale applied
+//! is the player's times [`DynamicScale`], the automatic factor [`crate::dynamic_scale`] moves; the
+//! glue screens' scene ([`crate::portrait::glue_booth`]) renders at the same scale
+//! ([`SceneTarget`]).
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
@@ -31,6 +34,49 @@ use benilla_world::view::WorldCamera;
 /// interface native. At the default 1.0 [`render_target_for`] returns the window's own numbers.
 #[derive(Resource, Clone, Copy, PartialEq, Debug)]
 pub(crate) struct RenderScale(pub(crate) f32);
+
+/// The automatic multiplier on [`RenderScale`] that [`crate::dynamic_scale`] moves to hold a frame
+/// budget; 1.0 when that is off. Apart from the CVar, so the player's setting is never rewritten.
+#[derive(Resource, Clone, Copy, PartialEq, Debug)]
+pub(crate) struct DynamicScale(pub(crate) f32);
+
+impl Default for DynamicScale {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+/// The scale the 3D renders at: the player's [`RenderScale`] times the [`DynamicScale`].
+pub(crate) fn effective_scale(scale: &RenderScale, dynamic: Option<&DynamicScale>) -> f32 {
+    scale.0 * dynamic.map_or(1.0, |d| d.0)
+}
+
+/// The primary window, and the physical size a 3D scene outside the world camera renders at: the
+/// glue screens' booth, sized as [`track_render_size`] sizes the world's.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct SceneTarget<'w, 's> {
+    window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    scale: Option<Res<'w, RenderScale>>,
+    dynamic: Option<Res<'w, DynamicScale>>,
+}
+
+impl SceneTarget<'_, '_> {
+    pub(crate) fn window(&self) -> Option<&Window> {
+        self.window.single().ok()
+    }
+
+    /// The scene's render size in physical px, `None` without a window.
+    pub(crate) fn px(&self) -> Option<UVec2> {
+        let window = self.window()?;
+        let scale = self.scale.as_deref().copied().unwrap_or(RenderScale(1.0));
+        let (size, _) = render_target_for(
+            window_physical_size(window),
+            window.resolution.scale_factor(),
+            effective_scale(&scale, self.dynamic.as_deref()),
+        );
+        Some(size)
+    }
+}
 
 /// The settable range of [`RenderScale`], shared by the CVar and `$WOW_RENDER_SCALE`. Past 2 on
 /// purpose: supersampling prices a pixel on a machine whose present is railed at vsync.
@@ -166,14 +212,16 @@ fn track_render_size(
     mut images: ResMut<Assets<Image>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     scale: Res<RenderScale>,
+    dynamic: Option<Res<DynamicScale>>,
 ) {
     let Ok(window) = windows.single() else {
         return;
     };
+    let scale = effective_scale(&scale, dynamic.as_deref());
     let (size, _) = render_target_for(
         window_physical_size(window),
         window.resolution.scale_factor(),
-        scale.0,
+        scale,
     );
     if size == backdrop.size {
         return;
@@ -184,7 +232,7 @@ fn track_render_size(
     // Logged on every change: the rendered pixel count is the one term a probe cannot infer.
     info!(
         "render scale {:.3}: world renders at {}x{} into a {}x{} window",
-        scale.0,
+        scale,
         size.x,
         size.y,
         window.physical_width(),
@@ -263,6 +311,7 @@ impl Plugin for WorldBackdropPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(on_cvar);
         app.init_resource::<RenderScale>()
+            .init_resource::<DynamicScale>()
             .add_systems(Startup, setup_backdrop)
             .add_systems(
                 Update,

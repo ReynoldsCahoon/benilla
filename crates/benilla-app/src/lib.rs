@@ -54,6 +54,8 @@ mod dev;
 #[cfg(feature = "dev")]
 mod devtools;
 mod doodad_events;
+/// The automatic render scale that holds a frame budget.
+mod dynamic_scale;
 mod entities;
 mod field_callbacks;
 mod field_watch;

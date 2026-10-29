@@ -137,6 +137,8 @@ impl PluginGroup for GamePlugins {
             .add(PlayerUiPlugin)
             // After the UI pass: it points that plugin's camera at the world camera.
             .add(WorldBackdropPlugin)
+            // Before CvarPlugin, with the backdrop's scale: its CVars' resource must exist.
+            .add(crate::dynamic_scale::DynamicScalePlugin)
             .add(crate::minimap::MinimapPlugin)
             .add(crate::ui_models::UiModelsPlugin)
             .add(crate::area::AreaPlugin)
