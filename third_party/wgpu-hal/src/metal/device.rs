@@ -635,6 +635,7 @@ impl crate::Device for super::Device {
             state: super::CommandState::default(),
             temp: super::Temp::default(),
             counters: Arc::clone(&self.counters),
+            diag: (alloc::string::String::new(), "fresh"),
         })
     }
 

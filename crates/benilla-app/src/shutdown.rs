@@ -45,6 +45,31 @@ pub(crate) fn on_app_exit(app: &mut App, systems: ScheduleConfigs<ScheduleSystem
     app.add_systems(Last, systems.in_set(OnAppExit))
 }
 
+/// iOS: the process ends once the savers have run. winit ignores an exit there (iOS apps are not
+/// meant to quit themselves), so without this a Quit leaves a frozen window; ending the process
+/// after [`OnAppExit`] returns the player to the home screen with the session saved.
+pub(crate) struct IosExitPlugin;
+
+impl Plugin for IosExitPlugin {
+    fn build(&self, app: &mut App) {
+        if cfg!(target_os = "ios") {
+            app.add_systems(Last, end_process.after(OnAppExit));
+        }
+    }
+}
+
+/// Ends the process with the exit's code, after this frame's savers.
+fn end_process(mut exits: MessageReader<AppExit>) {
+    if let Some(exit) = exits.read().next() {
+        let code = match exit {
+            AppExit::Success => 0,
+            AppExit::Error(code) => i32::from(code.get()),
+        };
+        info!("exit: ending the process ({code}); iOS has no exit for winit to take");
+        std::process::exit(code);
+    }
+}
+
 /// Alt+F4 closes the primary window on Windows and Linux.
 ///
 /// Deviation: the reference leaves it to the OS. Its key arm (`0x42d261`-`0x42d276`) hands Alt+F4

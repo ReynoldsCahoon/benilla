@@ -108,6 +108,8 @@ mod opaque2d;
 /// way out registers through it.
 mod shutdown;
 mod smart_rect;
+/// The on-screen keyboard, on iOS.
+mod soft_keyboard;
 mod sound;
 /// The two talent spell-modifier tables (`SMSG_SET_FLAT_/PCT_SPELL_MODIFIER`) and the read that
 /// puts them on a number.
@@ -442,6 +444,7 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     .add_plugins(benilla_world::mac_quit::MacQuitPlugin)
     // Alt+F4 on Windows and Linux, where a tiling window manager binds nothing to it.
     .add_plugins(shutdown::AltF4Plugin)
+    .add_plugins(shutdown::IosExitPlugin)
     // The engine as one group; `world_plugins.rs` has its load-bearing ordering edges and what it
     // leaves out (`pipe_warm`).
     .add_plugins(benilla_world::world_plugins::WorldPlugins)

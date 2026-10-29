@@ -1578,6 +1578,16 @@ impl UiScript {
             .is_some_and(|h| model.arena.frame(h).is_some_and(|f| f.effective_visible))
     }
 
+    /// The focused EditBox's frame id, as [`Self::mouse_move`] names the frame it hovers; `None` with
+    /// no visible box focused. Host-side only: the iOS on-screen keyboard shows when a tap lands on
+    /// the box that has focus.
+    pub fn focused_editbox_id(&self) -> Option<u32> {
+        let model = self.model_ref();
+        let h = model.focused_editbox?;
+        model.arena.frame(h).filter(|f| f.effective_visible)?;
+        model.frame_to_id.get(&h).copied()
+    }
+
     /// The focused EditBox's name, unfiltered by visibility, unlike [`Self::has_keyboard_focus`].
     /// Host-side only: 1.12's EditBox table has `SetFocus`/`ClearFocus` and no getter.
     pub fn focused_editbox_name(&self) -> Option<String> {

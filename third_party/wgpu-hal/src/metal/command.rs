@@ -210,6 +210,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
         });
 
         self.raw_cmd_buf = Some(raw);
+        self.diag = (alloc::string::String::from(label.unwrap_or("")), "begun");
 
         Ok(())
     }
@@ -225,6 +226,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
             encoder.end_encoding();
         }
         self.raw_cmd_buf = None;
+        self.diag.1 = "discarded";
     }
 
     unsafe fn end_encoding(&mut self) -> Result<super::CommandBuffer, crate::DeviceError> {
@@ -239,9 +241,22 @@ impl crate::CommandEncoder for super::CommandEncoder {
         debug_assert!(self.state.compute.is_none());
         debug_assert!(self.state.pending_timer_queries.is_empty());
 
-        Ok(super::CommandBuffer {
-            raw: self.raw_cmd_buf.take().unwrap(),
-        })
+        // iPad diagnostic: an encoder finished without a command buffer (one discarded, or never
+        // begun) panicked here on the iPad Air 2 entering the world; report it as an error, so
+        // wgpu says what led to it, instead of unwrapping.
+        let Some(raw) = self.raw_cmd_buf.take() else {
+            log::error!(
+                "metal: end_encoding with no command buffer: last begun as {:?}, then {} \
+                 (render pass open: {}, compute: {})",
+                self.diag.0,
+                self.diag.1,
+                self.state.render.is_some(),
+                self.state.compute.is_some()
+            );
+            return Err(crate::DeviceError::Unexpected);
+        };
+        self.diag.1 = "ended";
+        Ok(super::CommandBuffer { raw })
     }
 
     unsafe fn reset_all<I>(&mut self, _cmd_bufs: I)

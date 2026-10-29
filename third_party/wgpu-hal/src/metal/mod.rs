@@ -1040,6 +1040,9 @@ pub struct CommandEncoder {
     state: CommandState,
     temp: Temp,
     counters: Arc<wgt::HalCounters>,
+    /// iPad diagnostic: the label of the last `begin_encoding` and the last lifecycle step
+    /// ("fresh", "begun", "ended", "discarded"), reported if `end_encoding` finds no command buffer.
+    diag: (String, &'static str),
 }
 
 impl fmt::Debug for CommandEncoder {

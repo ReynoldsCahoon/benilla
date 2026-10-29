@@ -158,6 +158,12 @@ pub(crate) fn collect_input_records(
                 }
             }
             WindowEvent::KeyboardInput(ev) => {
+                // iOS: the on-screen keyboard's keys, as keys the walk takes
+                // ([`crate::soft_keyboard::soft_key`]).
+                let soft = cfg!(target_os = "ios")
+                    .then(|| crate::soft_keyboard::soft_key(ev))
+                    .flatten();
+                let ev = soft.as_ref().unwrap_or(ev);
                 if MODIFIER_KEYS.contains(&ev.key_code) {
                     held.retain(|&k| k != ev.key_code);
                     if ev.state == ButtonState::Pressed {
