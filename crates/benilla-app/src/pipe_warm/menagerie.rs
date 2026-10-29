@@ -777,6 +777,8 @@ mod tests {
         // `FfxCombinePipeline` compiles covered the same way (first frame, pre-world, a bake's
         // fixed format; a world view's pair every frame in `prepare_textures`); this mention of
         // its name is what passes it here.
+        // `NameDepthPipeline` (`name_pass`) too: one variant per world-depth sample count,
+        // specialised on the world camera's first frame, which the entry cover always hides.
         let exempt = ["UiGammaPipeline"];
         let own_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let warm_src = std::fs::read_to_string(own_src.join("pipe_warm/mod.rs")).unwrap()
