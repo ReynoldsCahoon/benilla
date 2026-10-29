@@ -71,8 +71,13 @@ struct Translated {
 }
 
 /// One row's matcher: `regex` where the pattern has no word boundary, `fancy_regex` where it has.
+/// Both compile on first use: the set rules out nearly every row before one is asked, and a
+/// compiled row for each of the lists' thousands costs megabytes held all session.
 enum Matcher {
-    Plain(Regex),
+    Plain {
+        exact: String,
+        re: OnceLock<Option<Regex>>,
+    },
     /// Compiled on first use: a `fancy_regex` look-around costs milliseconds to build, and the
     /// set rules out nearly every row before one is asked. The pattern parsed at startup.
     Bounded {
@@ -91,8 +96,13 @@ impl Matcher {
                 })
                 .map_err(|e| e.to_string())
         } else {
-            Regex::new(&t.exact)
-                .map(Matcher::Plain)
+            // Parsed now, so a bad row is still named and skipped at startup (`0x6c94cf`).
+            regex_syntax::Parser::new()
+                .parse(&t.exact)
+                .map(|_| Matcher::Plain {
+                    exact: t.exact.clone(),
+                    re: OnceLock::new(),
+                })
                 .map_err(|e| e.to_string())
         }
     }
@@ -102,7 +112,15 @@ impl Matcher {
     /// as an error from `pcre_exec` does.
     fn find_at(&self, subject: &str, at: usize) -> Option<(usize, usize)> {
         match self {
-            Matcher::Plain(re) => re.find_at(subject, at).map(|m| (m.start(), m.end())),
+            Matcher::Plain { exact, re } => re
+                .get_or_init(|| {
+                    Regex::new(exact)
+                        .inspect_err(|e| warn!("text filter expression {exact:?}: {e}"))
+                        .ok()
+                })
+                .as_ref()?
+                .find_at(subject, at)
+                .map(|m| (m.start(), m.end())),
             Matcher::Bounded { exact, re } => re
                 .get_or_init(|| {
                     fancy_regex::Regex::new(exact)
@@ -180,7 +198,7 @@ impl PatternList {
                 .matches(subject)
                 .iter()
                 .any(|p| match &self.each[p] {
-                    Matcher::Plain(_) => true,
+                    Matcher::Plain { .. } => true,
                     bounded => bounded.is_match(subject),
                 })
     }
