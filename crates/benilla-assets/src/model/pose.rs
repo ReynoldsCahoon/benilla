@@ -72,6 +72,37 @@ impl<T: Animatable + Clone> PoseTrack<T> {
     pub fn is_empty(&self) -> bool {
         self.times.is_empty()
     }
+
+    /// The Bevy curve this track's keys made (`model::keyframe_curve`): one key a flat curve over
+    /// `[0, duration]`, more keys their normalized run, which the constructor re-normalizes to
+    /// itself. `None` for an empty track.
+    pub fn curve(
+        &self,
+        duration: f32,
+    ) -> Option<bevy::animation::animation_curves::AnimatableKeyframeCurve<T>> {
+        use bevy::animation::animation_curves::AnimatableKeyframeCurve;
+        match self.times.len() {
+            0 => None,
+            1 => AnimatableKeyframeCurve::new([
+                (0.0, self.values[0].clone()),
+                (duration.max(1e-3), self.values[0].clone()),
+            ])
+            .ok(),
+            _ => AnimatableKeyframeCurve::new(
+                self.times.iter().copied().zip(self.values.iter().cloned()),
+            )
+            .ok(),
+        }
+    }
+
+    /// Where [`Self::curve`]'s domain ends, which is what it adds to a clip's duration.
+    pub fn curve_end(&self, duration: f32) -> Option<f32> {
+        match self.times.len() {
+            0 => None,
+            1 => Some(duration.max(1e-3)),
+            _ => self.times.last().copied(),
+        }
+    }
 }
 
 /// One bone's channels in one clip; a bone with no channel is left out.
@@ -87,6 +118,8 @@ pub struct PoseBone {
 #[derive(Clone, Default)]
 pub struct PoseClip {
     pub bones: Vec<PoseBone>,
+    /// The sequence's authored length in seconds, which a single-key channel's flat curve spans.
+    pub duration: f32,
 }
 
 impl PoseClip {

@@ -663,6 +663,7 @@ impl Plugin for EntitiesPlugin {
         .init_resource::<corpse::BonesModels>()
         .init_resource::<spell_fx::SpellFx>()
         .init_resource::<spell_fx::FxTintAnims>()
+        .init_resource::<spell_fx::CurvedGraphs>()
         // The per-caster pending-projectile queues (the client's `unit+0xac` lists).
         .init_resource::<missile::PendingMissiles>()
         .add_message::<MissileSound>()
@@ -734,8 +735,9 @@ impl Plugin for EntitiesPlugin {
                     attach_ground_fx_models,
                     spell_fx::tend_world_plants,
                 ),
-                // After attach, so a tint clone's first drawn frame is on its own clock.
-                spell_fx::tick_fx_tint,
+                // After attach: a tint clone's first drawn frame is on its own clock, and an
+                // armed effect's curved graph is in before animation advances this frame.
+                (spell_fx::tick_fx_tint, spell_fx::resolve_curved_graphs),
                 // Event keyframes and completion callbacks, after attach so a just-spawned
                 // instance's first window `[0, cur]` fires this frame.
                 (spell_fx::fire_fx_anim_events, spell_fx::advance_fx_anim),

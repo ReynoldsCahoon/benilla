@@ -426,20 +426,27 @@ fn keyframe_curve<T: Animatable + Clone>(
     }
 }
 
-/// Build one sequence's [`AnimationClip`] and its [`PoseClip`] in one walk. The M2 translation
+/// Build one sequence's [`PoseClip`] and its [`AnimationClip`] in one walk. The M2 translation
 /// track is a delta on the rest offset, a rotation converts as `r·q·r⁻¹`, and scale permutes axes.
-/// A sequence that poses no bone still gets a clip of its own duration, since the clip is the
-/// instance's sequence clock; the flag says whether any channel made a curve for a rig to pose.
+///
+/// The clip carries no curves: benilla's evaluator (`benilla_world::rig_anim::pose`) poses every
+/// rig from the [`PoseClip`], and the clip is only the instance's sequence clock. Its duration is
+/// the one the curves would have set, the latest domain end ([`PoseTrack::curve_end`]), so a clock
+/// runs as before; a sequence that poses no bone keeps its own duration. A model Bevy animates
+/// itself (a spell effect's `AnimatedBy` joints) takes the curves from [`curved_graph`]. The flag
+/// says whether any channel is keyed, for a rig to pose.
 pub(crate) fn build_animation_clip(
     anim: &ModelAnimation,
     skeleton: &ModelSkeleton,
 ) -> (AnimationClip, PoseClip, bool) {
     let r = wow_to_bevy_quat();
     let mut clip = AnimationClip::default();
-    let mut pose = PoseClip::default();
-    let mut any = false;
+    let mut pose = PoseClip {
+        duration: anim.duration,
+        ..default()
+    };
+    let mut end: Option<f32> = None;
     for bk in &anim.bones {
-        let target = bone_target_id(bk.bone);
         let rest = skeleton
             .joints
             .get(bk.bone as usize)
@@ -449,14 +456,6 @@ pub(crate) fn build_animation_clip(
             .iter()
             .map(|(t, v)| (*t, rest + wow_to_bevy(*v)))
             .collect();
-        let pose_trans = PoseTrack::new(&trans);
-        if let Some(c) = keyframe_curve(anim.duration, trans) {
-            clip.add_curve_to_target(
-                target,
-                AnimatableCurve::new(animated_field!(Transform::translation), c),
-            );
-            any = true;
-        }
         let rot: Vec<_> = bk
             .rotation
             .iter()
@@ -467,39 +466,97 @@ pub(crate) fn build_animation_clip(
                 )
             })
             .collect();
-        let pose_rot = PoseTrack::new(&rot);
-        if let Some(c) = keyframe_curve(anim.duration, rot) {
-            clip.add_curve_to_target(
-                target,
-                AnimatableCurve::new(animated_field!(Transform::rotation), c),
-            );
-            any = true;
-        }
         let scale: Vec<_> = bk
             .scale
             .iter()
             .map(|(t, s)| (*t, Vec3::new(s[1], s[2], s[0])))
             .collect();
-        let pose_scale = PoseTrack::new(&scale);
-        if let Some(c) = keyframe_curve(anim.duration, scale) {
+        let bone = PoseBone {
+            bone: bk.bone,
+            translation: PoseTrack::new(&trans),
+            rotation: PoseTrack::new(&rot),
+            scale: PoseTrack::new(&scale),
+        };
+        for e in [
+            bone.translation.curve_end(anim.duration),
+            bone.rotation.curve_end(anim.duration),
+            bone.scale.curve_end(anim.duration),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            end = Some(end.map_or(e, |m: f32| m.max(e)));
+        }
+        pose.push(bone);
+    }
+    // Bevy takes a clip's duration from its curves: the latest end, else (no curve) the clock
+    // would never leave 0.
+    clip.set_duration(end.unwrap_or(anim.duration.max(1e-3)));
+    (clip, pose, end.is_some())
+}
+
+/// A [`PoseClip`] as the [`AnimationClip`] with curves the loader once built, for a model Bevy's
+/// `animate_targets` poses (a spell effect's `AnimatedBy` joints).
+pub fn curved_clip(pose: &PoseClip) -> AnimationClip {
+    let mut clip = AnimationClip::default();
+    for bone in &pose.bones {
+        let target = bone_target_id(bone.bone);
+        if let Some(c) = bone.translation.curve(pose.duration) {
+            clip.add_curve_to_target(
+                target,
+                AnimatableCurve::new(animated_field!(Transform::translation), c),
+            );
+        }
+        if let Some(c) = bone.rotation.curve(pose.duration) {
+            clip.add_curve_to_target(
+                target,
+                AnimatableCurve::new(animated_field!(Transform::rotation), c),
+            );
+        }
+        if let Some(c) = bone.scale.curve(pose.duration) {
             clip.add_curve_to_target(
                 target,
                 AnimatableCurve::new(animated_field!(Transform::scale), c),
             );
-            any = true;
         }
-        pose.push(PoseBone {
-            bone: bk.bone,
-            translation: pose_trans,
-            rotation: pose_rot,
-            scale: pose_scale,
-        });
     }
-    if !any {
-        // Bevy takes a clip's duration from its curves; with none, the clock would never leave 0.
-        clip.set_duration(anim.duration.max(1e-3));
+    // A clip that poses no bone: the loader's clock length.
+    if pose.bones.is_empty() {
+        clip.set_duration(pose.duration.max(1e-3));
     }
-    (clip, pose, any)
+    clip
+}
+
+/// A model's graph with curved clips in place of its clock-only ones, node for node, so every
+/// [`AnimClip`] node index still names the same sequence. Each distinct clip is rebuilt once from
+/// the node's [`PoseClip`]; a node the pose source does not know (the grip, which keeps its
+/// curves) keeps its clip.
+pub fn curved_graph(
+    graph: &bevy::animation::graph::AnimationGraph,
+    pose: &PoseSource,
+    clips: &mut Assets<AnimationClip>,
+) -> bevy::animation::graph::AnimationGraph {
+    use bevy::animation::graph::{AnimationNodeIndex, AnimationNodeType};
+    let mut out = graph.clone();
+    let mut rebuilt: std::collections::HashMap<u32, Handle<AnimationClip>> = Default::default();
+    let nodes: Vec<AnimationNodeIndex> = out.graph.node_indices().collect();
+    for node in nodes {
+        let Some(pnode) = pose.node(node) else {
+            continue;
+        };
+        let Some(pclip) = pose.clips.get(pnode.clip as usize) else {
+            continue;
+        };
+        if let Some(weight) = out.graph.node_weight_mut(node) {
+            if let AnimationNodeType::Clip(handle) = &mut weight.node_type {
+                *handle = rebuilt
+                    .entry(pnode.clip)
+                    .or_insert_with(|| clips.add(curved_clip(pclip)))
+                    .clone();
+            }
+        }
+    }
+    out
 }
 
 /// The weapon-grip overlay: one constant rotation per finger bone, played masked to one hand.
@@ -808,6 +865,42 @@ mod tests {
         };
         let (_, _, poses_bones) = build_animation_clip(&sequence(1.0, vec![moving]), &skeleton);
         assert!(poses_bones, "a keyed track ⇒ a real pose");
+    }
+
+    /// The clock-only clip runs as long as its curves would have: the latest key past the
+    /// sequence's own length wins, a single key spans the length, and the curved twin an effect
+    /// plays agrees and keys every bone.
+    #[test]
+    fn a_clock_clip_keeps_the_duration_its_curves_would_set() {
+        let skeleton = ModelSkeleton {
+            joints: Vec::new(),
+            spine_bone: None,
+            head_bone: None,
+        };
+        let late = benilla_formats::BoneKeys {
+            bone: 0,
+            translation: vec![(0.0, [0.0; 3]), (2.5, [0.0, 0.0, 1.0])],
+            rotation: Vec::new(),
+            scale: Vec::new(),
+        };
+        let single = benilla_formats::BoneKeys {
+            bone: 1,
+            translation: Vec::new(),
+            rotation: vec![(0.3, [0.0, 0.0, 0.0, 1.0])],
+            scale: Vec::new(),
+        };
+        let (clip, pose, poses_bones) =
+            build_animation_clip(&sequence(2.0, vec![late, single.clone()]), &skeleton);
+        assert!(poses_bones);
+        assert_eq!(clip.curves().len(), 0, "the shared clip is a clock only");
+        assert_eq!(clip.duration(), 2.5, "the late key outruns the sequence length");
+        let curved = curved_clip(&pose);
+        assert_eq!(curved.duration(), clip.duration());
+        assert_eq!(curved.curves().len(), 2, "both bones keyed in the twin");
+        // A lone single-key channel spans the sequence's own length.
+        let (clip, pose, _) = build_animation_clip(&sequence(2.0, vec![single]), &skeleton);
+        assert_eq!(clip.duration(), 2.0);
+        assert_eq!(curved_clip(&pose).duration(), 2.0);
     }
 
     /// The eye-blink shape from a real eyelid track: open, a fast ramp shut, open, repeating.

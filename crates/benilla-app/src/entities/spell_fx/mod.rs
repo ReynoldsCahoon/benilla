@@ -397,6 +397,48 @@ pub(crate) fn attach_effect_visuals(
     true
 }
 
+/// An armed effect root waiting for its model's curved graph.
+#[derive(Component)]
+pub(crate) struct CurvedGraphPending {
+    graph: Handle<AnimationGraph>,
+    pose: std::sync::Arc<benilla_assets::PoseSource>,
+}
+
+/// Each effect model's graph with curves (`benilla_assets::curved_graph`), by the shared graph it
+/// was built from. A model's clips are clocks only, since benilla's evaluator poses rigs from the
+/// pose bake; an effect's joints are Bevy's `animate_targets`' to pose, so it plays a curved twin.
+#[derive(Resource, Default)]
+pub(crate) struct CurvedGraphs(HashMap<AssetId<AnimationGraph>, Handle<AnimationGraph>>);
+
+/// Give each pending effect root its model's curved graph, built once per model; a graph still
+/// loading waits for a later frame.
+pub(crate) fn resolve_curved_graphs(
+    mut commands: Commands,
+    pending: Query<(Entity, &CurvedGraphPending)>,
+    mut cache: ResMut<CurvedGraphs>,
+    mut graphs: ResMut<Assets<AnimationGraph>>,
+    mut clips: ResMut<Assets<bevy::animation::AnimationClip>>,
+) {
+    for (root, p) in &pending {
+        let curved = match cache.0.get(&p.graph.id()) {
+            Some(h) => h.clone(),
+            None => {
+                let Some(graph) = graphs.get(&p.graph) else {
+                    continue;
+                };
+                let built = benilla_assets::curved_graph(graph, &p.pose, &mut clips);
+                let h = graphs.add(built);
+                cache.0.insert(p.graph.id(), h.clone());
+                h
+            }
+        };
+        commands
+            .entity(root)
+            .remove::<CurvedGraphPending>()
+            .insert(AnimationGraphHandle(curved));
+    }
+}
+
 /// Arm an effect instance's rig under `root`, returning the joints and whether a player was armed.
 /// The clip plays even with constant keys, unlike the doodad gate (`ModelAnimations::first_seq`),
 /// because emitters read the posed joints.
@@ -423,9 +465,15 @@ pub(super) fn arm_effect_rig(
             let mut player = AnimationPlayer::default();
             // The stage owns the repeat policy (`0x60ed00` repeats a clamping precast).
             let life = FxAnimLife::arm(&mut player, clip, stage.unwrap_or(FxStage::OneShot));
-            commands
-                .entity(root)
-                .insert((player, AnimationGraphHandle(anims.graph.clone())));
+            // Bevy animates these joints (`AnimatedBy` below), so the graph needs the curves the
+            // shared one leaves out ([`resolve_curved_graphs`]).
+            commands.entity(root).insert((
+                player,
+                CurvedGraphPending {
+                    graph: anims.graph.clone(),
+                    pose: anims.pose.clone(),
+                },
+            ));
             // The lifecycle watcher, on a `CEffect` only.
             if stage.is_some() {
                 commands.entity(root).insert((life, anims.clone()));
