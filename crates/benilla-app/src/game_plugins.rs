@@ -241,6 +241,8 @@ impl PluginGroup for GamePlugins {
             .add(UiChatPlugin)
             .add(UiLayoutPlugin)
             .add(crate::screenshot::ScreenshotPlugin)
+            // On iOS, touches as the mouse; a no-op elsewhere.
+            .add(crate::touch_mouse::TouchMousePlugin)
             // Last: it orders every system the plugins added, the probes' too.
             .add(crate::vm_pass::VmPassPlugin)
     }

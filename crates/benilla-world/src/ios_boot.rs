@@ -7,6 +7,9 @@
 //!   in [`crate::boot::tuned_default_plugins`].
 //! - One buffer per mesh, so every mesh draw starts at vertex 0: family 2 has no base-vertex draws.
 //!   (Base instance is emulated in the vendored wgpu-hal and naga.)
+//! - The window counts as focused: winit never reports focus on iOS, and benilla mutes audio and
+//!   gates input on an unfocused window. Written without marking the window changed (bevy_winit
+//!   would ask winit to focus it, which iOS has no call for), and announced once (`WindowFocused`).
 //! - A frame whenever the last is done, paced by vsync. Bevy's default runs iOS as
 //!   `ControlFlow::Wait` plus a redraw request UIKit never answers for a Metal-backed view, so frames
 //!   only come when a touch wakes the loop; reactive with no wait runs as `ControlFlow::Poll`.
@@ -47,6 +50,7 @@ impl Plugin for IosBootPlugin {
             focused_mode: every_frame,
             unfocused_mode: every_frame,
         });
+        app.add_systems(PreUpdate, hold_focus);
         app.sub_app_mut(RenderApp)
             .insert_resource(GpuPreprocessingSupport {
                 max_supported_mode: GpuPreprocessingMode::None,
@@ -85,6 +89,22 @@ impl Plugin for IosBootPlugin {
                     )
                         .in_set(RenderSystems::Render),
                 );
+        }
+    }
+}
+
+/// Keeps the window focused; see the module docs.
+fn hold_focus(
+    mut windows: Query<(Entity, &mut Window)>,
+    mut focused: MessageWriter<bevy::window::WindowFocused>,
+) {
+    for (window, mut w) in &mut windows {
+        if !w.focused {
+            w.bypass_change_detection().focused = true;
+            focused.write(bevy::window::WindowFocused {
+                window,
+                focused: true,
+            });
         }
     }
 }

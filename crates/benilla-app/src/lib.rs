@@ -119,6 +119,8 @@ mod target;
 pub(crate) mod test_support;
 mod text_filter;
 mod textinput;
+/// Touch as the mouse, on iOS.
+mod touch_mouse;
 mod transport;
 mod tutorial;
 mod ui_action;
