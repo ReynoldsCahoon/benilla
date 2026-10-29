@@ -43,7 +43,10 @@ mod blp;
 pub use blp::{BlpImageLoader, BlpLoaderSettings, BlpVariant};
 /// Whether this GPU takes WoW's stored DXT blocks, and the chain form that follows.
 mod gpu_blp;
-pub use gpu_blp::{bc_supported, for_upload, publish_bc_support, BlpGpuSupportPlugin, UploadChain};
+pub use gpu_blp::{
+    base_mip, bc_supported, for_upload, publish_base_mip, publish_bc_support, BlpGpuSupportPlugin,
+    UploadChain,
+};
 mod tex_filter;
 pub use tex_filter::{publish_tex_filter, tex_filter, TexFilterSetting, ANISO_RANGE};
 mod m2;

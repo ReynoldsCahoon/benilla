@@ -376,6 +376,9 @@ pub(crate) fn on_cvar(
         // `anisotropic` is refused outside `[1, 16]` before it reaches here (`0x689110`,
         // `check_anisotropic`); the clamp covers a saved value, which the file read does not check.
         "trilinear" => tex_filter.trilinear = ev.flag(),
+        // The registry refuses a level outside [0, 1] (`check_base_mip`); the clamp covers a
+        // saved value, which the file read does not check.
+        "basemip" => benilla_assets::publish_base_mip(v.clamp(0.0, 1.0) as u8),
         "anisotropic" => {
             tex_filter.aniso = (v as u32).clamp(
                 *benilla_assets::ANISO_RANGE.start(),

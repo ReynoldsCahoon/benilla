@@ -3,7 +3,9 @@
 //! formats `0x58a230`, per-level upload formats `0x59f270`). They can when the device accepts BC
 //! ([`bc_supported`]) and mip 0 is whole 4x4 blocks; otherwise the chain decodes to `Rgba8Unorm`.
 //! Both the async loader ([`crate::blp`]) and `WorldAssets` ([`crate::world_assets`]) ask here.
+//! The same gate drops the top `baseMip` levels of a chain ([`publish_base_mip`]).
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 use benilla_formats::{BlpMipChain, BlpTexels};
@@ -54,6 +56,37 @@ impl Plugin for BlpGpuSupportPlugin {
     }
 }
 
+static BASE_MIP: AtomicU8 = AtomicU8::new(0);
+
+/// Publish the `baseMip` CVar, the top mip levels every texture with a chain skips: the device's
+/// skip count (`0x589bf0` stores it at `+0x31c`). A `static`, as [`publish_bc_support`], because
+/// the async loader has no world access.
+///
+/// Deviation: a change applies to the textures loaded after it; the reference recreates every
+/// device texture at once (`0x592050`). Terrain's layer arrays (`crate::terrain`) and the liquid
+/// frame arrays (`crate::world_assets::liquid_frame_array`) do not skip yet.
+pub fn publish_base_mip(levels: u8) {
+    BASE_MIP.store(levels, Ordering::Relaxed);
+}
+
+/// The published `baseMip`; 0, the reference's default, until [`publish_base_mip`].
+pub fn base_mip() -> u8 {
+    BASE_MIP.load(Ordering::Relaxed)
+}
+
+/// The chain without its top `skip` levels, as the device upload builds it (`0x5a0880`):
+/// `first = min(skip, levels - 1)`, the texture made at the sides shifted right by `first` and
+/// chain entry `first` uploaded as level 0. A chain of one level is untouched.
+fn skip_top_levels(mut chain: BlpMipChain, skip: u8) -> BlpMipChain {
+    let first = usize::from(skip).min(chain.mips.len().saturating_sub(1));
+    if first > 0 {
+        chain.mips.drain(..first);
+        chain.width = (chain.width >> first).max(1);
+        chain.height = (chain.height >> first).max(1);
+    }
+    chain
+}
+
 fn uploadable_as_blocks(chain: &BlpMipChain) -> bool {
     chain.texels.is_block_compressed()
         && bc_supported()
@@ -69,8 +102,10 @@ pub struct UploadChain {
 }
 
 /// A BLP's authored mip chain in the best form this GPU takes, with its format: blocks if it can,
-/// pixels if not. Always non-sRGB, so the GPU never linearizes albedo on sample.
+/// pixels if not, and without the top [`base_mip`] levels. Always non-sRGB, so the GPU never
+/// linearizes albedo on sample.
 pub fn for_upload(chain: BlpMipChain) -> UploadChain {
+    let chain = skip_top_levels(chain, base_mip());
     if uploadable_as_blocks(&chain) {
         let format = match chain.texels {
             BlpTexels::Bc1 => TextureFormat::Bc1RgbaUnorm,
@@ -100,6 +135,39 @@ mod tests {
             texels,
             mips,
         }
+    }
+
+    /// A chain of `levels` levels from `size²`, each level's bytes filled with its index.
+    fn leveled(size: u32, levels: u32) -> BlpMipChain {
+        BlpMipChain {
+            width: size,
+            height: size,
+            texels: BlpTexels::Rgba8Unorm,
+            mips: (0..levels)
+                .map(|i| vec![i as u8; ((size >> i).max(1) * (size >> i).max(1) * 4) as usize])
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_skip_of_one_makes_level_one_the_top() {
+        let c = skip_top_levels(leveled(64, 7), 1);
+        assert_eq!((c.width, c.height, c.mips.len()), (32, 32, 6));
+        assert_eq!(c.mips[0][0], 1, "chain entry 1 is the new level 0");
+    }
+
+    #[test]
+    fn a_single_level_and_a_zero_skip_are_untouched() {
+        let one = skip_top_levels(leveled(64, 1), 1);
+        assert_eq!((one.width, one.mips.len()), (64, 1));
+        let zero = skip_top_levels(leveled(64, 7), 0);
+        assert_eq!((zero.width, zero.mips.len()), (64, 7));
+    }
+
+    #[test]
+    fn the_skip_never_drops_the_last_level() {
+        let c = skip_top_levels(leveled(4, 2), 5);
+        assert_eq!((c.width, c.height, c.mips.len()), (2, 2, 1));
     }
 
     #[test]
