@@ -15,10 +15,10 @@
 //! diagonal-FOV projection ([`WowPortraitProjection`]); a camera-less model falls back to
 //! [`frame`]. The bake is a fresh instance frozen at Stand (`0x707400`, `0x7121a0`).
 //!
-//! Deviation: the round portraits bake at 256², not 64², because the 64² still is a resolution
-//! limit, not a look; and under benilla's studio light (`light::BoothLight`), the chosen portrait
-//! look, in place of the reference's own fixed rig (`0x525b10`, pushed at `0x52562e`: a 0.45 grey
-//! ambient and a white directional).
+//! Deviation: the round portraits bake at 256² (128² on iOS), not 64², because the 64² still is a
+//! resolution limit, not a look; and under benilla's studio light (`light::BoothLight`), the chosen
+//! portrait look, in place of the reference's own fixed rig (`0x525b10`, pushed at `0x52562e`: a
+//! 0.45 grey ambient and a white directional).
 //!
 //! The frozen Stand phase is t=0; the reference's sampling clock is untraced.
 //!
@@ -152,7 +152,12 @@ const _: () = assert!(
 );
 /// The round portraits' bake size, square (the reference bakes 64²); `ui_quad.wgsl`'s `circular`
 /// cuts the circle at draw time.
+#[cfg(not(target_os = "ios"))]
 const PORTRAIT_SIZE: u32 = 256;
+/// iOS: 128², a quarter of the texels; on the iPad Air 2 it reads as sharp as 256² and plainly
+/// better than 64².
+#[cfg(target_os = "ios")]
+const PORTRAIT_SIZE: u32 = 128;
 /// Stamped by the attach path on every unit-model part child: the part's skinned and static
 /// bind-pose mesh twins and its steady exterior material, which a booth mirrors.
 #[derive(Component)]
