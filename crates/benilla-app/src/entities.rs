@@ -535,8 +535,63 @@ fn evict_display_caches(
     bones.0.clear();
 }
 
-/// Expire composited skins by distance within a map. The display-id model caches are not swept:
-/// they key on ids, not places, so the catalogs bound them.
+/// How long a creature or GameObject display may go unused before [`update_display_models`] drops
+/// its cache entry: longer than a despawn and respawn or a step out of view and back, so neither
+/// rebuilds the model. A drawn entity holds its own part handles; an entry only feeds a new one.
+const DISPLAY_GRACE: f32 = 60.0;
+
+/// [`DISPLAY_GRACE`], or `WOW_DISPLAY_GRACE` seconds: a test knob, so a route run's end census
+/// need not wait out the full grace before it reads what was freed.
+fn display_grace() -> f32 {
+    static GRACE: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
+        std::env::var("WOW_DISPLAY_GRACE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DISPLAY_GRACE)
+    });
+    *GRACE
+}
+
+/// When each display id was last in use, by cache.
+#[derive(Default)]
+struct DisplayUse {
+    units: HashMap<u32, f32>,
+    gos: HashMap<u32, f32>,
+    next_sweep: f32,
+}
+
+/// Drop the entries of a display cache whose id `seen` has not stamped within [`DISPLAY_GRACE`];
+/// an entry it has never stamped (inserted by a test) starts its grace now. The cache reads as
+/// changed only when something drops: `resolve_equipment`'s skip gate watches `Creatures`.
+fn sweep_display_cache<C, K: Copy + Eq + std::hash::Hash>(
+    mut cache: Mut<C>,
+    models: fn(&mut C) -> &mut HashMap<K, DisplayModel>,
+    seen: &mut HashMap<K, f32>,
+    now: f32,
+    what: &str,
+) {
+    let stale: Vec<K> = models(cache.bypass_change_detection())
+        .keys()
+        .copied()
+        .filter(|id| now - *seen.entry(*id).or_insert(now) > display_grace())
+        .collect();
+    seen.retain(|_, at| now - *at <= display_grace());
+    if stale.is_empty() {
+        return;
+    }
+    let models = models(&mut cache);
+    for id in &stale {
+        models.remove(id);
+    }
+    info!(
+        "{} unused {what} displays evicted, {} cached",
+        stale.len(),
+        models.len()
+    );
+}
+
+/// Expire composited skins by distance within a map. The display-id model caches sweep by use
+/// instead, in [`update_display_models`].
 fn scope_entity_art(
     mut scope: benilla_world::art_scope::ArtScope,
     mut composites: ResMut<SkinComposites>,
@@ -727,7 +782,8 @@ impl Plugin for EntitiesPlugin {
                 // A WMO GameObject's doodad props, spawned as each M2 lands.
                 resolve_wmo_gameobject_props,
                 spawn_wmo_gameobject_props,
-                attach_held_items,
+                // The item cache sweeps once the frame's attaches have read it.
+                (attach_held_items, equipment::sweep_item_displays).chain(),
                 // Spell-kit effect models and held-item glows, after the item roots exist.
                 (attach_item_glows, attach_spell_fx),
                 (
@@ -1047,11 +1103,14 @@ fn update_display_models(
     mut anim_table: ResMut<benilla_world::mat_anim_table::MatAnimTable>,
     mut bones: ResMut<corpse::BonesModels>,
     // The glue screens' body display, wanted with no wire entity.
-    glue_preview: Option<Res<crate::portrait::GluePreview>>,
-    char_create: Option<Res<CharCreate>>,
+    (glue_preview, char_create): (
+        Option<Res<crate::portrait::GluePreview>>,
+        Option<Res<CharCreate>>,
+    ),
     // The character panes' creature displays (`SetPetStablePaperdoll`, `0x4cb870` → `0x505a70`),
     // with no wire entity.
     pane_displays: Option<Res<crate::portrait::PaneDisplays>>,
+    (time, mut used): (Res<Time>, Local<DisplayUse>),
 ) {
     if !mats.ready() {
         return; // no lighting yet → no materials to build
@@ -1105,6 +1164,31 @@ fn update_display_models(
     // A character pane's creature display, a plain creature too; a repeat is free.
     for &display in pane_displays.iter().flat_map(|d| &d.0) {
         actives.push((EntityKind::Unit, display));
+    }
+
+    // `actives` is every creature and GameObject display in use and these caches' only creator,
+    // so an entry it has not named for `DISPLAY_GRACE` serves nothing.
+    let now = time.elapsed_secs();
+    for &(kind, disp) in &actives {
+        match kind {
+            EntityKind::Unit | EntityKind::Player | EntityKind::Corpse => {
+                used.units.insert(disp, now);
+            }
+            EntityKind::GameObject => {
+                used.gos.insert(disp, now);
+            }
+            _ => {}
+        }
+    }
+    if now >= used.next_sweep {
+        used.next_sweep = now + 1.0;
+        let DisplayUse { units, gos, .. } = &mut *used;
+        if let Some(cr) = creatures.as_mut() {
+            sweep_display_cache(cr.reborrow(), |c| &mut c.models, units, now, "creature");
+        }
+        if let Some(go) = gameobjects.as_mut() {
+            sweep_display_cache(go.reborrow(), |g| &mut g.models, gos, now, "gameobject");
+        }
     }
 
     for (kind, disp) in actives {
@@ -1450,6 +1534,36 @@ mod display_mirror_tests {
         };
         c.models.insert(display_id, dm);
         c
+    }
+
+    /// An unused display drops once its grace runs out, a used one stays, and a sweep that drops
+    /// nothing leaves `Creatures` unchanged for `resolve_equipment`'s gate.
+    #[test]
+    fn an_unused_display_drops_after_its_grace_and_a_quiet_sweep_changes_nothing() {
+        let mut world = World::new();
+        let mut c = creatures(7, crate::entities::display::empty_shell());
+        c.models.insert(8, crate::entities::display::empty_shell());
+        world.insert_resource(c);
+        let mut seen = HashMap::from([(8, 0.0)]);
+        let sweep = |world: &mut World, seen: &mut HashMap<u32, f32>, now: f32| {
+            world.clear_trackers();
+            let cache = world.resource_mut::<Creatures>();
+            sweep_display_cache(cache, |c| &mut c.models, seen, now, "creature");
+            world.is_resource_changed::<Creatures>()
+        };
+
+        // Display 7 was never stamped: its grace starts at the first sweep.
+        assert!(!sweep(&mut world, &mut seen, 10.0));
+        seen.insert(8, 60.0);
+        assert!(!sweep(&mut world, &mut seen, 69.0));
+        assert!(sweep(&mut world, &mut seen, 71.0));
+        let left: Vec<u32> = world
+            .resource::<Creatures>()
+            .models
+            .keys()
+            .copied()
+            .collect();
+        assert_eq!(left, vec![8]);
     }
 
     #[test]

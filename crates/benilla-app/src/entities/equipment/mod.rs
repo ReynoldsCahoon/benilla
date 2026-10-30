@@ -296,6 +296,36 @@ impl DisarmFreeze {
     }
 }
 
+/// When each item model was last worn or held, for [`sweep_item_displays`].
+#[derive(Default)]
+pub(crate) struct ItemUse {
+    seen: HashMap<(u32, ItemModelKind), f32>,
+    next_sweep: f32,
+}
+
+/// Drop the item models no unit has shown for `DISPLAY_GRACE`: every worn or held model is in some
+/// unit's or corpse's [`HeldItems`], and a preview ensures its models before each read, so it
+/// rebuilds an evicted one itself. A drawn item holds its own part handles.
+pub(crate) fn sweep_item_displays(
+    time: Res<Time>,
+    wearers: Query<&HeldItems>,
+    held: Option<ResMut<ItemDisplays>>,
+    mut used: Local<ItemUse>,
+) {
+    let now = time.elapsed_secs();
+    for slot in wearers.iter().flat_map(|h| h.slots.iter().flatten()) {
+        used.seen.insert((slot.display, slot.kind), now);
+    }
+    let Some(held) = held else {
+        return;
+    };
+    if now < used.next_sweep {
+        return;
+    }
+    used.next_sweep = now + 1.0;
+    super::sweep_display_cache(held.into(), |h| &mut h.models, &mut used.seen, now, "item");
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct HeldSlot {
     display: u32,
