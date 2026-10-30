@@ -20,6 +20,13 @@ const SWEEP_SECS: f32 = 1.0;
 /// Five ADT tiles (2667 yd), the smallest round tile multiple clear of [`radius_floor`].
 const DEFAULT_RADIUS_YD: f32 = 5.0 * TILE_SIZE;
 
+/// The radius of the caches whose entries serve units and GameObjects ([`ArtSlot::entity_scoped`]),
+/// which the server spawns and despawns by its visibility range (cmangos: 100 yd on continents,
+/// 170 in instances), not the tile streamer: past it no unit the entry served is still in view, and
+/// a dropped entry only costs a rebuild when that model shows again. A city's passers-by otherwise
+/// stay resident for the whole map, a material and its textures each.
+const ENTITY_RADIUS_YD: f32 = 250.0;
+
 /// The far corner of the widest tile block the residency window keeps (at the `farclip` clamp's
 /// maximum), plus a tile: a stamp is where the viewer stood, so no smaller radius is safe.
 fn radius_floor() -> f32 {
@@ -66,6 +73,12 @@ pub enum ArtSlot {
 }
 
 impl ArtSlot {
+    /// Whether the cache serves units and GameObjects, swept at [`ENTITY_RADIUS_YD`]: the
+    /// authored-batch materials and the composited skins. The rest serve tile-streamed art.
+    pub(crate) fn entity_scoped(self) -> bool {
+        matches!(self, ArtSlot::ModelMats | ArtSlot::Skins)
+    }
+
     pub const ALL: [ArtSlot; 6] = [
         ArtSlot::PlaceMats,
         ArtSlot::ModelMats,
@@ -150,9 +163,13 @@ pub struct ArtScope<'w> {
 impl ArtScope<'_> {
     /// Sweeps one cache on sweep frames and records its residency.
     pub fn apply<K: Eq + Hash, V>(&mut self, cache: &mut SpatialCache<K, V>, slot: ArtSlot) {
+        let radius = match slot.entity_scoped() {
+            true => self.state.radius.min(ENTITY_RADIUS_YD),
+            false => self.state.radius,
+        };
         let dropped = match self.state.focus {
-            Some(focus) if self.state.due && self.state.radius > 0.0 => {
-                cache.scope(focus, self.state.radius, self.state.now)
+            Some(focus) if self.state.due && radius > 0.0 => {
+                cache.scope(focus, radius, self.state.now)
             }
             _ => 0,
         };
@@ -163,7 +180,7 @@ impl ArtScope<'_> {
             debug!(
                 "art-scope: dropped {dropped} {} entries beyond {:.0} yd ({} live)",
                 slot.column(),
-                self.state.radius,
+                radius,
                 cache.len()
             );
         }
@@ -215,6 +232,18 @@ impl Plugin for ArtScopePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The unit and GameObject caches sweep inside the server's widest non-battleground visibility
+    /// plus margin; the tile-streamed ones keep the streamer's floor.
+    #[test]
+    fn entity_caches_sweep_at_the_entity_radius() {
+        let entity: Vec<ArtSlot> = ArtSlot::ALL
+            .into_iter()
+            .filter(|s| s.entity_scoped())
+            .collect();
+        assert_eq!(entity, [ArtSlot::ModelMats, ArtSlot::Skins]);
+        assert!(ENTITY_RADIUS_YD > 170.0 && ENTITY_RADIUS_YD < radius_floor());
+    }
 
     #[test]
     fn the_radius_clears_the_streamers_own_reach() {
