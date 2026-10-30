@@ -13,6 +13,10 @@ workspace = true
 default = ["dev"]
 # The asset, format and world crates default `dev` on, so they come in without it, forwarded here.
 dev = ["benilla-assets/dev", "benilla-formats/dev", "benilla-world/dev", "dep:bevy_egui"]
+# The route walker (`WOW_PROBE_ROUTE`) alone, without the rest of `dev`: the iPad's player build
+# walks the memory test routes with it (`benilla-ios`'s feature of the same name), and the other
+# instruments would skew the footprint it measures.
+route-probe = []
 tracy = ["bevy/trace_tracy"]
 # Writes every system's per-run span to `trace-<ts>.json` in the cwd.
 trace_chrome = ["bevy/trace_chrome"]

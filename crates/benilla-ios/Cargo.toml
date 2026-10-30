@@ -14,6 +14,11 @@ crate-type = ["staticlib"]
 test = false
 doctest = false
 
+[features]
+# The route walker in the player build, for the memory test walks (`BENILLA_IOS_FEATURES=route-probe`
+# through `ios/build-rust.sh`); off in a shipped build.
+route-probe = ["benilla-app/route-probe"]
+
 [dependencies]
 # The player build: `default-features = false` keeps `dev` (and the source-tree paths) out.
 benilla-app = { path = "../benilla-app", default-features = false }

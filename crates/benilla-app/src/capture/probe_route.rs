@@ -22,7 +22,9 @@ use bevy::prelude::*;
 use crate::player::Player;
 use benilla_world::schedule::WorldStage;
 
-use super::ProbeClock;
+/// The probe fleet's wall clock (`capture::ProbeClock`), spelled out here so the walker also
+/// compiles alone into a `route-probe` build.
+type ProbeClock<'w> = Res<'w, Time<bevy::time::Real>>;
 
 /// Arrived within this many yards of a point (in the plane).
 const ARRIVE_YD: f32 = 1.5;

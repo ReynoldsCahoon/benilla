@@ -64,6 +64,9 @@ pub(crate) struct DevProbesPlugin;
 impl Plugin for DevProbesPlugin {
     #[cfg_attr(not(feature = "dev"), allow(unused_variables))]
     fn build(&self, app: &mut App) {
+        // `route-probe` alone: the route walker without the rest of the fleet (the iPad build).
+        #[cfg(all(feature = "route-probe", not(feature = "dev")))]
+        app.add_plugins(crate::probe_route::ProbeRoutePlugin);
         #[cfg(feature = "dev")]
         {
             // `$WOW_CAPTURE`: one deterministic screenshot, then exit.

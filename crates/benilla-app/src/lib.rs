@@ -48,6 +48,10 @@ mod cvars;
 mod death;
 #[cfg(feature = "dev")]
 mod debug_panel;
+/// The route walker alone, in a `route-probe` build without `dev` (the iPad's memory test walks).
+#[cfg(all(feature = "route-probe", not(feature = "dev")))]
+#[path = "capture/probe_route.rs"]
+mod probe_route;
 /// The dev/player seam: the instrument groups and the boundary rule. Always compiled; what it holds
 /// is not.
 mod dev;
