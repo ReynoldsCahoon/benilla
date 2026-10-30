@@ -52,6 +52,14 @@ pub(crate) fn requested_window_size() -> Option<UVec2> {
     Some(UVec2::new(w.parse().ok()?, h.parse().ok()?))
 }
 
+/// `$WOW_WIN_POS=X,Y`: where the window opens, its top-left in physical px (twice the logical
+/// point on a Retina display), so parallel probe runs open side by side instead of stacked.
+pub(crate) fn requested_window_position() -> Option<IVec2> {
+    let v = std::env::var("WOW_WIN_POS").ok()?;
+    let (x, y) = v.split_once(',')?;
+    Some(IVec2::new(x.trim().parse().ok()?, y.trim().parse().ok()?))
+}
+
 /// `$WOW_DPI=<f32>`: render at another display's pixel grid, since text rasterizing and snapping
 /// quantize in device pixels. It overrides the window's scale factor, so `WOW_WIN` then means
 /// physical pixels and a capture is the framebuffer that display would show.

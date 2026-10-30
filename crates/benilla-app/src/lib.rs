@@ -376,6 +376,10 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
         // gamescope, spend the first second in the input state fullscreen is meant to end.
         // Instrumented runs stay windowed (`video::windowed_env`).
         mode: video::boot_window_mode(),
+        position: video::requested_window_position().map_or(
+            bevy::window::WindowPosition::Automatic,
+            bevy::window::WindowPosition::At,
+        ),
         // UI-fixture captures size the window to what they photograph: the action bar's 1024 px
         // plus 128 px end caps get a wide, short window, and vplates pins 1024×768, where one gx
         // unit is 1280 px and the plate lands at the border texture's native 128×32, diffable

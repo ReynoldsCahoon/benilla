@@ -67,7 +67,8 @@ fn keep_probe_window_on_top(
     if w.window_level != level {
         w.window_level = level;
     }
-    if *parked || !no_pixel {
+    // An explicit `WOW_WIN_POS` (parallel runs side by side) wins over the park.
+    if *parked || !no_pixel || crate::video::requested_window_position().is_some() {
         return;
     }
     // `WindowPosition::At` is physical pixels, the resolution logical: scale the width.
