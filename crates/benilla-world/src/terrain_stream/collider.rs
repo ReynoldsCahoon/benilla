@@ -243,8 +243,10 @@ pub fn placement_collider_data(
     Some((verts, tris))
 }
 
-/// A terrain tile's collider: one trimesh welded from its decoded MCNK chunks in draw space, the
-/// loader's hole-masked indices rebased onto the running vertex count.
+/// A terrain tile as one fan trimesh welded from its decoded MCNK chunks in draw space, the
+/// loader's hole-masked indices rebased onto the running vertex count: what the tile's collider
+/// was before [`TerrainField`], kept as the reference its test compares against.
+#[cfg(test)]
 pub(super) fn terrain_collider_data(
     chunks: &[benilla_formats::ChunkMesh],
 ) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
@@ -263,6 +265,144 @@ pub(super) fn terrain_collider_data(
         );
     }
     (!tris.is_empty()).then_some((verts, tris))
+}
+
+/// A tile's terrain as an exact heightfield: parry's `HeightField` needs no BVH (~0.3 MB a tile
+/// against a trimesh's ~9 MB), and on a grid of half cells it reproduces the centre fan exactly.
+/// Each cell of the 8×8 per chunk splits into 2×2 half cells: the outer verts and the centre land
+/// on grid points, an edge's midpoint is the mean of its two ends (exact on a straight edge), and
+/// each half cell's diagonal runs from its cell's corner to the centre (parry's
+/// `ZIGZAG_SUBDIVISION` exactly where row and column parity agree), so its two triangles lie in
+/// two of the four fan triangles. A hole drops its 2×2-cell block (4×4 half cells). Every triangle
+/// faces up, as the fan's do. Grid points are placed by position, not by index arithmetic.
+pub struct TerrainField {
+    heights: avian3d::parry::utils::Array2<f32>,
+    status: avian3d::parry::utils::Array2<avian3d::parry::shape::HeightFieldCellStatus>,
+    scale: Vec3,
+    /// The field's centre in draw space: the collider's translation (parry centres the field on
+    /// its local origin).
+    pub center: Vec3,
+}
+
+impl TerrainField {
+    /// The collider, built on the async compute pool for [`finish_colliders`].
+    pub fn build_task(self) -> Task<Collider> {
+        AsyncComputeTaskPool::get().spawn(async move { self.collider() })
+    }
+
+    /// The collider, in the field's own frame (translate by [`Self::center`]).
+    pub fn collider(self) -> Collider {
+        let mut field = avian3d::parry::shape::HeightField::new(self.heights, self.scale);
+        *field.cells_statuses_mut() = self.status;
+        Collider::from(avian3d::parry::shape::SharedShape::new(field))
+    }
+}
+
+/// [`TerrainField`] from a tile's decoded chunks; `None` with no drawn chunk.
+pub(super) fn terrain_heightfield_data(
+    chunks: &[benilla_formats::ChunkMesh],
+) -> Option<TerrainField> {
+    use avian3d::parry::shape::HeightFieldCellStatus as Cell;
+    use avian3d::parry::utils::Array2;
+    // A cell's outer verts are `r·17 + c` (9×9), its centre `r·17 + 9 + c` (8×8).
+    let outer = |r: usize, c: usize| r * 17 + c;
+    let drawn: Vec<&benilla_formats::ChunkMesh> = chunks
+        .iter()
+        .filter(|c| c.positions.len() == 145 && c.indices.len() >= 3)
+        .collect();
+    let first = *drawn.first()?;
+    // Half a cell, from the first chunk's outer row; the grid's origin is the tile's min corner.
+    let half = {
+        let a = wow_to_bevy(first.positions[outer(0, 0)]);
+        let b = wow_to_bevy(first.positions[outer(0, 1)]);
+        0.5 * Vec2::new(b.x - a.x, b.z - a.z).length()
+    };
+    let (mut min, mut max) = (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY));
+    for chunk in &drawn {
+        for p in &chunk.positions {
+            let q = wow_to_bevy(*p);
+            min = min.min(Vec2::new(q.x, q.z));
+            max = max.max(Vec2::new(q.x, q.z));
+        }
+    }
+    // Grid point (row along z, column along x) of a draw-space position.
+    let cols = ((max.x - min.x) / half).round() as usize + 1;
+    let rows = ((max.y - min.y) / half).round() as usize + 1;
+    let at = |q: Vec3| -> (usize, usize) {
+        (
+            ((q.z - min.y) / half).round() as usize,
+            ((q.x - min.x) / half).round() as usize,
+        )
+    };
+    let mut heights = Array2::zeros(rows, cols);
+    let mut known = Array2::repeat(rows, cols, false);
+    let mut holed = Array2::repeat(rows - 1, cols - 1, true);
+    for chunk in &drawn {
+        let mut put = |i: usize| {
+            let q = wow_to_bevy(chunk.positions[i]);
+            let ij = at(q);
+            heights[ij] = q.y;
+            known[ij] = true;
+            ij
+        };
+        for r in 0..9 {
+            for c in 0..9 {
+                put(outer(r, c));
+            }
+        }
+        for r in 0..8 {
+            for c in 0..8 {
+                // The centre sits on the cell's middle grid point; its 2×2 half cells surround it.
+                let (ci, cj) = put(r * 17 + 9 + c);
+                if chunk.holes & (1u16 << ((r >> 1) * 4 + (c >> 1))) == 0 {
+                    for (i, j) in [(ci - 1, cj - 1), (ci - 1, cj), (ci, cj - 1), (ci, cj)] {
+                        holed[(i, j)] = false;
+                    }
+                }
+            }
+        }
+    }
+    // Edge midpoints: the mean of the two ends, along whichever axis the point is odd on.
+    for i in 0..rows {
+        for j in 0..cols {
+            if known[(i, j)] {
+                continue;
+            }
+            let ends = if i % 2 == 0 && j % 2 == 1 && j + 1 < cols {
+                Some([(i, j - 1), (i, j + 1)])
+            } else if i % 2 == 1 && j % 2 == 0 && i + 1 < rows {
+                Some([(i - 1, j), (i + 1, j)])
+            } else {
+                None
+            };
+            if let Some([a, b]) = ends.filter(|[a, b]| known[*a] && known[*b]) {
+                heights[(i, j)] = 0.5 * (heights[a] + heights[b]);
+                known[(i, j)] = true;
+            }
+        }
+    }
+    let mut status = Array2::repeat(rows - 1, cols - 1, Cell::empty());
+    for i in 0..rows - 1 {
+        for j in 0..cols - 1 {
+            let corners = [(i, j), (i + 1, j), (i, j + 1), (i + 1, j + 1)];
+            status[(i, j)] = if holed[(i, j)] || corners.iter().any(|c| !known[*c]) {
+                Cell::CELL_REMOVED
+            } else if i % 2 == j % 2 {
+                Cell::ZIGZAG_SUBDIVISION
+            } else {
+                Cell::empty()
+            };
+        }
+    }
+    // The measured extent, not `half` times the count: one pair's spacing carries f32 rounding
+    // that 256 half cells would multiply (0.04 yd across a tile).
+    let size = max - min;
+    Some(TerrainField {
+        heights,
+        status,
+        scale: Vec3::new(size.x, 1.0, size.y),
+        center: Vec3::new(min.x + 0.5 * size.x, 0.0, min.y + 0.5 * size.y),
+    })
 }
 
 /// How far an impassable chunk's fence rises from the chunk AABB's min z (`chunk+0x4c`): the
@@ -335,6 +475,101 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
 
     use benilla_formats::{ChunkMesh, CHUNK_SIZE};
+
+    /// The heightfield is the fan trimesh: on real tiles (Orgrimmar's two, which include The
+    /// Drag, and Elwynn's wall pair) 20000 vertical rays at random points inside the tile hit or
+    /// miss alike (holes included) at the same height, and every heightfield triangle faces up.
+    /// "Same" is within 2.5 cm: the source verts' x/y are each computed in f32 and sit up to a
+    /// fraction of a millimetre off the regular grid the field puts them on, which a steep slope
+    /// turns into ~1-2 cm of height (measured: 1.1 cm inside a chunk, 1.7 cm on a border).
+    #[test]
+    fn the_terrain_heightfield_is_the_fan_trimesh_under_every_ray() {
+        use avian3d::parry::query::Ray;
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        for (map, tx, ty) in [
+            ("Kalimdor", 40, 28),
+            ("Kalimdor", 40, 29),
+            ("Azeroth", 32, 44),
+            ("Azeroth", 33, 44),
+        ] {
+            let tile = benilla_formats::load_tile_mesh(&mut chain, map, tx, ty).expect("tile");
+            let (verts, tris) = terrain_collider_data(&tile.chunks).expect("trimesh");
+            let mesh = Collider::trimesh(verts, tris);
+            let field = terrain_heightfield_data(&tile.chunks).expect("heightfield");
+            let center = field.center;
+            let hf = field.collider();
+
+            let hf_shape = hf.shape().as_heightfield().expect("a heightfield");
+            let mut down_facing = 0;
+            for (_, tri) in hf_shape.triangles().enumerate() {
+                if tri.normal().is_some_and(|n| n.y <= 0.0) {
+                    down_facing += 1;
+                }
+            }
+            assert_eq!(down_facing, 0, "{map} {tx},{ty}: triangles facing down");
+
+            let bounds = mesh.shape().compute_local_aabb();
+            let (mut worst, mut hits, mut misses, mut disagree) = (0.0f32, 0, 0, Vec::new());
+            let mut on_edge = 0;
+            // Within a millimetre of a half-cell grid line, in the field's frame.
+            // `ncols()` counts cells, which is what a grid line's index runs over.
+            let (sc, n) = (hf_shape.scale(), hf_shape.ncols() as f32);
+            let on_line = |lx: f32, lz: f32| {
+                let near = |v: f32, size: f32| {
+                    let g = (v / size + 0.5) * n;
+                    (g - g.round()).abs() * size / n < 1e-3
+                };
+                near(lx, sc.x) || near(lz, sc.z)
+            };
+            let mut seed = 0x9e3779b9u32 ^ (tx * 64 + ty);
+            let mut next = || {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed as f32 / u32::MAX as f32
+            };
+            for _ in 0..20000 {
+                // Off the tile's outer edge, which the neighbour tile covers in play.
+                let x = bounds.mins.x + 0.01 + next() * (bounds.maxs.x - bounds.mins.x - 0.02);
+                let z = bounds.mins.z + 0.01 + next() * (bounds.maxs.z - bounds.mins.z - 0.02);
+                let from = Vec3::new(x, bounds.maxs.y + 10.0, z);
+                let a = mesh
+                    .shape()
+                    .cast_local_ray(&Ray::new(from, Vec3::NEG_Y), f32::MAX, true);
+                let b = hf.shape().cast_local_ray(
+                    &Ray::new(from - center, Vec3::NEG_Y),
+                    f32::MAX,
+                    true,
+                );
+                match (a, b) {
+                    (Some(a), Some(b)) => {
+                        hits += 1;
+                        worst = worst.max((a - b).abs());
+                    }
+                    (None, None) => misses += 1,
+                    // A ray exactly on a hole's edge line: the trimesh owns the shared edge, the
+                    // field's cell lookup the hole. A zero-width line; a cast body has width.
+                    _ if on_line(x - center.x, z - center.z) => on_edge += 1,
+                    _ => disagree.push((x, z, a, b)),
+                }
+            }
+            println!(
+                "{map} {tx},{ty}: {hits} hits, {misses} misses, {on_edge} on a hole's edge line, \
+                 worst {worst:.6} yd, {} disagree",
+                disagree.len()
+            );
+            assert!(
+                disagree.is_empty(),
+                "{map} {tx},{ty}: hit/miss differ at {:?}",
+                &disagree[..disagree.len().min(5)]
+            );
+            assert!(
+                worst < 0.025,
+                "{map} {tx},{ty}: heights differ by {worst} yd"
+            );
+        }
+    }
 
     /// One flat MCNK at `(ix, iy)` with only what the wall builder reads. The tile's NW corner is
     /// the WoW origin: rows step −x and columns −y, as `adt_to_tile_mesh` lays them out.
@@ -504,11 +739,13 @@ mod tests {
             ));
             app.init_asset::<Mesh>();
             for t in &tiles {
-                if let Some((v, i)) = terrain_collider_data(&t.chunks) {
+                // The ground as play builds it: a heightfield at its tile's centre.
+                if let Some(field) = terrain_heightfield_data(&t.chunks) {
+                    let center = field.center;
                     app.world_mut().spawn((
                         RigidBody::Static,
-                        Collider::trimesh(v, i),
-                        Transform::default(),
+                        field.collider(),
+                        Transform::from_translation(center),
                     ));
                 }
                 if let Some((v, i)) = walls.then(|| impassable_wall_data(&t.chunks)).flatten() {

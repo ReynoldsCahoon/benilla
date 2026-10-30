@@ -38,7 +38,7 @@ mod weld;
 pub(crate) mod window;
 
 use collider::{
-    attach_inner_colliders, finish_colliders, impassable_wall_data, terrain_collider_data,
+    attach_inner_colliders, finish_colliders, impassable_wall_data, terrain_heightfield_data,
     PendingColliders,
 };
 use furnish::furnish_tile_cells;
@@ -1021,8 +1021,9 @@ fn spawn_streamed_tiles(
                 light_buf: shared_light.0.clone(),
             },
         });
-        // One static trimesh per tile from the drawn chunks, built off-thread, riding the root.
-        let collider_data = terrain_collider_data(&adt.chunks);
+        // One exact heightfield per tile from the drawn chunks (no BVH: ~0.3 MB a tile against a
+        // fan trimesh's ~9 MB; `TerrainField`), built off-thread on a child at the tile's centre.
+        let field = terrain_heightfield_data(&adt.chunks);
         // The impassable-chunk fences are a second collider, on the walk layer only: the reference
         // emits them into the movement box gather alone, never its segment and ray path.
         let wall_data = impassable_wall_data(&adt.chunks);
@@ -1031,10 +1032,12 @@ fn spawn_streamed_tiles(
         // `furnish_tile_cells` spawns them a few per frame; the root keeps the visibility chain.
         let mut tile_ent = commands.spawn((Transform::IDENTITY, Visibility::default()));
         tile_ent.vis_chain_only();
-        if let Some((verts, tris)) = collider_data {
+        if let Some(field) = field {
             // Terrain takes the selection ring and clamps the pick (the reference's world trace).
-            tile_ent.insert((
-                PendingCollider::new(build_collider_task(verts, tris), None, true),
+            tile_ent.with_child((
+                Transform::from_translation(field.center),
+                Visibility::default(),
+                PendingCollider::new(field.build_task(), None, true),
                 GroundDecalSurface,
                 PickOccluder,
             ));

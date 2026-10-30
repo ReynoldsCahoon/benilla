@@ -7,11 +7,16 @@
 //! adds liquid; liquid is not a receiver here yet.
 
 use avian3d::parry::bounding_volume::{Aabb as ParryAabb, BoundingVolume};
-use avian3d::prelude::Collider;
+use avian3d::prelude::{Collider, Position};
 use bevy::prelude::*;
 
 use crate::collision::GroundDecalSurface;
 use crate::particles::buffer::EffectVertex;
+
+/// The ground-decal receivers and where each sits: a trimesh at the identity pose, a terrain
+/// heightfield translated to its tile's centre (`Position` absent reads as the origin).
+pub type DecalSurfaces<'w, 's> =
+    Query<'w, 's, (&'static Collider, Option<&'static Position>), With<GroundDecalSurface>>;
 
 /// A decal's projection box around `center` (the owner's feet): a yaw-rotated rectangle, bounds in
 /// the rotated frame (`x' = dx·cos − dz·sin`, `z' = dz·cos + dx·sin`), times a vertical slab.
@@ -78,7 +83,7 @@ impl DecalFrame {
 /// caller hides the decal, the reference's no-ground gate (`0x6d74b5` skips the whole draw).
 pub(crate) fn project_decal(
     out: &mut Vec<EffectVertex>,
-    surfaces: &Query<&Collider, With<GroundDecalSurface>>,
+    surfaces: &DecalSurfaces,
     frame: &DecalFrame,
     alpha: impl Fn(Vec3) -> f32,
     uv: impl Fn(f32, f32) -> [f32; 2],
@@ -88,17 +93,16 @@ pub(crate) fn project_decal(
         return false;
     }
     let start = out.len();
-    for collider in surfaces {
-        // Marked colliders are identity-pose trimeshes: local AABBs and triangles are world ones.
-        let Some(trimesh) = collider.shape().as_trimesh() else {
-            continue;
-        };
-        if !trimesh.local_aabb().intersects(&gather) {
+    for (collider, pos) in surfaces {
+        // Marked colliders never rotate, so the shape's frame is the world's shifted by `offset`.
+        let offset = pos.map_or(Vec3::ZERO, |p| p.0);
+        let local = ParryAabb::new(gather.mins - offset, gather.maxs - offset);
+        let shape = collider.shape().as_ref();
+        if !shape.compute_local_aabb().intersects(&local) {
             continue;
         }
-        for i in trimesh.bvh().intersect_aabb(&gather) {
-            let tri = trimesh.triangle(i);
-            let (poly, n) = clip_to_frame([tri.a, tri.b, tri.c], frame);
+        for tri in crate::collision::surface_triangles(shape, &local) {
+            let (poly, n) = clip_to_frame([tri.a, tri.b, tri.c].map(|p| p + offset), frame);
             if n < 3 {
                 continue;
             }
@@ -169,7 +173,7 @@ fn clip_to_frame(tri: [Vec3; 3], frame: &DecalFrame) -> ([Vec3; 9], usize) {
 /// ground; which colliders receive is decided at bake time by the MOPY material class.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct WorldDecal<'w, 's> {
-    surfaces: Query<'w, 's, &'static Collider, With<GroundDecalSurface>>,
+    surfaces: DecalSurfaces<'w, 's>,
 }
 
 impl WorldDecal<'_, '_> {
@@ -212,6 +216,70 @@ mod tests {
             min_y: -1.0,
             max_y: 1.0,
         }
+    }
+
+    /// A decal drapes a terrain heightfield where it sits: flat ground at y = 3 centred off the
+    /// origin takes a 2×2 decal over it, every vertex on the ground, area 4; the same box at the
+    /// field's local origin finds nothing.
+    #[test]
+    fn a_decal_drapes_a_terrain_heightfield_where_it_sits() {
+        use avian3d::parry::shape::{HeightField, SharedShape};
+        use bevy::ecs::system::RunSystemOnce;
+        let at = Vec3::new(50.0, 3.0, -20.0);
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::scene::ScenePlugin,
+            avian3d::prelude::PhysicsPlugins::new(bevy::app::PostUpdate),
+        ));
+        app.init_asset::<Mesh>();
+        let field = HeightField::new(
+            avian3d::parry::utils::Array2::zeros(3, 3),
+            Vec3::new(10.0, 1.0, 10.0),
+        );
+        app.world_mut().spawn((
+            avian3d::prelude::RigidBody::Static,
+            Collider::from(SharedShape::new(field)),
+            Transform::from_translation(at),
+            GroundDecalSurface,
+        ));
+        app.update();
+        let project = |center: Vec3| DecalFrame { center, ..frame() };
+        let (hit, out) = app
+            .world_mut()
+            .run_system_once(move |surfaces: DecalSurfaces| {
+                let mut out = Vec::new();
+                let hit = project_decal(&mut out, &surfaces, &project(at), |_| 1.0, |u, v| [u, v]);
+                (hit, out)
+            })
+            .unwrap();
+        assert!(hit);
+        let area: f32 = out
+            .chunks(3)
+            .map(|t| {
+                let [a, b, c] = [t[0].pos, t[1].pos, t[2].pos].map(Vec3::from_array);
+                0.5 * (b - a).cross(c - a).length()
+            })
+            .sum();
+        assert!((area - 4.0).abs() < 1e-4, "area {area}");
+        assert!(out.iter().all(|v| (v.pos[1] - at.y).abs() < 1e-5));
+        let (miss, _) = app
+            .world_mut()
+            .run_system_once(move |surfaces: DecalSurfaces| {
+                let mut out = Vec::new();
+                let hit = project_decal(
+                    &mut out,
+                    &surfaces,
+                    &project(Vec3::ZERO),
+                    |_| 1.0,
+                    |u, v| [u, v],
+                );
+                (hit, out)
+            })
+            .unwrap();
+        assert!(!miss, "the field is not at its local origin");
     }
 
     #[test]

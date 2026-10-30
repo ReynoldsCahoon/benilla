@@ -5,13 +5,11 @@
 //! up-slope buries them and a down-slope leaves them floating; here they drape the terrain like
 //! the selection ring, because an effect meant for ground level should sit on it.
 
-use avian3d::prelude::Collider;
 use benilla_assets::coords::wow_to_bevy;
 use benilla_formats::GroundQuad;
 use bevy::math::Affine3A;
 use bevy::prelude::*;
 
-use crate::collision::GroundDecalSurface;
 use crate::decal::{project_decal, DecalFrame};
 use crate::particles::buffer::{EffectBlend, EffectDrawSpec, EffectFog, EffectQuads, EffectVertex};
 use crate::view::WorldCamera;
@@ -130,7 +128,7 @@ pub(crate) fn update_ground_fx_decals(
     mut commands: Commands,
     time: Res<Time>,
     cam: Query<Entity, With<WorldCamera>>,
-    surfaces: Query<&Collider, With<GroundDecalSurface>>,
+    surfaces: crate::decal::DecalSurfaces,
     joints: Query<&GlobalTransform, Without<GroundFxDecal>>,
     mut quads: ResMut<EffectQuads>,
     mut decals: Query<(

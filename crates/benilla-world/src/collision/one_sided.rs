@@ -5,7 +5,8 @@
 //!
 //! parry's trimesh is two-sided, and a first-hit cast cannot yield the front face behind a
 //! backface, so this re-runs avian's `move_and_slide` over its public pieces and gates each
-//! triangle in its own BVH walk. The winding seen is the authored one: `Collider::trimesh` keeps
+//! triangle in its own BVH walk (or, for a terrain heightfield, its grid walk:
+//! [`super::surface_triangles`]). The winding seen is the authored one: `Collider::trimesh` keeps
 //! it, and every transform is a rotation. Convex colliders stay whole-shape, and camera and
 //! line-of-sight casts stay two-sided, as the reference's segment kernel is (`0x7c29f0`).
 //!
@@ -88,17 +89,16 @@ pub(crate) fn cast_move(
             continue;
         }
 
-        if let Some(trimesh) = collider.shape_scaled().as_trimesh() {
-            // In the trimesh's local frame; a rotation keeps the sign of every `n·dir`.
+        if super::is_surface(collider.shape_scaled().as_ref()) {
+            // In the surface's local frame; a rotation keeps the sign of every `n·dir`.
             let inv_rot = rot.0.inverse();
             let local_from = inv_rot * (from - pos.0);
             let local_dir = inv_rot * *dir;
             let local_pose = Pose3::from_parts(local_from, inv_rot);
-            for tri_id in trimesh
-                .bvh()
-                .intersect_aabb(&aabb_to_local(swept, pos.0, inv_rot))
-            {
-                let tri = trimesh.triangle(tri_id);
+            for tri in super::surface_triangles(
+                collider.shape_scaled().as_ref(),
+                &aabb_to_local(swept, pos.0, inv_rot),
+            ) {
                 let Some(n) = tri.normal() else {
                     continue; // a degenerate face has no winding
                 };
@@ -238,12 +238,11 @@ pub(crate) fn cast_ray(
         }
         let inv_rot = rot.0.inverse();
         let local_ray = Ray::new(inv_rot * (origin - pos.0), inv_rot * *dir);
-        if let Some(trimesh) = collider.shape_scaled().as_trimesh() {
-            for tri_id in trimesh
-                .bvh()
-                .intersect_aabb(&aabb_to_local(swept, pos.0, inv_rot))
-            {
-                let tri = trimesh.triangle(tri_id);
+        if super::is_surface(collider.shape_scaled().as_ref()) {
+            for tri in super::surface_triangles(
+                collider.shape_scaled().as_ref(),
+                &aabb_to_local(swept, pos.0, inv_rot),
+            ) {
                 let Some(n) = tri.normal() else {
                     continue;
                 };
@@ -422,15 +421,14 @@ fn for_each_contact(
             continue;
         }
 
-        if let Some(trimesh) = collider.shape_scaled().as_trimesh() {
+        if super::is_surface(collider.shape_scaled().as_ref()) {
             let inv_rot = rot.0.inverse();
             let local_pose = Pose3::from_parts(inv_rot * (position - pos.0), inv_rot);
             let local_dir = inv_rot * *motion_dir;
-            for tri_id in trimesh
-                .bvh()
-                .intersect_aabb(&aabb_to_local(grown, pos.0, inv_rot))
-            {
-                let tri = trimesh.triangle(tri_id);
+            for tri in super::surface_triangles(
+                collider.shape_scaled().as_ref(),
+                &aabb_to_local(grown, pos.0, inv_rot),
+            ) {
                 let Some(n) = tri.normal() else {
                     continue;
                 };
@@ -526,7 +524,7 @@ impl FaceProbe {
     }
 }
 
-/// Every trimesh face in the box `at ± half` that `filter` reaches, nearest centroid first. A
+/// Every surface face (trimesh or terrain heightfield) in the box `at ± half` that `filter` reaches, nearest centroid first. A
 /// diagnostic, ungated on purpose: it shows the faces the law rejects beside those it keeps.
 pub(crate) fn faces_near(
     ms: &MoveAndSlide<'_, '_>,
@@ -547,15 +545,14 @@ pub(crate) fn faces_near(
         if !filter.test(entity, layers.copied().unwrap_or_default()) {
             continue;
         }
-        let Some(trimesh) = collider.shape_scaled().as_trimesh() else {
+        if !super::is_surface(collider.shape_scaled().as_ref()) {
             continue;
-        };
+        }
         let inv_rot = rot.0.inverse();
-        for tri_id in trimesh
-            .bvh()
-            .intersect_aabb(&aabb_to_local(box_aabb, pos.0, inv_rot))
-        {
-            let tri = trimesh.triangle(tri_id);
+        for tri in super::surface_triangles(
+            collider.shape_scaled().as_ref(),
+            &aabb_to_local(box_aabb, pos.0, inv_rot),
+        ) {
             let Some(n) = tri.normal() else {
                 continue;
             };
@@ -743,6 +740,60 @@ mod tests {
             if let Some(h) = hit {
                 // The capsule's bottom is 0.9 below its centre: contact after 2.1 yd.
                 assert!((h.collision_distance - 2.1).abs() < 1e-3);
+                assert!(h.normal1.y > 0.99);
+            }
+        }
+    }
+
+    /// A flat 10×10 terrain heightfield at y = 0, centred off the origin at `at`, with both
+    /// diagonal directions present (the terrain field's zigzag cells).
+    fn world_with_field(at: Vec3) -> App {
+        use avian3d::parry::shape::{HeightField, HeightFieldCellStatus, SharedShape};
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::scene::ScenePlugin,
+            PhysicsPlugins::new(bevy::app::PostUpdate),
+        ));
+        app.init_asset::<Mesh>();
+        let mut field = HeightField::new(
+            avian3d::parry::utils::Array2::zeros(3, 3),
+            Vec3::new(10.0, 1.0, 10.0),
+        );
+        field.set_cell_status(0, 0, HeightFieldCellStatus::ZIGZAG_SUBDIVISION);
+        field.set_cell_status(1, 1, HeightFieldCellStatus::ZIGZAG_SUBDIVISION);
+        app.world_mut().spawn((
+            RigidBody::Static,
+            Collider::from(SharedShape::new(field)),
+            Transform::from_translation(at),
+        ));
+        app.update();
+        app
+    }
+
+    /// Terrain as a heightfield keeps the one-sided law: a floor from above, nothing from below.
+    #[test]
+    fn a_terrain_heightfield_is_a_floor_from_above_and_no_ceiling_from_below() {
+        let at = Vec3::new(37.0, 2.0, -21.0);
+        for (dir, expect_block) in [(-1.0, true), (1.0, false)] {
+            let hit = world_with_field(at)
+                .world_mut()
+                .run_system_once(move |ms: MoveAndSlide| {
+                    cast_move(
+                        &ms,
+                        &capsule(),
+                        at + Vec3::new(1.3, -3.0 * dir, -2.1),
+                        Vec3::Y * 5.0 * dir,
+                        0.05,
+                        &SpatialQueryFilter::default(),
+                    )
+                })
+                .unwrap();
+            assert_eq!(hit.is_some(), expect_block, "moving {dir:+} in y");
+            if let Some(h) = hit {
+                assert!((h.collision_distance - 2.1).abs() < 1e-3, "{h:?}");
                 assert!(h.normal1.y > 0.99);
             }
         }

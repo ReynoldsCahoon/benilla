@@ -104,6 +104,34 @@ pub(crate) fn track_collider_removals(
     }
 }
 
+/// Whether a static collider's shape is a surface [`surface_triangles`] walks face by face: a
+/// trimesh, or a terrain heightfield. Any other shape is taken whole.
+pub(crate) fn is_surface(shape: &dyn avian3d::parry::shape::Shape) -> bool {
+    shape.as_trimesh().is_some() || shape.as_heightfield().is_some()
+}
+
+/// The faces of a surface shape ([`is_surface`]) whose bounds meet `aabb`, in the shape's own
+/// frame and with their authored winding: a trimesh's through its BVH, a terrain heightfield's
+/// from its grid (every face up, as the fan trimesh it replaces;
+/// `terrain_stream::collider::TerrainField`). Empty for any other shape.
+pub(crate) fn surface_triangles(
+    shape: &dyn avian3d::parry::shape::Shape,
+    aabb: &avian3d::parry::bounding_volume::Aabb,
+) -> Vec<avian3d::parry::shape::Triangle> {
+    if let Some(mesh) = shape.as_trimesh() {
+        return mesh
+            .bvh()
+            .intersect_aabb(aabb)
+            .map(|i| mesh.triangle(i))
+            .collect();
+    }
+    let mut out = Vec::new();
+    if let Some(field) = shape.as_heightfield() {
+        field.map_elements_in_local_aabb(aabb, &mut |_, tri| out.push(*tri));
+    }
+    out
+}
+
 /// Marks a static trimesh that receives ground decals (the selection ring). The reference collects
 /// only terrain and WMO group faces (`0x6ad2c0` calls only `0x6ad330`/`0x6ad4e0`; draw flags
 /// `0x200122`, liquid off), so the ring draws under a barrel, not onto it, and filters WMO faces
