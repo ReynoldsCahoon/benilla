@@ -73,14 +73,14 @@ pub(super) fn setup_composite(
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    let mut image = Image::new_fill(
+    // No CPU bytes: wgpu zero-initializes the texture, which is transparent.
+    let mut image = Image::new_uninit(
         Extent3d {
             width: RT_SIZE,
             height: RT_SIZE,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        &[0; 8],
         TextureFormat::Rgba16Float,
         RenderAssetUsages::default(),
     );

@@ -876,14 +876,15 @@ fn new_target_image(size: u32) -> Image {
 
 /// [`new_target_image`] at any size, for the UI model tiles' atlas (`crate::ui_models`).
 pub(crate) fn new_target_image_sized(width: u32, height: u32) -> Image {
-    let mut image = Image::new_fill(
+    // No CPU bytes: wgpu zero-initializes the texture, which is transparent. `MAIN_WORLD` stays so
+    // the asset can be re-extracted.
+    let mut image = Image::new_uninit(
         Extent3d {
             width,
             height,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        &[0; 8],
         // Un-encoded: the UI composites in gamma bytes and decodes once at the end (`ui_gamma`),
         // so an `…Srgb` target would decode twice. Float: 8-bit un-encoded values band visibly.
         TextureFormat::Rgba16Float,
