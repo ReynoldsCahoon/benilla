@@ -10,6 +10,9 @@
 //!   logs
 //!   `PROBE_ROUTE: DONE` and exits. A point not reached in [`STUCK_SECS`] logs `STUCK` and is
 //!   skipped.
+//! - Start barrier: with `WOW_PROBE_ROUTE_GO=<file>` it logs `PROBE_ROUTE: READY` once the start
+//!   delay has passed and waits for that file to exist, so two clients loaded at different speeds
+//!   set off together (`tools/route_pair.sh` in the wow-optimize workbench touches it).
 //! - Record: `WOW_PROBE_ROUTE_RECORD=<yards>` logs `PROBE_ROUTE: point <x>,<y>` each time the
 //!   avatar has moved that far from the last point, so a route walked once by hand replays after.
 
@@ -31,6 +34,8 @@ struct ProbeRoute {
     /// Waypoints in WoW `(x, y)`, each with its dwell in seconds.
     points: Vec<([f32; 2], f32)>,
     at: f32,
+    /// `WOW_PROBE_ROUTE_GO`: the file whose existence starts the walk; `None` once it exists.
+    go: Option<std::path::PathBuf>,
     /// The point being walked to, and when the walk to it began; `None` before the start.
     leg: Option<(usize, f32)>,
     /// Arrived at the current point at this time, dwelling.
@@ -75,6 +80,7 @@ fn from_env() -> Option<ProbeRoute> {
     (!points.is_empty()).then(|| ProbeRoute {
         points,
         at: env_f32("WOW_PROBE_ROUTE_AT", 15.0),
+        go: std::env::var_os("WOW_PROBE_ROUTE_GO").map(Into::into),
         leg: None,
         arrived: None,
         walking: false,
@@ -108,6 +114,7 @@ fn drive_probe_route(
     mut binds: ResMut<crate::bindings::BindingsState>,
     self_player: Query<(), With<crate::net::SelfPlayer>>,
     mut entered: Local<Option<f32>>,
+    mut ready: Local<bool>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if self_player.is_empty() || route.done {
@@ -117,6 +124,20 @@ fn drive_probe_route(
     let entered = *entered.get_or_insert(now);
     if now - entered < route.at {
         return;
+    }
+    if let Some(go) = &route.go {
+        if !go.exists() {
+            if !*ready {
+                info!(
+                    "PROBE_ROUTE: READY t={now:.0}, waiting for {}",
+                    go.display()
+                );
+                *ready = true;
+            }
+            return;
+        }
+        info!("PROBE_ROUTE: GO t={now:.0}");
+        route.go = None;
     }
     let here = wow_xy(&player);
     let (i, since) = *route.leg.get_or_insert((0, now));

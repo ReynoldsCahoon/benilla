@@ -179,6 +179,12 @@ pub(crate) const PROBE_VARS: &[ProbeVar] = &[
         wall_clock: true,
     },
     ProbeVar {
+        name: "WOW_PROBE_ROUTE_GO",
+        purpose: "<file> — after WOW_PROBE_ROUTE_AT, log READY and hold the start until the file exists (parallel runs set off together)",
+        // An external trigger, polled; no clock schedules it.
+        wall_clock: false,
+    },
+    ProbeVar {
         name: "WOW_PROBE_ROUTE_DWELL",
         purpose: "<secs> — how long WOW_PROBE_ROUTE holds at each point (default 5)",
         wall_clock: true,
