@@ -37,6 +37,12 @@ use crate::{
 /// A plugin that manages GPU memory for mesh data.
 pub struct MeshAllocatorPlugin;
 
+/// Allocation nodes per general slab. `offset_allocator`'s default, 128K, writes a 4.5 MB node
+/// table per slab up front; benilla's busiest slab peaks below 4096 live meshes (Orgrimmar,
+/// farclip 177), at most ~8K nodes with its free gaps. A slab out of nodes refuses the allocation
+/// and the mesh goes to another slab, as when one is full.
+const SLAB_MAX_ALLOCS: u32 = 16 * 1024;
+
 /// Manages the assignment of mesh data to GPU buffers.
 ///
 /// The Bevy renderer tries to pack vertex and index data for multiple meshes
@@ -930,7 +936,7 @@ impl GeneralSlab {
             .max(offset_allocator::ext::min_allocator_size(data_slot_count));
 
         let mut new_slab = GeneralSlab {
-            allocator: Allocator::new(max_slab_slot_capacity),
+            allocator: Allocator::with_max_allocs(max_slab_slot_capacity, SLAB_MAX_ALLOCS),
             buffer: None,
             resident_allocations: HashMap::default(),
             pending_allocations: HashMap::default(),

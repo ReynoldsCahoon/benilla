@@ -26,5 +26,14 @@ the `NO_COMPARISON_SAMPLERS_SUPPORT` shader def, pushed on `target_os = "ios"` i
 `bevy_render/src/render_resource/pipeline_cache.rs`, both return 1.0, unshadowed. benilla spawns no
 Bevy light, so no shadow map is ever read and nothing drawn changes.
 
+## The patch — a smaller node table per mesh slab
+
+Each general mesh slab owns an `offset_allocator::Allocator`, and `Allocator::new` sizes its node
+table for 128K allocations, written in full up front: 4.5 MB of heap per slab, ~40 MB over the ~9
+slabs benilla's vertex layouts make. `src/mesh/allocator.rs` builds each slab's allocator with
+`SLAB_MAX_ALLOCS` (16K) nodes instead; the busiest slab peaks below 4096 live meshes in Orgrimmar at
+farclip 177. A slab out of nodes refuses the allocation and the mesh takes the next slab or a new
+one, the path a full slab already takes. All platforms.
+
 Check: `diff -r <registry>/bevy_render-0.18.1 third_party/bevy_render` shows only those lines, the shadow-sampling
-lines above, and this file.
+lines above, the slab node table, and this file.
