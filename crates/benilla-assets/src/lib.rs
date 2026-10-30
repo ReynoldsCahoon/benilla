@@ -58,7 +58,7 @@ mod wmo;
 pub use benilla_formats::{WmoPortalInfo, WmoPortalRef};
 pub use wmo::{
     cap96, collision_tri_bounds, collision_tri_grids, floor168, footprint_tri_bounds,
-    footprint_tri_grids, DoodadBase, WmoGroupNav, WmoModel, WmoModelLoader,
+    footprint_tri_grids, DoodadBase, GroupCollision, WmoGroupNav, WmoModel, WmoModelLoader,
 };
 
 /// The asset-source id for MPQ-backed assets: load paths look like `mpq://World/Azeroth/foo.adt`.

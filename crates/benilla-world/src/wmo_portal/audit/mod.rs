@@ -258,7 +258,7 @@ fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
         group_collision_bounds,
         collision_bounds,
         collision: None,
-        collision_camera: None,
+        collision_camera: Default::default(),
         doodads: Vec::new(),
         doodad_sets: Vec::new(),
         lights: Vec::new(),

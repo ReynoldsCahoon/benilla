@@ -37,6 +37,34 @@ pub struct WmoGroupNav {
     pub group_liquid: u32,
 }
 
+/// One WMO group's collision faces in WMO-local coords, with their AABB.
+pub struct GroupCollision {
+    pub mesh: CollisionMesh,
+    /// `(min, max)` over [`CollisionMesh::positions`].
+    pub bounds: ([f32; 3], [f32; 3]),
+}
+
+impl GroupCollision {
+    /// `None` when the group has no faces.
+    pub fn new(mesh: CollisionMesh) -> Option<Self> {
+        if mesh.indices.len() < 3 {
+            return None;
+        }
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        for p in &mesh.positions {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        Some(Self {
+            mesh,
+            bounds: (lo, hi),
+        })
+    }
+}
+
 /// A loaded WMO building; `Default` is an empty test scaffold, never a loader product.
 #[derive(Asset, TypePath, Clone, Default)]
 pub struct WmoModel {
@@ -72,8 +100,9 @@ pub struct WmoModel {
     pub collision_bounds: Option<([f32; 3], [f32; 3])>,
     /// Walking collision across all groups in WMO-local coords, DETAIL faces excluded.
     pub collision: Option<CollisionMesh>,
-    /// Camera and line-of-sight collision: DETAIL kept, NOCAMCOLLIDE dropped.
-    pub collision_camera: Option<CollisionMesh>,
+    /// Camera collision, per group with faces: DETAIL kept, NOCAMCOLLIDE dropped. Per group so a
+    /// placement builds only the groups within the boom's reach (`terrain_stream::camera_collider`).
+    pub collision_camera: Arc<[GroupCollision]>,
     /// The root's MODD doodads in WMO model space, spawned by doodad set.
     pub doodads: Vec<WmoDoodad>,
     /// The MODS ranges into [`Self::doodads`]: set 0 always, plus the one a placement picks.
@@ -410,8 +439,7 @@ impl AssetLoader for WmoModelLoader {
             vec![Vec::new(); root.group_count() as usize];
         let mut col_pos: Vec<[f32; 3]> = Vec::new();
         let mut col_idx: Vec<u32> = Vec::new();
-        let mut cam_pos: Vec<[f32; 3]> = Vec::new();
-        let mut cam_idx: Vec<u32> = Vec::new();
+        let mut collision_camera: Vec<GroupCollision> = Vec::new();
         let mut group_doodad_refs: Vec<Vec<u16>> = vec![Vec::new(); root.group_count() as usize];
         let mut group_light_refs: Vec<Vec<u16>> = vec![Vec::new(); root.group_count() as usize];
         let mut group_liquids: Vec<Option<LiquidMesh>> =
@@ -451,7 +479,14 @@ impl AssetLoader for WmoModelLoader {
             let base = col_pos.len() as u32;
             col_pos.extend_from_slice(&gpos);
             col_idx.extend(gidx.iter().map(|i| i + base));
+            let (mut cam_pos, mut cam_idx): (Vec<[f32; 3]>, Vec<u32>) = (Vec::new(), Vec::new());
             accumulate_wmo_group_camera_collision(&gbytes, &mut cam_pos, &mut cam_idx);
+            if let Some(group) = GroupCollision::new(CollisionMesh {
+                positions: cam_pos,
+                indices: cam_idx,
+            }) {
+                collision_camera.push(group);
+            }
             let (mut dpos, mut didx): (Vec<[f32; 3]>, Vec<u32>) = (Vec::new(), Vec::new());
             accumulate_wmo_group_camera_only_collision(&gbytes, &mut dpos, &mut didx);
             if let Some(tris) = group_camera_only_tris.get_mut(gi as usize) {
@@ -536,10 +571,6 @@ impl AssetLoader for WmoModelLoader {
             positions: col_pos,
             indices: col_idx,
         });
-        let collision_camera = (!cam_idx.is_empty()).then_some(CollisionMesh {
-            positions: cam_pos,
-            indices: cam_idx,
-        });
         resolve_shared_liquid_cells(&mut group_liquids);
         let portals = root.portals();
         let (group_collision_bounds, collision_bounds) =
@@ -563,7 +594,7 @@ impl AssetLoader for WmoModelLoader {
             group_collision_grids,
             collision_bounds,
             collision,
-            collision_camera,
+            collision_camera: collision_camera.into(),
             doodads: root.doodads().to_vec(),
             doodad_sets: root.doodad_sets().to_vec(),
             lights: parse_wmo_lights(&bytes),

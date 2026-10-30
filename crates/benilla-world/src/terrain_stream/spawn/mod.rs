@@ -19,7 +19,7 @@ use benilla_formats::{world_to_tile, M2Bounds};
 use bevy::camera::primitives::Aabb;
 use bevy::prelude::*;
 
-use crate::collision::{camera_layers, walk_layers, GroundDecalSurface, PickOccluder};
+use crate::collision::{walk_layers, GroundDecalSurface, PickOccluder};
 use crate::doodad_anim::wants_rig;
 use crate::interact::WorldObject;
 use crate::lighting::SharedLightBuffer;
@@ -32,6 +32,7 @@ use crate::wmo_portal::{WmoGroupVis, WmoPortalInstance, WmoRoom};
 use benilla_assets::m2_url;
 use benilla_assets::materials::WowModelMaterial;
 
+use super::camera_collider::CameraGroupCollider;
 use super::collider::{
     build_collider_task, doodad_bodies_disabled, doodad_hulls_bare, placement_collider_data,
     PendingCollider,
@@ -502,15 +503,15 @@ pub(super) fn spawn_loaded_placements(
                                 .id(),
                         );
                     }
-                    if let Some((verts, tris)) =
-                        placement_collider_data(m.collision_camera.as_ref(), &p.transform)
-                    {
+                    // The camera faces per group, built only near the focus
+                    // ([`super::camera_collider`]).
+                    for index in 0..m.collision_camera.len() {
                         ents.push(
                             commands
-                                .spawn(PendingCollider::new(
-                                    build_collider_task(verts, tris),
-                                    Some(camera_layers()),
-                                    true,
+                                .spawn(CameraGroupCollider::new(
+                                    m.collision_camera.clone(),
+                                    index,
+                                    p.transform,
                                 ))
                                 .id(),
                         );

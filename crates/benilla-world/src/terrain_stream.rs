@@ -27,6 +27,7 @@ use benilla_assets::MapCatalogRes;
 use benilla_assets::RenderConfig;
 use benilla_assets::{m2_url, wmo_url};
 
+mod camera_collider;
 mod collider;
 mod furnish;
 pub mod merge;
@@ -529,6 +530,7 @@ impl Plugin for TerrainPlugin {
                     attach_inner_colliders,
                     furnish_tile_cells,
                     spawn_loaded_placements,
+                    camera_collider::stage_camera_colliders,
                     flush_hull_welds,
                     flush_static_merge,
                     sync_interior_volumes,
