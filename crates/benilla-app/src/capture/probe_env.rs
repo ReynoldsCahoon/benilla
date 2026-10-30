@@ -168,6 +168,27 @@ pub(crate) const PROBE_VARS: &[ProbeVar] = &[
         wall_clock: true,
     },
     ProbeVar {
+        name: "WOW_PROBE_ROUTE",
+        purpose: "\"<x>,<y>[,<secs>][;…]\" — walk the avatar to each WoW-yard point in turn, holding each its seconds, then exit",
+        // Its start, dwell and stuck clock run on `ProbeClock`.
+        wall_clock: true,
+    },
+    ProbeVar {
+        name: "WOW_PROBE_ROUTE_AT",
+        purpose: "<secs> — when WOW_PROBE_ROUTE starts after world entry (default 15)",
+        wall_clock: true,
+    },
+    ProbeVar {
+        name: "WOW_PROBE_ROUTE_DWELL",
+        purpose: "<secs> — how long WOW_PROBE_ROUTE holds at each point (default 5)",
+        wall_clock: true,
+    },
+    ProbeVar {
+        name: "WOW_PROBE_ROUTE_RECORD",
+        purpose: "<yards> — log the avatar's position each time it has moved that far, for a route to replay",
+        wall_clock: false,
+    },
+    ProbeVar {
         name: "WOW_PROBE_PITCH",
         purpose: "\"<deg>@<start_s>[:<deg_per_sec>][;…]\" — the scripted dive: aim a swimming avatar's nose up or down (+up)",
         // Each dive target is due at its wall-clock second.

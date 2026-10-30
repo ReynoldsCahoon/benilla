@@ -129,11 +129,13 @@ pub(crate) mod fxview;
 mod probe_cam;
 mod probe_look;
 mod probe_pitch;
+mod probe_route;
 pub(crate) mod waterfx;
 
 pub(crate) use probe_cam::ProbeCamPlugin;
 pub(crate) use probe_look::ProbeLookPlugin;
 pub(crate) use probe_pitch::ProbePitchPlugin;
+pub(crate) use probe_route::ProbeRoutePlugin;
 
 /// The screen a capture starts on, the dev arm of [`crate::run_mode::start_state`]: a glue capture
 /// boots onto the login screen, from which it presses its own screen up, any other capture

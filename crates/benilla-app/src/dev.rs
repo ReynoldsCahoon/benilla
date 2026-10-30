@@ -294,6 +294,7 @@ impl Plugin for DevProbesPlugin {
             // `WOW_PROBE_LOOK`, `WOW_PROBE_PITCH`, `WOW_PROBE_CAM`: each gated by its own
             // `from_env`, all ordered before `player::PlayerControlSet`.
             app.add_plugins(crate::capture::ProbeLookPlugin);
+            app.add_plugins(crate::capture::ProbeRoutePlugin);
             app.add_plugins(crate::capture::ProbePitchPlugin);
             app.add_plugins(crate::capture::ProbeCamPlugin);
             // The FPS journal (`WOW_FPS_JOURNAL`) is registered from `lib.rs` in every build.
@@ -362,6 +363,7 @@ pub(crate) fn add_every_instrument(app: &mut App) {
         app.add_plugins(crate::capture::ProbeCharCreatePlugin);
         app.add_plugins(crate::capture::LiveFpsPlugin);
         app.add_plugins(crate::capture::ProbeLookPlugin);
+        app.add_plugins(crate::capture::ProbeRoutePlugin);
         app.add_plugins(crate::capture::ProbePitchPlugin);
         app.add_plugins(crate::capture::ProbeCamPlugin);
     }
