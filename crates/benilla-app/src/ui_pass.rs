@@ -23,7 +23,7 @@ use bevy::math::Rect;
 use bevy::mesh::{Indices, Mesh, MeshTag, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, Extent3d,
+    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, Extent3d, ShaderType,
     TextureDimension, TextureFormat,
 };
 use bevy::shader::ShaderRef;
@@ -211,35 +211,35 @@ struct UiWhiteTexture(Handle<Image>);
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 #[bind_group_data(UiQuadKey)]
 pub(crate) struct UiQuadMaterial {
-    /// The EGxBlend, 0 to 4 ([`UiQuad::blend`]).
+    /// The flags, one uniform buffer: a uniform field of its own is a buffer per material, and a
+    /// Metal buffer takes a whole page (16 KB on the iPad) however small.
     #[uniform(0)]
-    blend: u32,
+    params: UiQuadParams,
     #[texture(1)]
     #[sampler(2)]
     texture: Option<Handle<Image>>,
-    #[uniform(3)]
-    circular: u32,
-    #[uniform(7)]
-    desaturate: u32,
-    #[uniform(8)]
-    premultiplied: u32,
-    /// `<= 0` disables the alpha test.
-    #[uniform(9)]
-    alpha_ref: f32,
-    #[uniform(10)]
-    gamma_texel: u32,
-    /// The mask span in physical px (the shader compares `@builtin(position)`); `z <= x` disables.
-    #[uniform(4)]
-    mask_rect: Vec4,
     #[texture(5)]
     #[sampler(6)]
     mask: Option<Handle<Image>>,
-    /// The mask texel's RGB multiplies the colour ([`UiQuadMask::modulate_rgb`]).
-    #[uniform(12)]
-    mask_rgb: u32,
+}
+
+/// [`UiQuadMaterial`]'s flags, `UiQuadParams` in `ui_quad.wgsl`.
+#[derive(Clone, Copy, ShaderType)]
+struct UiQuadParams {
+    /// The mask span in physical px (the shader compares `@builtin(position)`); `z <= x` disables.
+    mask_rect: Vec4,
     /// `(u_min, v_min, u_max, v_max)`; `min > max` on an axis disables that axis.
-    #[uniform(11)]
     uv_clamp: Vec4,
+    /// The EGxBlend, 0 to 4 ([`UiQuad::blend`]).
+    blend: u32,
+    circular: u32,
+    desaturate: u32,
+    premultiplied: u32,
+    /// `<= 0` disables the alpha test.
+    alpha_ref: f32,
+    gamma_texel: u32,
+    /// The mask texel's RGB multiplies the colour ([`UiQuadMask::modulate_rgb`]).
+    mask_rgb: u32,
 }
 
 /// The pipeline axis of [`UiQuadMaterial`]: `MOD` alone needs a blend state of its own, since the
@@ -252,7 +252,7 @@ pub(crate) struct UiQuadKey {
 impl From<&UiQuadMaterial> for UiQuadKey {
     fn from(m: &UiQuadMaterial) -> Self {
         Self {
-            modulate: m.blend == BlendMode::Mod as u32,
+            modulate: m.params.blend == BlendMode::Mod as u32,
         }
     }
 }
@@ -278,19 +278,22 @@ impl UiQuadMaterial {
     /// the forced blend of [`Self::specialize`] is a plain replace: the reference's blending off.
     pub(crate) fn interior_tile(texture: Handle<Image>, alpha_ref: f32) -> Self {
         Self {
-            // The alpha-test arm returns before the blend modes.
-            blend: BlendMode::Blend as u32,
+            params: UiQuadParams {
+                // The alpha-test arm returns before the blend modes.
+                blend: BlendMode::Blend as u32,
+                circular: 0,
+                desaturate: 0,
+                premultiplied: 0,
+                alpha_ref,
+                // The alpha-test arm decodes explicitly, so the tile's SKIP_DECODE holds without
+                // this.
+                gamma_texel: 0,
+                mask_rect: Vec4::new(0.0, 0.0, -1.0, -1.0),
+                mask_rgb: 0,
+                uv_clamp: UV_CLAMP_OFF,
+            },
             texture: Some(texture),
-            circular: 0,
-            desaturate: 0,
-            premultiplied: 0,
-            alpha_ref,
-            // The alpha-test arm decodes explicitly, so the tile's SKIP_DECODE holds without this.
-            gamma_texel: 0,
-            mask_rect: Vec4::new(0.0, 0.0, -1.0, -1.0),
-            mask_rgb: 0,
             mask: None,
-            uv_clamp: UV_CLAMP_OFF,
         }
     }
 }
@@ -1082,17 +1085,19 @@ fn rebuild_ui_mesh(
             .entry(key)
             .or_insert_with(|| {
                 materials.add(UiQuadMaterial {
-                    blend: run.blend as u32,
+                    params: UiQuadParams {
+                        blend: run.blend as u32,
+                        circular: u32::from(run.circular),
+                        desaturate: u32::from(run.desaturated),
+                        premultiplied: u32::from(run.premultiplied),
+                        alpha_ref,
+                        gamma_texel: u32::from(run.gamma_texel),
+                        mask_rect,
+                        mask_rgb: u32::from(mask_rgb),
+                        uv_clamp,
+                    },
                     texture: Some(run.texture.clone()),
-                    circular: u32::from(run.circular),
-                    desaturate: u32::from(run.desaturated),
-                    premultiplied: u32::from(run.premultiplied),
-                    alpha_ref,
-                    gamma_texel: u32::from(run.gamma_texel),
-                    mask_rect,
                     mask: mask.clone(),
-                    mask_rgb: u32::from(mask_rgb),
-                    uv_clamp,
                 })
             })
             .clone();
@@ -1472,7 +1477,7 @@ mod tests {
             .world_mut()
             .resource::<Assets<UiQuadMaterial>>()
             .iter()
-            .map(|(_, m)| m.desaturate)
+            .map(|(_, m)| m.params.desaturate)
             .collect();
         flags.sort_unstable();
         assert_eq!(
@@ -1515,7 +1520,7 @@ mod tests {
             .resource::<Assets<UiQuadMaterial>>()
             .iter()
             .filter(|(_, m)| m.mask.is_some())
-            .map(|(_, m)| m.mask_rgb)
+            .map(|(_, m)| m.params.mask_rgb)
             .collect();
         flags.sort_unstable();
         assert_eq!(
@@ -1560,7 +1565,7 @@ mod tests {
             .world_mut()
             .resource::<Assets<UiQuadMaterial>>()
             .iter()
-            .map(|(_, m)| (m.blend, UiQuadKey::from(m).modulate))
+            .map(|(_, m)| (m.params.blend, UiQuadKey::from(m).modulate))
             .collect();
         modes.sort_unstable();
         assert_eq!(
