@@ -38,7 +38,8 @@ pub struct AdtTile {
     /// WMO building placements (raw WoW coords).
     pub wmos: Vec<WmoInstance>,
     /// The decoded MCNK chunks, kept resident: the app derives the collider, the MCLQ liquids and
-    /// the ground clutter from them.
+    /// the ground clutter from them. Their alpha maps are moved into [`Self::alpha_array`], so
+    /// each chunk's `alpha_map` is `None` here.
     pub chunks: Vec<ChunkMesh>,
 }
 
@@ -143,7 +144,7 @@ impl AssetLoader for AdtLoader {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
         let to_io = |e: anyhow::Error| std::io::Error::other(format!("{e:#}"));
-        let tile = adt_to_tile_mesh(&bytes).map_err(to_io)?;
+        let mut tile = adt_to_tile_mesh(&bytes).map_err(to_io)?;
 
         // Layer array: a solid-green fallback at index 0, then each unique layer texture, packed
         // once the whole tile is read.
@@ -157,7 +158,7 @@ impl AssetLoader for AdtLoader {
 
         let mut shading: Vec<ChunkShading> = Vec::with_capacity(tile.chunks.len());
 
-        for chunk in tile.chunks.iter() {
+        for chunk in tile.chunks.iter_mut() {
             // A hole-emptied chunk takes no alpha or shadow slot either.
             if chunk.indices.len() < 3 {
                 shading.push(ChunkShading::default());
@@ -182,9 +183,11 @@ impl AssetLoader for AdtLoader {
                 li[slot] = li[0];
             }
 
-            let ai = match &chunk.alpha_map {
+            // Moved, not copied: `alpha_array` is the only reader, and the chunk stays resident
+            // (~4 MB a tile of RGBA kept twice otherwise).
+            let ai = match chunk.alpha_map.take() {
                 Some(rgba) => {
-                    alpha_buf.extend_from_slice(rgba);
+                    alpha_buf.extend_from_slice(&rgba);
                     alpha_count += 1;
                     alpha_count - 1
                 }
