@@ -20,7 +20,12 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 /// The sheet's side in physical texels: 2048² RGBA8 is 16 MB of VRAM, allocated on the first glyph
 /// and never reallocated. `WOW_GLYPH_CACHE=1` reports how full it runs.
+#[cfg(not(target_os = "ios"))]
 pub(super) const SHEET_SIZE: u32 = 2048;
+/// iOS: 1024², 4 MB. Login into Orgrimmar with its names fills 125K texels at dpi 2 (iPad Air 2),
+/// 12% of this side.
+#[cfg(target_os = "ios")]
+pub(super) const SHEET_SIZE: u32 = 1024;
 
 /// Texels between cells, holding each cell's transparent [`frame`]; one is enough, as a quad's edge
 /// pixel samples under half a texel outside its cell at any magnification.
