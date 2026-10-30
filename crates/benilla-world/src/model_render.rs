@@ -904,7 +904,7 @@ pub fn plugin(app: &mut App) {
 
 /// Expire the material dedup by distance.
 fn scope_model_materials(mut scope: crate::art_scope::ArtScope, mut mats: ResMut<ModelMaterials>) {
-    scope.apply(&mut mats.0, crate::art_scope::ArtSlot::ModelMats);
+    scope.apply_unheld(&mut mats.0, crate::art_scope::ArtSlot::ModelMats);
 }
 
 /// Drop the material dedup whole on a cross-map transition; entries rebuild on demand.

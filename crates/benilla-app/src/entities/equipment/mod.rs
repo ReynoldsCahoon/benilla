@@ -303,7 +303,7 @@ pub(crate) struct ItemUse {
     next_sweep: f32,
 }
 
-/// Drop the item models no unit has shown for `DISPLAY_GRACE`: every worn or held model is in some
+/// Drop the item models no unit has shown for the unused grace: every worn or held model is in some
 /// unit's or corpse's [`HeldItems`], and a preview ensures its models before each read, so it
 /// rebuilds an evicted one itself. A drawn item holds its own part handles.
 pub(crate) fn sweep_item_displays(

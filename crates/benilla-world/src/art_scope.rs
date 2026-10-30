@@ -27,6 +27,32 @@ const DEFAULT_RADIUS_YD: f32 = 5.0 * TILE_SIZE;
 /// stay resident for the whole map, a material and its textures each.
 const ENTITY_RADIUS_YD: f32 = 250.0;
 
+/// How long an entity-art cache entry nothing else holds stays before it drops: longer than a
+/// despawn and respawn or a step out of view and back, so neither rebuilds. Inside a city the
+/// radius never binds (the whole of Orgrimmar sits within it); use does.
+const UNUSED_GRACE_SECS: f32 = 60.0;
+
+/// [`UNUSED_GRACE_SECS`], or `$WOW_DISPLAY_GRACE` seconds: a test knob, so a route run's end census
+/// need not wait out the full grace. The display-model caches in `benilla-app` share it.
+pub fn unused_grace() -> f32 {
+    static GRACE: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
+        std::env::var("WOW_DISPLAY_GRACE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(UNUSED_GRACE_SECS)
+    });
+    *GRACE
+}
+
+/// Whether anything besides the cache's own copy holds `handle`: an entity drawing it, a display
+/// model's parts, a booth scene, a pending spawn. A `Uuid` handle is never the cache's to drop.
+fn held_elsewhere<A: Asset>(handle: &Handle<A>) -> bool {
+    match handle {
+        Handle::Strong(arc) => std::sync::Arc::strong_count(arc) > 1,
+        Handle::Uuid(..) => true,
+    }
+}
+
 /// The far corner of the widest tile block the residency window keeps (at the `farclip` clamp's
 /// maximum), plus a tile: a stamp is where the viewer stood, so no smaller radius is safe.
 fn radius_floor() -> f32 {
@@ -187,6 +213,33 @@ impl ArtScope<'_> {
     }
 }
 
+impl ArtScope<'_> {
+    /// [`Self::apply`], then on sweep frames also drop the entries of a handle cache that nothing
+    /// outside it has held for [`unused_grace`]: the use rule, which binds inside a city where
+    /// the radius never does.
+    pub fn apply_unheld<K: Eq + Hash, A: Asset>(
+        &mut self,
+        cache: &mut SpatialCache<K, Handle<A>>,
+        slot: ArtSlot,
+    ) {
+        self.apply(cache, slot);
+        if !self.state.due {
+            return;
+        }
+        let dropped = cache.drop_unheld(self.state.now, unused_grace(), held_elsewhere);
+        let i = slot.idx();
+        self.census.live[i] = cache.len();
+        self.census.dropped[i] += dropped;
+        if dropped > 0 {
+            debug!(
+                "art-scope: dropped {dropped} unheld {} entries ({} live)",
+                slot.column(),
+                cache.len()
+            );
+        }
+    }
+}
+
 fn configure_art_scope(mut state: ResMut<ArtScopeState>) {
     state.radius = radius_from_env();
     if state.radius > 0.0 {
@@ -254,6 +307,18 @@ mod tests {
         );
         // (26 + 1 + 16) chunks each way at farclip 777, to the corner, plus a tile: ~2560 yd.
         assert!((radius_floor() - 2560.0).abs() < 1.0, "{}", radius_floor());
+    }
+
+    /// The cache's own copy alone is unheld; any clone outside it (an entity's material) holds it.
+    #[test]
+    fn only_a_clone_outside_the_cache_holds_a_handle() {
+        let mut images = Assets::<Image>::default();
+        let cached = images.add(Image::default());
+        assert!(!held_elsewhere(&cached));
+        let drawn = cached.clone();
+        assert!(held_elsewhere(&cached));
+        drop(drawn);
+        assert!(!held_elsewhere(&cached));
     }
 
     /// `$WOW_ART_RADIUS` is unset in the test binary, as in every ordinary run.

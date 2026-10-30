@@ -95,6 +95,17 @@ impl<K: Eq + Hash, V> SpatialCache<K, V> {
         });
         before - self.map.len()
     }
+
+    /// Drop every entry unused for `grace` s since a sweep stamped it whose value `held` says
+    /// nothing outside the cache holds; returns how many. Run after [`Self::scope`], which stamps.
+    pub fn drop_unheld(&mut self, now: f32, grace: f32, held: impl Fn(&V) -> bool) -> usize {
+        let before = self.map.len();
+        self.map.retain(|_, (value, stamp)| match *stamp {
+            None => true,
+            Some(s) => now - s.t < grace || held(value),
+        });
+        before - self.map.len()
+    }
 }
 
 #[cfg(test)]
@@ -110,6 +121,26 @@ mod tests {
     const FAR: [f32; 3] = [4000.0, 0.0, 0.0];
     /// Five ADT tiles; any radius exercises the same code.
     const R: f32 = 2667.0;
+
+    /// The use rule: an entry nothing else holds drops once its grace passes, wherever the camera
+    /// is; a held one stays; an entry no sweep has stamped yet waits.
+    #[test]
+    fn an_unheld_entry_drops_after_its_grace_and_a_held_one_stays() {
+        // The value says whether something outside the cache holds it.
+        let mut c: SpatialCache<u32, bool> = SpatialCache::default();
+        c.insert(1, false);
+        c.insert(2, true);
+        assert_eq!(c.drop_unheld(NOW + 999.0, 60.0, |h| *h), 0, "unstamped");
+        c.scope(HOME, R, NOW);
+        assert_eq!(
+            c.drop_unheld(NOW + 59.0, 60.0, |h| *h),
+            0,
+            "inside the grace"
+        );
+        assert_eq!(c.drop_unheld(NOW + 61.0, 60.0, |h| *h), 1);
+        assert!(c.fetch(&1).is_none());
+        assert_eq!(c.fetch(&2), Some(true));
+    }
 
     #[test]
     fn the_first_sweep_stamps_rather_than_judges() {

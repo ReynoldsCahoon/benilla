@@ -535,21 +535,11 @@ fn evict_display_caches(
     bones.0.clear();
 }
 
-/// How long a creature or GameObject display may go unused before [`update_display_models`] drops
-/// its cache entry: longer than a despawn and respawn or a step out of view and back, so neither
-/// rebuilds the model. A drawn entity holds its own part handles; an entry only feeds a new one.
-const DISPLAY_GRACE: f32 = 60.0;
-
-/// [`DISPLAY_GRACE`], or `WOW_DISPLAY_GRACE` seconds: a test knob, so a route run's end census
-/// need not wait out the full grace before it reads what was freed.
+/// How long a display may go unused before its cache entry drops: [`benilla_world::art_scope`]'s
+/// grace, shared with the entity material cache. A drawn entity holds its own part handles; an
+/// entry only feeds a new one.
 fn display_grace() -> f32 {
-    static GRACE: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
-        std::env::var("WOW_DISPLAY_GRACE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DISPLAY_GRACE)
-    });
-    *GRACE
+    benilla_world::art_scope::unused_grace()
 }
 
 /// When each display id was last in use, by cache.
@@ -560,7 +550,7 @@ struct DisplayUse {
     next_sweep: f32,
 }
 
-/// Drop the entries of a display cache whose id `seen` has not stamped within [`DISPLAY_GRACE`];
+/// Drop the entries of a display cache whose id `seen` has not stamped within [`display_grace`];
 /// an entry it has never stamped (inserted by a test) starts its grace now. The cache reads as
 /// changed only when something drops: `resolve_equipment`'s skip gate watches `Creatures`.
 fn sweep_display_cache<C, K: Copy + Eq + std::hash::Hash>(
@@ -1167,7 +1157,7 @@ fn update_display_models(
     }
 
     // `actives` is every creature and GameObject display in use and these caches' only creator,
-    // so an entry it has not named for `DISPLAY_GRACE` serves nothing.
+    // so an entry it has not named for `display_grace()` serves nothing.
     let now = time.elapsed_secs();
     for &(kind, disp) in &actives {
         match kind {
