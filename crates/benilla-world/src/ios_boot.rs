@@ -5,8 +5,12 @@
 //!   that mode draws through indirect buffers, which family 2 lacks (wgpu: no `INDIRECT_EXECUTION`),
 //!   and its meshes silently vanish. Paired with `PbrPlugin::use_gpu_instance_buffer_builder` off
 //!   in [`crate::boot::tuned_default_plugins`].
-//! - One buffer per mesh, so every mesh draw starts at vertex 0: family 2 has no base-vertex draws.
-//!   (Base instance is emulated in the vendored wgpu-hal and naga.)
+//! - No base-vertex draws on family 2: Bevy's mesh allocator sees wgpu's `BASE_VERTEX` downlevel
+//!   flag unset and gives each mesh's vertex data its own buffer, so every draw starts at vertex 0,
+//!   while index data still packs into shared slabs (a draw's first index is a buffer offset, which
+//!   family 2 has). An earlier `large_threshold: 0` also gave every index array its own buffer:
+//!   ~4500 extra buffers in Orgrimmar, each at least a 16 KB page. (Base instance is emulated in
+//!   the vendored wgpu-hal and naga.)
 //! - The window counts as focused: winit never reports focus on iOS, and benilla mutes audio and
 //!   gates input on an unfocused window. Written without marking the window changed (bevy_winit
 //!   would ask winit to focus it, which iOS has no call for), and announced once (`WindowFocused`).
@@ -33,7 +37,6 @@ use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use bevy::render::batching::gpu_preprocessing::{GpuPreprocessingMode, GpuPreprocessingSupport};
-use bevy::render::mesh::allocator::MeshAllocatorSettings;
 use bevy::render::renderer::render_system;
 use bevy::render::{Render, RenderApp, RenderSystems};
 use bevy::winit::{UpdateMode, WinitSettings};
@@ -59,10 +62,6 @@ impl Plugin for IosBootPlugin {
         app.sub_app_mut(RenderApp)
             .insert_resource(GpuPreprocessingSupport {
                 max_supported_mode: GpuPreprocessingMode::None,
-            })
-            .insert_resource(MeshAllocatorSettings {
-                large_threshold: 0,
-                ..default()
             });
         if let Some(fraction) = std::env::var("WOW_IOS_VIEWPORT")
             .ok()
