@@ -35,5 +35,16 @@ slabs benilla's vertex layouts make. `src/mesh/allocator.rs` builds each slab's 
 farclip 177. A slab out of nodes refuses the allocation and the mesh takes the next slab or a new
 one, the path a full slab already takes. All platforms.
 
+## The patch — one main texture for a view that never ping-pongs
+
+`prepare_view_targets` (`src/view/mod.rs`) gives every view two full-size main textures, `a` and
+`b`, the second only for `ViewTarget::post_process_write`. benilla's player-UI and world cameras run
+`CameraOutputMode::Skip` and their final passes read the main texture once
+(`benilla_world::final_pass`), so `b` is never written: on the iPad Air 2 that is 12.6 MB for the
+full-window UI view and the world view's share at its render scale. The fork adds a
+`SingleMainTexture` view component, extracted like `Hdr`; on such a view `b` is a clone of `a`.
+A post-process write there reads and writes one texture, which wgpu's validation rejects, so a
+wrong marker fails loudly. All platforms; only views carrying the marker change.
+
 Check: `diff -r <registry>/bevy_render-0.18.1 third_party/bevy_render` shows only those lines, the shadow-sampling
-lines above, the slab node table, and this file.
+lines above, the slab node table, the single main texture, and this file.

@@ -426,6 +426,9 @@ fn spawn_ui_camera(mut commands: Commands) {
         // No MSAA, named because silence means 4×: `Camera` requires `Msaa`, whose default is
         // `Sample4`. The world arrives resolved, and the quads are axis-aligned.
         bevy::render::view::Msaa::Off,
+        // `Skip`: the decode reads the main texture once and writes the swapchain, so no
+        // ping-pong texture.
+        bevy::render::view::SingleMainTexture,
         // The lane's mandatory decode: the quad pass leaves gamma bytes in the target.
         crate::ui_gamma::UiGammaLane::default(),
         // The world as this pass's first draw; `source` is `None` until a world camera draws.

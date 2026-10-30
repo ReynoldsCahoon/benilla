@@ -104,6 +104,7 @@ impl Plugin for ViewPlugin {
             // NOTE: windows.is_changed() handles cases where a window was resized
             .add_plugins((
                 ExtractComponentPlugin::<Hdr>::default(),
+                ExtractComponentPlugin::<SingleMainTexture>::default(),
                 ExtractComponentPlugin::<Msaa>::default(),
                 ExtractComponentPlugin::<OcclusionCulling>::default(),
                 RenderVisibilityRangePlugin,
@@ -200,6 +201,12 @@ impl Msaa {
 )]
 #[reflect(Component, Default, PartialEq, Hash, Debug)]
 pub struct Hdr;
+
+/// benilla: a view that never takes [`ViewTarget::post_process_write`], so `main_texture_b` aliases
+/// `main_texture_a` instead of holding a second full-size texture. A post-process write on such a
+/// view reads and writes one texture, which wgpu's validation rejects.
+#[derive(Component, Default, Copy, Clone, ExtractComponent, PartialEq, Eq, Hash, Debug)]
+pub struct SingleMainTexture;
 
 /// An identifier for a view that is stable across frames.
 ///
@@ -1069,11 +1076,12 @@ pub fn prepare_view_targets(
         &ExtractedView,
         &CameraMainTextureUsages,
         &Msaa,
+        Has<SingleMainTexture>,
     )>,
     view_target_attachments: Res<ViewTargetAttachments>,
 ) {
     let mut textures = <HashMap<_, _>>::default();
-    for (entity, camera, view, texture_usage, msaa) in cameras.iter() {
+    for (entity, camera, view, texture_usage, msaa, single) in cameras.iter() {
         let (Some(target_size), Some(out_attachment)) = (
             camera.physical_target_size,
             camera
@@ -1102,7 +1110,7 @@ pub fn prepare_view_targets(
         };
 
         let (a, b, sampled, main_texture) = textures
-            .entry((camera.target.clone(), texture_usage.0, view.hdr, msaa))
+            .entry((camera.target.clone(), texture_usage.0, view.hdr, msaa, single))
             .or_insert_with(|| {
                 let descriptor = TextureDescriptor {
                     label: None,
@@ -1125,13 +1133,17 @@ pub fn prepare_view_targets(
                         ..descriptor
                     },
                 );
-                let b = texture_cache.get(
-                    &render_device,
-                    TextureDescriptor {
-                        label: Some("main_texture_b"),
-                        ..descriptor
-                    },
-                );
+                let b = if single {
+                    a.clone()
+                } else {
+                    texture_cache.get(
+                        &render_device,
+                        TextureDescriptor {
+                            label: Some("main_texture_b"),
+                            ..descriptor
+                        },
+                    )
+                };
                 let sampled = if msaa.samples() > 1 {
                     let sampled = texture_cache.get(
                         &render_device,

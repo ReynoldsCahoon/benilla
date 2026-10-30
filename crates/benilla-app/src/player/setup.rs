@@ -114,6 +114,9 @@ pub(super) fn setup_player(
         // A linear `Rgba16Float` target without tonemapping: the shaders light in clamped gamma
         // space, so the output matches an 8-bit target.
         Hdr,
+        // `Skip` ([`world_camera_output`]): the UI camera reads the main texture, nothing
+        // ping-pongs it.
+        bevy::render::view::SingleMainTexture,
         Tonemapping::None,
         // FFXGlow, `scene + glow·blur²`: the blur here, the combine in the UI camera's ground pass.
         benilla_world::ffx_glow::FfxGlow::WORLD,
