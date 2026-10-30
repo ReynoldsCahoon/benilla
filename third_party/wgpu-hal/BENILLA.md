@@ -74,11 +74,28 @@ vertex-stage buffer slot after the sizes buffer, handed to naga as
 `PipelineStageInfo::first_instance_slot`; every draw writes its first instance there with
 `setVertexBytes` and draws from instance 0. Hunks are marked `iPad:`. Devices with base-instance
 draws, every Mac included, take no new path. Per-instance vertex buffers would still fetch from
-instance 0; nothing in benilla uses one. Base vertex is not emulated: the iOS boot gives each mesh
-its own buffer (`benilla_world::boot`).
+instance 0; nothing in benilla uses one. Base vertex is emulated too (next section).
 
 Measured on the iPad Air 2 (the `vanilla-ipad` spike, 1000 separate draws): 18.5 ms on the render
 thread, against 22.4 ms for rebinding the per-object buffer at an offset per draw in Bevy.
+
+## The iPad patch — emulated base vertex, `src/metal/{mod,command,adapter}.rs`
+
+Without base-vertex draws Bevy's mesh allocator gave every mesh's vertex data its own buffer
+(`DownlevelFlags::BASE_VERTEX` unset): ~6200 live buffers in Orgrimmar on the iPad, each at
+least a 16 KB page. On a device without them, `draw_indexed` now shifts each bound vertex buffer
+that the pipeline steps per vertex by `base_vertex × stride` (`setVertexBufferOffset`, which
+every family has) and draws at base vertex 0 (`CommandEncoder::emulate_base_vertex`). This hal
+always compiles naga's vertex pulling, which bounds-checks every vertex buffer against the size
+in the sizes buffer, so a shifted buffer's size shrinks by the shift and the sizes are re-sent.
+`CommandState::vertex_buffer_bindings` keeps each binding's offset, size and applied shift, so
+an unchanged shift costs nothing; `draw` (non-indexed, whose `first_vertex` Metal takes natively)
+and per-instance or constant buffers are kept unshifted. `DownlevelFlags::BASE_VERTEX` is then
+reported on every Metal device, and Bevy packs vertex data into shared slabs. Hunks are marked
+`iPad:`; a device with base-vertex draws takes no new path.
+
+Measured on the iPad Air 2 (benilla `ipad` branch, the Orgrimmar route): live GPU buffers in The
+Drag 6208 -> 1475, screenshots in the Valley of Strength and The Drag drawn whole.
 
 ## The iPad GPU meter — `src/metal/mod.rs`, `Queue::submit`
 

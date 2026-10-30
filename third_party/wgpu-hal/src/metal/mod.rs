@@ -1026,6 +1026,11 @@ struct CommandState {
 
     vertex_buffer_size_map: FastHashMap<u64, wgt::BufferSize>,
 
+    /// iPad: each bound vertex buffer's binding offset and size as `set_vertex_buffer`
+    /// gave them, and the byte shift base-vertex emulation has applied on top; keyed like
+    /// `vertex_buffer_size_map`. See `CommandEncoder::emulate_base_vertex`.
+    vertex_buffer_bindings: FastHashMap<u64, (wgt::BufferAddress, u64, u64)>,
+
     work_group_memory_sizes: Vec<u32>,
     push_constants: Vec<u32>,
 

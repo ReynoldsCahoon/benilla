@@ -5,12 +5,11 @@
 //!   that mode draws through indirect buffers, which family 2 lacks (wgpu: no `INDIRECT_EXECUTION`),
 //!   and its meshes silently vanish. Paired with `PbrPlugin::use_gpu_instance_buffer_builder` off
 //!   in [`crate::boot::tuned_default_plugins`].
-//! - No base-vertex draws on family 2: Bevy's mesh allocator sees wgpu's `BASE_VERTEX` downlevel
-//!   flag unset and gives each mesh's vertex data its own buffer, so every draw starts at vertex 0,
-//!   while index data still packs into shared slabs (a draw's first index is a buffer offset, which
-//!   family 2 has). An earlier `large_threshold: 0` also gave every index array its own buffer:
-//!   ~4500 extra buffers in Orgrimmar, each at least a 16 KB page. (Base instance is emulated in
-//!   the vendored wgpu-hal and naga.)
+//! - No base-vertex or base-instance draws on family 2: both are emulated in the vendored wgpu-hal
+//!   (and naga, for base instance; `third_party/wgpu-hal/BENILLA.md`), which reports
+//!   `BASE_VERTEX`, so Bevy's mesh allocator packs vertex and index data into shared slabs as on
+//!   any GPU. An earlier `large_threshold: 0` gave every mesh its own vertex and index buffers:
+//!   ~9000 extra buffers in Orgrimmar, each at least a 16 KB page.
 //! - The window counts as focused: winit never reports focus on iOS, and benilla mutes audio and
 //!   gates input on an unfocused window. Written without marking the window changed (bevy_winit
 //!   would ask winit to focus it, which iOS has no call for), and announced once (`WindowFocused`).

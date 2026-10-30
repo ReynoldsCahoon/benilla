@@ -25,6 +25,7 @@ impl Default for super::CommandState {
             stage_infos: Default::default(),
             storage_buffer_length_map: Default::default(),
             vertex_buffer_size_map: Default::default(),
+            vertex_buffer_bindings: Default::default(),
             work_group_memory_sizes: Vec::new(),
             push_constants: Vec::new(),
             pending_timer_queries: Vec::new(),
@@ -33,6 +34,57 @@ impl Default for super::CommandState {
 }
 
 impl super::CommandEncoder {
+    /// iPad: on GPUs without base-vertex draws (Metal GPU family < 3, which throws on
+    /// one), an indexed draw's base vertex becomes a shift of every per-vertex buffer binding by
+    /// `base_vertex × stride` (`setVertexBufferOffset`, which every family has), and the draw goes
+    /// out at base vertex 0. This hal always compiles vertex pulling, which bounds-checks each
+    /// buffer against the size passed in the sizes buffer, so a shifted buffer's size shrinks by
+    /// the shift and the sizes are re-sent. A binding already shifted by the same bytes is left
+    /// alone; per-instance and constant buffers are kept unshifted. A negative base vertex, which
+    /// Bevy never sends, draws as 0.
+    fn emulate_base_vertex(&mut self, base_vertex: i32) {
+        let base = u64::try_from(base_vertex).unwrap_or(0);
+        let state = &mut self.state;
+        let encoder = state.render.as_ref().unwrap();
+        let mut resized = false;
+        for vbm in state.stage_infos.vs.vertex_buffer_mappings.iter() {
+            let id = u64::from(vbm.id);
+            let Some(binding) = state.vertex_buffer_bindings.get_mut(&id) else {
+                continue;
+            };
+            // A buffer this pipeline steps per instance or reads as a constant is unshifted.
+            let shift = match vbm.step_mode {
+                naga::back::msl::VertexBufferStepMode::ByVertex => base * u64::from(vbm.stride),
+                _ => 0,
+            };
+            if binding.2 == shift {
+                continue;
+            }
+            binding.2 = shift;
+            encoder.set_vertex_buffer_offset(id, binding.0 + shift);
+            match core::num::NonZeroU64::new(binding.1.saturating_sub(shift)) {
+                Some(size) => {
+                    state.vertex_buffer_size_map.insert(id, size);
+                }
+                None => {
+                    state.vertex_buffer_size_map.remove(&id);
+                }
+            }
+            resized = true;
+        }
+        if resized {
+            if let Some((index, sizes)) =
+                state.make_sizes_buffer_update(naga::ShaderStage::Vertex, &mut self.temp.binding_sizes)
+            {
+                encoder.set_vertex_bytes(
+                    index as _,
+                    (sizes.len() * WORD_SIZE) as u64,
+                    sizes.as_ptr().cast(),
+                );
+            }
+        }
+    }
+
     pub fn raw_command_buffer(&self) -> Option<&metal::CommandBuffer> {
         self.raw_cmd_buf.as_ref()
     }
@@ -151,6 +203,7 @@ impl super::CommandState {
     fn reset(&mut self) {
         self.storage_buffer_length_map.clear();
         self.vertex_buffer_size_map.clear();
+        self.vertex_buffer_bindings.clear();
         self.stage_infos.vs.clear();
         self.stage_infos.fs.clear();
         self.stage_infos.cs.clear();
@@ -997,6 +1050,10 @@ impl crate::CommandEncoder for super::CommandEncoder {
         encoder.set_vertex_buffer(buffer_index, Some(&binding.buffer.raw), binding.offset);
 
         let buffer_size = binding.resolve_size();
+        // iPad: bound unshifted; base-vertex emulation shifts it per draw.
+        self.state
+            .vertex_buffer_bindings
+            .insert(buffer_index, (binding.offset, buffer_size, 0));
         if buffer_size > 0 {
             self.state.vertex_buffer_size_map.insert(
                 buffer_index,
@@ -1061,6 +1118,11 @@ impl crate::CommandEncoder for super::CommandEncoder {
         first_instance: u32,
         instance_count: u32,
     ) {
+        // iPad: a shift an indexed draw left on the bindings would offset this draw's
+        // `first_vertex` twice; unshift them.
+        if !self.shared.private_caps.base_vertex_first_instance_drawing {
+            self.emulate_base_vertex(0);
+        }
         let encoder = self.state.render.as_ref().unwrap();
         let first_instance = emulate_first_instance(
             encoder,
@@ -1099,6 +1161,13 @@ impl crate::CommandEncoder for super::CommandEncoder {
         first_instance: u32,
         instance_count: u32,
     ) {
+        // iPad: no base-vertex draws below family 3; shift the vertex bindings instead.
+        let base_vertex = if self.shared.private_caps.base_vertex_first_instance_drawing {
+            base_vertex
+        } else {
+            self.emulate_base_vertex(base_vertex);
+            0
+        };
         let encoder = self.state.render.as_ref().unwrap();
         let first_instance = emulate_first_instance(
             encoder,

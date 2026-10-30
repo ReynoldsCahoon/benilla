@@ -1024,10 +1024,10 @@ impl super::PrivateCapabilities {
             self.indirect_draw_dispatch,
         );
         // TODO: add another flag for `first_instance`
-        downlevel.flags.set(
-            wgt::DownlevelFlags::BASE_VERTEX,
-            self.base_vertex_first_instance_drawing,
-        );
+        // iPad: base vertex is emulated below family 3 (`emulate_base_vertex` in
+        // `command.rs`), so every Metal device has it; Bevy then packs vertex data into shared
+        // slabs instead of a buffer per mesh.
+        downlevel.flags.set(wgt::DownlevelFlags::BASE_VERTEX, true);
         downlevel
             .flags
             .set(wgt::DownlevelFlags::ANISOTROPIC_FILTERING, true);
