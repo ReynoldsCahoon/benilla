@@ -571,7 +571,7 @@ pub(super) fn install(
             let model = lua.app_data_ref::<Model>().expect("model");
             let d = model.region_data.get(&rh);
             let spacing = match kind {
-                FontKind::FontString => d.map_or(0.0, super::RegionData::line_gap),
+                FontKind::FontString => d.map_or(0.0, |d| d.line_gap()),
                 FontKind::Instance => d.map_or(0.0, |d| d.spacing),
             };
             Ok(model.layout_units().round_trip(spacing))

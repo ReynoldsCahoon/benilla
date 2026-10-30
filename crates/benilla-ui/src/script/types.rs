@@ -417,6 +417,11 @@ impl Gradient {
     }
 }
 
+/// [`RegionData`] by region, boxed: a value is 512 bytes, which inline would size every bucket of
+/// the table, empty ones and a rehash's second table included.
+pub(crate) type RegionDataMap =
+    std::collections::HashMap<crate::widget::RegionHandle, Box<RegionData>>;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct RegionData {
     /// `Show`/`Hide` and XML `hidden=`: a hidden region emits no quad, whatever its owner's state.

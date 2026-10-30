@@ -8,8 +8,8 @@ use super::{
     cursor, death, gossip, guild, item_text, loot, loot_roll, macros, mail, merchant,
     parse_unit_token, party, petition, pvp, quest, quest_log, reputation, simplehtml, skills,
     slider, social, spellbook, stable, taxi, trade, tradeskill, trainer, weapon_enchant,
-    ActionSlot, AuraState, FontObject, ItemTemplateView, MusicRequest, PlayerReqState, RegionData,
-    ScriptValue, SoundRequest, UnitBase, UnitState, UnitTokenParse,
+    ActionSlot, AuraState, FontObject, ItemTemplateView, MusicRequest, PlayerReqState, ScriptValue,
+    SoundRequest, UnitBase, UnitState, UnitTokenParse,
 };
 
 // ── The Rust-side model ──
@@ -255,7 +255,7 @@ pub(crate) struct Model {
     /// Per text frame, its hyperlink buttons, live and free ([`super::hyperlink::LinkPool`]).
     pub(crate) link_buttons: HashMap<FrameHandle, super::hyperlink::LinkPool>,
     /// Region visuals (texture, colour, text) and layout (anchors, size, justify).
-    pub(crate) region_data: HashMap<RegionHandle, RegionData>,
+    pub(crate) region_data: super::types::RegionDataMap,
     /// The textures the regions' slots hold, with their creation stamps ([`super::texel`]).
     pub(crate) texels: super::texel::Texels,
     /// Each frame's backdrop plate (`<Backdrop>` or `SetBackdrop`, the client's `frame+0x1ac`):

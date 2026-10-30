@@ -7,7 +7,7 @@ use mlua::{Function, Lua, MultiValue, Table, Value};
 use crate::script::binding_abi::{method_string, optional_string, usage};
 use crate::script::region::region_wrapper;
 use crate::script::script_map::script_name;
-use crate::script::{Model, RegionData, REG_SCRIPTS};
+use crate::script::{Model, REG_SCRIPTS};
 use crate::widget::{FrameHandle, RegionKind};
 
 use super::{decode_id, draw_layer_from_str, frame_handle_of, publish_global};
@@ -450,7 +450,7 @@ fn create_region(
             .arena
             .create_region(owner, kind, dl, 0)
             .ok_or_else(|| mlua::Error::runtime("CreateTexture/FontString: dead owner frame"))?;
-        model.region_data.insert(rh, RegionData::default());
+        model.region_data.insert(rh, Box::default());
         model.region_id(rh)
     };
 

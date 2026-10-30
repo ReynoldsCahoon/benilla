@@ -195,7 +195,7 @@ fn new_texture_region(
     let rh = model
         .arena
         .create_region(owner, RegionKind::Texture, layer, 0)?;
-    model.region_data.insert(rh, super::RegionData::default());
+    model.region_data.insert(rh, Box::default());
     model.touch_layout_region(rh);
     Some(rh)
 }

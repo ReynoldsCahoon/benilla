@@ -537,7 +537,7 @@ pub(super) fn ensure_text_region_in(model: &mut Model, h: FrameHandle) -> Option
             ..RegionData::default()
         };
         apply_text_region_justify(&mut data, multi_line);
-        slot.insert(data);
+        slot.insert(Box::new(data));
         model.touch_layout_region(rh);
     }
     if let Some(KindState::EditBox(eb)) = model.arena.frame_mut(h).map(|f| &mut f.kind_state) {

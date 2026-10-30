@@ -342,9 +342,7 @@ pub(crate) fn ensure_font_region_in(
     {
         *slot = Some(rh);
     }
-    model
-        .region_data
-        .insert(rh, crate::script::RegionData::default());
+    model.region_data.insert(rh, Box::default());
     Some(rh)
 }
 

@@ -156,7 +156,7 @@ fn build(model: &mut Model, fh: FrameHandle, blocks: &[Block]) {
                 let text = model.localized_text(text.clone());
                 model.region_data.insert(
                     rh,
-                    RegionData {
+                    Box::new(RegionData {
                         anchors: Anchors::from([anchor_for(
                             prev_block,
                             frame_id,
@@ -169,7 +169,7 @@ fn build(model: &mut Model, fh: FrameHandle, blocks: &[Block]) {
                         size: Some((Len::Script(width), Len::Script(0.0))),
                         text: Some(text),
                         ..RegionData::default()
-                    },
+                    }),
                 );
                 // The link applies every group the font holds; a later set on the element font
                 // pushes to the blocks already built.
@@ -218,11 +218,11 @@ fn build(model: &mut Model, fh: FrameHandle, blocks: &[Block]) {
                     .unwrap_or_default();
                 model.region_data.insert(
                     rh,
-                    RegionData {
+                    Box::new(RegionData {
                         anchors,
                         size: Some((Len::Script(*w), Len::Script(*h))),
                         ..RegionData::default()
-                    },
+                    }),
                 );
                 if let Some(src) = src.clone() {
                     model.set_texel(rh, crate::script::texel::TexSet::File(src));

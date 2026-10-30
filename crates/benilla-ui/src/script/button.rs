@@ -470,10 +470,10 @@ fn ensure_slot(lua: &Lua, this: &Table, slot: Slot) -> mlua::Result<u32> {
             // own (`0x77fd10`), and the store shows a current state's texture (`0x779037`).
             model.region_data.insert(
                 rh,
-                RegionData {
+                Box::new(RegionData {
                     hidden: !slot.links_shown(),
                     ..RegionData::default()
-                },
+                }),
             );
             model.touch_layout_region(rh);
             let writes = match model.arena.frame_mut(h).map(|f| &mut f.kind_state) {

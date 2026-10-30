@@ -30,7 +30,7 @@ fn hold_clear(hold: &mut [u8], id: u32, bits: u8) {
 /// Node `id`'s anchors: a frame's layout input's, a region's own.
 pub(crate) fn node_anchors(
     layout_inputs: &HashMap<FrameHandle, LayoutInput>,
-    region_data: &HashMap<RegionHandle, RegionData>,
+    region_data: &super::types::RegionDataMap,
     id_to_frame: &IdMap<FrameHandle>,
     id_to_region: &IdMap<RegionHandle>,
     id: u32,

@@ -224,7 +224,7 @@ impl UiScript {
                     // rim reads as hard edge lines in our linear-blending pipeline; the lit plate
                     // brightens its bar instead. It stays a real shown ADD region, as
                     // `glow:IsShown()` is the mouseover signal 1.12 nameplate addons read.
-                    if data_ref.is_some_and(super::nameplate::is_unpainted_glow) {
+                    if data_ref.is_some_and(|d| super::nameplate::is_unpainted_glow(d)) {
                         continue;
                     }
                     let mut data = data_ref.cloned().unwrap_or_default();
