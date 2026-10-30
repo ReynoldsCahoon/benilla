@@ -18,6 +18,7 @@ doctest = false
 # The route walker in the player build, for the memory test walks (`BENILLA_IOS_FEATURES=route-probe`
 # through `ios/build-rust.sh`); off in a shipped build.
 route-probe = ["benilla-app/route-probe"]
+crowd-probe = ["benilla-app/crowd-probe"]
 
 [dependencies]
 # The player build: `default-features = false` keeps `dev` (and the source-tree paths) out.

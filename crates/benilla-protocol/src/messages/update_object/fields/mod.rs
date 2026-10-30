@@ -5,7 +5,7 @@ use crate::wire::{capacity_hint, read_u32_le, read_u8, Vector3d};
 use super::movement::ObjectType;
 
 // Descriptor field indices for build 5875.
-const FIELD_OBJECT_TYPE: u16 = 2;
+pub const FIELD_OBJECT_TYPE: u16 = 2;
 pub const FIELD_OBJECT_ENTRY: u16 = 3;
 const FIELD_OBJECT_SCALE_X: u16 = 4;
 // The creator of a spell-spawned object (bobber, ritual portal); 0 for a world spawn.
@@ -57,7 +57,7 @@ pub const FIELD_UNIT_MAXHEALTH: u16 = 28;
 const FIELD_UNIT_MAXPOWER1: u16 = 29;
 pub const FIELD_UNIT_LEVEL: u16 = 34;
 pub const FIELD_UNIT_FACTIONTEMPLATE: u16 = 35;
-const FIELD_UNIT_BYTES_0: u16 = 36;
+pub const FIELD_UNIT_BYTES_0: u16 = 36;
 pub const FIELD_UNIT_BYTES_1: u16 = 138;
 pub const FIELD_UNIT_FLAGS: u16 = 46;
 // The aura block: four public parallel arrays (`UpdateFields_1_12_1.h:67-70`), which the client
@@ -80,7 +80,7 @@ const FIELD_UNIT_BASE_HEALTH: u16 = 163;
 pub const FIELD_UNIT_DISPLAYID: u16 = 131;
 /// The unshifted appearance, untouched by forms, morphs and polymorph (`UpdateFields_1_12_1.h:77`).
 /// The client sizes the mover collision box from it (`0x60b270`), so a shapeshift keeps the box.
-const FIELD_UNIT_NATIVEDISPLAYID: u16 = 132;
+pub const FIELD_UNIT_NATIVEDISPLAYID: u16 = 132;
 /// The ridden mount's `CreatureDisplayInfo` id, 0 when unmounted; this field, not the aura, is the
 /// mounted state (`Unit::IsMounted`; client `[unit+0x110]+0x1fc`).
 pub const FIELD_UNIT_MOUNTDISPLAYID: u16 = 133;
@@ -179,8 +179,8 @@ impl UnitAuraSlot {
 }
 
 // PLAYER fields start at UNIT_END (188); the client decodes appearance bytes at `0x5fb200`.
-const FIELD_PLAYER_BYTES: u16 = 193;
-const FIELD_PLAYER_BYTES_2: u16 = 194;
+pub const FIELD_PLAYER_BYTES: u16 = 193;
+pub const FIELD_PLAYER_BYTES_2: u16 = 194;
 // The low u16 is `gender | (drunk & 0xFFFE)`, so byte 1 is the drunk level the client reads at
 // `[[unit+0xe68]+0x1d]`; byte 2 is the city-protector race, byte 3 the current honor rank
 // (`Player.h:351-356`). Public: the one honor value that streams for every visible player.
@@ -196,12 +196,14 @@ pub mod field {
     pub use super::{
         FIELD_CONTAINER_SLOT_1, FIELD_CORPSE_DYNAMIC_FLAGS, FIELD_GAMEOBJECT_STATE,
         FIELD_ITEM_ENCHANTMENT, FIELD_ITEM_SPELL_CHARGES, FIELD_ITEM_STACK_COUNT,
-        FIELD_OBJECT_ENTRY, FIELD_PLAYER_FIELD_COINAGE, FIELD_PLAYER_FLAGS,
-        FIELD_PLAYER_INV_SLOT_HEAD, FIELD_PLAYER_QUEST_LOG_1_1, FIELD_PLAYER_SKILL_INFO_1_1,
+        FIELD_OBJECT_ENTRY, FIELD_OBJECT_TYPE, FIELD_PLAYER_BYTES, FIELD_PLAYER_BYTES_2,
+        FIELD_PLAYER_FIELD_COINAGE, FIELD_PLAYER_FLAGS, FIELD_PLAYER_INV_SLOT_HEAD,
+        FIELD_PLAYER_QUEST_LOG_1_1, FIELD_PLAYER_SKILL_INFO_1_1,
         FIELD_PLAYER_VISIBLE_ITEM_1_CREATOR, FIELD_UNIT_AURA, FIELD_UNIT_AURAAPPLICATIONS,
-        FIELD_UNIT_AURAFLAGS, FIELD_UNIT_BYTES_1, FIELD_UNIT_CHANNEL_SPELL, FIELD_UNIT_DISPLAYID,
-        FIELD_UNIT_DYNAMIC_FLAGS, FIELD_UNIT_FACTIONTEMPLATE, FIELD_UNIT_FLAGS, FIELD_UNIT_HEALTH,
-        FIELD_UNIT_LEVEL, FIELD_UNIT_MAXHEALTH, FIELD_UNIT_MOUNTDISPLAYID, FIELD_UNIT_NPC_FLAGS,
+        FIELD_UNIT_AURAFLAGS, FIELD_UNIT_BYTES_0, FIELD_UNIT_BYTES_1, FIELD_UNIT_CHANNEL_SPELL,
+        FIELD_UNIT_DISPLAYID, FIELD_UNIT_DYNAMIC_FLAGS, FIELD_UNIT_FACTIONTEMPLATE,
+        FIELD_UNIT_FLAGS, FIELD_UNIT_HEALTH, FIELD_UNIT_LEVEL, FIELD_UNIT_MAXHEALTH,
+        FIELD_UNIT_MOUNTDISPLAYID, FIELD_UNIT_NATIVEDISPLAYID, FIELD_UNIT_NPC_FLAGS,
     };
 }
 

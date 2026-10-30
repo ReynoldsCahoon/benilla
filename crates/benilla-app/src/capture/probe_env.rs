@@ -185,6 +185,36 @@ pub(crate) const PROBE_VARS: &[ProbeVar] = &[
         wall_clock: false,
     },
     ProbeVar {
+        name: "WOW_PROBE_CROWD",
+        purpose: "\"<n>[,<n>…]\" — a synthetic player crowd around the probe, its cumulative size at each step (memory tests)",
+        wall_clock: true,
+    },
+    ProbeVar {
+        name: "WOW_PROBE_CROWD_AT",
+        purpose: "<secs> — when the first crowd step lands after world entry (default 15)",
+        wall_clock: false,
+    },
+    ProbeVar {
+        name: "WOW_PROBE_CROWD_EVERY",
+        purpose: "<secs> — seconds between crowd steps (default 30)",
+        wall_clock: false,
+    },
+    ProbeVar {
+        name: "WOW_PROBE_CROWD_ITEMS",
+        purpose: "\"<slot>:<entry>,…;…\" — the crowd's gear pool by visible slot (a two-hander's entry has the high bit set)",
+        wall_clock: false,
+    },
+    ProbeVar {
+        name: "WOW_PROBE_CROWD_REACH",
+        purpose: "<yards> — how far the crowd's fan in front of the camera reaches (default 50)",
+        wall_clock: false,
+    },
+    ProbeVar {
+        name: "WOW_PROBE_CROWD_SEED",
+        purpose: "<n> — the crowd's seed (default 1): the same seed builds the same crowd",
+        wall_clock: false,
+    },
+    ProbeVar {
         name: "WOW_PROBE_ROUTE_DWELL",
         purpose: "<secs> — how long WOW_PROBE_ROUTE holds at each point (default 5)",
         wall_clock: true,

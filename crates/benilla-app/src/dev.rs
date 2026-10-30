@@ -64,9 +64,12 @@ pub(crate) struct DevProbesPlugin;
 impl Plugin for DevProbesPlugin {
     #[cfg_attr(not(feature = "dev"), allow(unused_variables))]
     fn build(&self, app: &mut App) {
-        // `route-probe` alone: the route walker without the rest of the fleet (the iPad build).
+        // `route-probe`/`crowd-probe` alone: the route walker and the synthetic crowd without the
+        // rest of the fleet (the iPad build's memory tests).
         #[cfg(all(feature = "route-probe", not(feature = "dev")))]
         app.add_plugins(crate::probe_route::ProbeRoutePlugin);
+        #[cfg(all(feature = "crowd-probe", not(feature = "dev")))]
+        app.add_plugins(crate::probe_crowd::ProbeCrowdPlugin);
         #[cfg(feature = "dev")]
         {
             // `$WOW_CAPTURE`: one deterministic screenshot, then exit.
@@ -298,6 +301,7 @@ impl Plugin for DevProbesPlugin {
             // `from_env`, all ordered before `player::PlayerControlSet`.
             app.add_plugins(crate::capture::ProbeLookPlugin);
             app.add_plugins(crate::capture::ProbeRoutePlugin);
+            app.add_plugins(crate::capture::ProbeCrowdPlugin);
             app.add_plugins(crate::capture::ProbePitchPlugin);
             app.add_plugins(crate::capture::ProbeCamPlugin);
             // The FPS journal (`WOW_FPS_JOURNAL`) is registered from `lib.rs` in every build.

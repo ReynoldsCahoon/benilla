@@ -127,12 +127,14 @@ pub(crate) mod fxview;
 // The scripted aim, swim-pitch and camera-rig drivers order themselves before `player::control`:
 // an instrument may name the gameplay system it drives, gameplay never names the instrument.
 mod probe_cam;
+mod probe_crowd;
 mod probe_look;
 mod probe_pitch;
 mod probe_route;
 pub(crate) mod waterfx;
 
 pub(crate) use probe_cam::ProbeCamPlugin;
+pub(crate) use probe_crowd::ProbeCrowdPlugin;
 pub(crate) use probe_look::ProbeLookPlugin;
 pub(crate) use probe_pitch::ProbePitchPlugin;
 pub(crate) use probe_route::ProbeRoutePlugin;

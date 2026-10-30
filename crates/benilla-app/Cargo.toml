@@ -17,6 +17,8 @@ dev = ["benilla-assets/dev", "benilla-formats/dev", "benilla-world/dev", "dep:be
 # walks the memory test routes with it (`benilla-ios`'s feature of the same name), and the other
 # instruments would skew the footprint it measures.
 route-probe = []
+# The synthetic crowd (`WOW_PROBE_CROWD`) alone, for the same reason: the iPad's crowd memory test.
+crowd-probe = []
 tracy = ["bevy/trace_tracy"]
 # Writes every system's per-run span to `trace-<ts>.json` in the cwd.
 trace_chrome = ["bevy/trace_chrome"]

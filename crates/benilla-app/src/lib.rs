@@ -48,10 +48,6 @@ mod cvars;
 mod death;
 #[cfg(feature = "dev")]
 mod debug_panel;
-/// The route walker alone, in a `route-probe` build without `dev` (the iPad's memory test walks).
-#[cfg(all(feature = "route-probe", not(feature = "dev")))]
-#[path = "capture/probe_route.rs"]
-mod probe_route;
 /// The dev/player seam: the instrument groups and the boundary rule. Always compiled; what it holds
 /// is not.
 mod dev;
@@ -94,6 +90,14 @@ mod poi_marker;
 mod portrait;
 #[cfg(feature = "dev")]
 mod preflight;
+/// The synthetic crowd alone, in a `crowd-probe` build without `dev` (the iPad's memory tests).
+#[cfg(all(feature = "crowd-probe", not(feature = "dev")))]
+#[path = "capture/probe_crowd.rs"]
+mod probe_crowd;
+/// The route walker alone, in a `route-probe` build without `dev` (the iPad's memory test walks).
+#[cfg(all(feature = "route-probe", not(feature = "dev")))]
+#[path = "capture/probe_route.rs"]
+mod probe_route;
 #[cfg(feature = "dev")]
 mod probe_shield;
 mod query_cache;
