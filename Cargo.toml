@@ -51,6 +51,9 @@ wgpu-hal = { path = "third_party/wgpu-hal" }
 naga = { path = "third_party/naga" }
 bevy_pbr = { path = "third_party/bevy_pbr" }
 bevy_render = { path = "third_party/bevy_render" }
+# bevy_ecs 0.18.1: a single-threaded schedule drops its systems' stored access once built
+# (`third_party/bevy_ecs/BENILLA.md`).
+bevy_ecs = { path = "third_party/bevy_ecs" }
 
 # Dependencies at opt-level 3 in dev: at opt-level 0, avian/parry collision drops a run to <1 fps.
 [profile.dev.package."*"]
