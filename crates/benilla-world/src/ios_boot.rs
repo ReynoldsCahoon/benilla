@@ -10,6 +10,10 @@
 //!   `BASE_VERTEX`, so Bevy's mesh allocator packs vertex and index data into shared slabs as on
 //!   any GPU. An earlier `large_threshold: 0` gave every mesh its own vertex and index buffers:
 //!   ~9000 extra buffers in Orgrimmar, each at least a 16 KB page.
+//! - Mesh slabs of at most 8 MiB: a slab grows by allocating a bigger buffer and copying into it,
+//!   both alive until the copy is done, and Bevy's 512 MiB cap let one growth step add ~86 MB to
+//!   the footprint for a second on entering The Drag (to 1439 MB, the kill is ~1450). Capped, a full
+//!   slab starts a new one; a mesh over the cap gets its own buffer.
 //! - The window counts as focused: winit never reports focus on iOS, and benilla mutes audio and
 //!   gates input on an unfocused window. Written without marking the window changed (bevy_winit
 //!   would ask winit to focus it, which iOS has no call for), and announced once (`WindowFocused`).
@@ -36,9 +40,13 @@ use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use bevy::render::batching::gpu_preprocessing::{GpuPreprocessingMode, GpuPreprocessingSupport};
+use bevy::render::mesh::allocator::MeshAllocatorSettings;
 use bevy::render::renderer::render_system;
 use bevy::render::{Render, RenderApp, RenderSystems};
 use bevy::winit::{UpdateMode, WinitSettings};
+
+/// The largest mesh slab (module docs): a growth step's transient stays under ~20 MB.
+const MAX_MESH_SLAB: u64 = 8 * 1024 * 1024;
 
 /// See the module docs; added last by [`crate::boot::tuned_default_plugins`] on iOS.
 pub struct IosBootPlugin;
@@ -61,6 +69,10 @@ impl Plugin for IosBootPlugin {
         app.sub_app_mut(RenderApp)
             .insert_resource(GpuPreprocessingSupport {
                 max_supported_mode: GpuPreprocessingMode::None,
+            })
+            .insert_resource(MeshAllocatorSettings {
+                max_slab_size: MAX_MESH_SLAB,
+                ..default()
             });
         if let Some(fraction) = std::env::var("WOW_IOS_VIEWPORT")
             .ok()
