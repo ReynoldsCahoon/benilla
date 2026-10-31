@@ -230,22 +230,25 @@ impl Plan {
         let n = self.nodes.len();
         let mut best = vec![f32::INFINITY; n];
         let mut prev = vec![usize::MAX; n];
-        let mut done = vec![false; n];
+        // A min-heap on distance; f32 ordered by its bits, which is monotonic for non-negative.
+        let mut heap = std::collections::BinaryHeap::new();
         best[s] = 0.0;
-        while let Some(u) = (0..n)
-            .filter(|&i| !done[i] && best[i].is_finite())
-            .min_by(|&a, &b| best[a].total_cmp(&best[b]))
-        {
+        heap.push(std::cmp::Reverse((0u32, s)));
+        while let Some(std::cmp::Reverse((bits, u))) = heap.pop() {
+            let du = f32::from_bits(bits);
+            if du > best[u] {
+                continue;
+            }
             if u == e {
                 break;
             }
-            done[u] = true;
             for &v in &self.edges[u] {
                 let (pu, pv) = (self.nodes[u], self.nodes[v]);
-                let d = best[u] + dist2([pu[0], pu[1]], [pv[0], pv[1]]);
+                let d = du + dist2([pu[0], pu[1]], [pv[0], pv[1]]);
                 if d < best[v] {
                     best[v] = d;
                     prev[v] = u;
+                    heap.push(std::cmp::Reverse((d.to_bits(), v)));
                 }
             }
         }
@@ -612,6 +615,11 @@ struct QuestBot {
     visited: Vec<([f32; 2], f32)>,
     /// Corpses already looted.
     looted: Vec<u64>,
+    /// Targets and spawn points judged by their walk: `true` near enough on foot, until a time.
+    /// Keyed by guid, or by a spawn point's position rounded to the yard.
+    afoot: std::sync::Mutex<HashMap<(i64, i64), (bool, f32)>>,
+    /// The clock at this think, for the choices that read [`afoot`]'s cache.
+    now: f32,
     /// Stucks on each target across goals, so switching between two unreachable targets cannot
     /// reset the count; a target at [`UNSTICK_TRIES`] is set aside.
     stuck_on: HashMap<u64, u32>,
@@ -863,6 +871,7 @@ fn drive_quest_bot(
         return;
     }
     bot.next_think = now + THINK_SECS;
+    bot.now = now;
 
     // The Lua side's readings from after the last think; ask for the next ones.
     if !lua.set_up {
@@ -959,6 +968,7 @@ fn drive_quest_bot(
                             && !s.dead
                             && !s.tapped_by_other
                             && !bot.aside.contains_key(&s.guid)
+                            && afoot(&bot, (s.guid as i64, 0), here, [s.at[0], s.at[1]], now)
                     }) {
                         if dist2(here, [n.at[0], n.at[1]]) + 10.0 < d {
                             bot.left_target = Some(t.guid);
@@ -1242,6 +1252,7 @@ fn choose(
             && s.npc_flags == 0
             && !s.tapped_by_other
             && free(s)
+            && afoot(bot, (s.guid as i64, 0), here, [s.at[0], s.at[1]], bot.now)
             && bot
                 .plan
                 .names
@@ -1273,6 +1284,7 @@ fn goal_for_entries(
             && ok(s)
             && !s.tapped_by_other
             && !bot.aside.contains_key(&s.guid)
+            && afoot(bot, (s.guid as i64, 0), here, [s.at[0], s.at[1]], bot.now)
     });
     if let Some(t) = target {
         let label = format!("{why}: {what}");
@@ -1305,6 +1317,10 @@ fn nearest_spawn(bot: &QuestBot, here: [f32; 2], entries: &[(Kind, u32)]) -> Opt
         .map(|p| [p[0], p[1]])
         .filter(|p| !bot.visited.iter().any(|(v, _)| dist2(*v, *p) < 5.0))
         .filter(|p| dist2(here, *p) > USE_YD)
+        .filter(|p| {
+            let key = (p[0].round() as i64, p[1].round() as i64 + (1 << 32));
+            afoot(bot, key, here, *p, bot.now)
+        })
         .min_by(|a, b| dist2(here, *a).total_cmp(&dist2(here, *b)))
 }
 
@@ -1343,6 +1359,31 @@ fn goal_point(
             ([p[0], p[1]], MELEE_YD)
         }),
     }
+}
+
+/// Whether `to` is near enough on foot: its walk-graph route at most 2.5x the straight line plus
+/// 30 yd (a mob up a cliff whose path winds round the mountain is not). Cached a minute per `key`.
+fn afoot(bot: &QuestBot, key: (i64, i64), here: [f32; 2], to: [f32; 2], now: f32) -> bool {
+    let mut cache = bot.afoot.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&(ok, until)) = cache.get(&key) {
+        if until > now {
+            return ok;
+        }
+    }
+    let d = dist2(here, to);
+    let ok = d < 20.0
+        || bot
+            .plan
+            .route(here, to)
+            .is_none_or(|r| path_len(here, &r) <= 2.5 * d + 30.0);
+    if !ok {
+        info!(
+            "PROBE_QUEST: ({:.0}, {:.0}) is a long way round on foot; skipping it",
+            to[0], to[1]
+        );
+    }
+    cache.insert(key, (ok, now + 60.0));
+    ok
 }
 
 /// The length of a walk from `from` along `route`.
@@ -1770,6 +1811,8 @@ impl Plugin for ProbeQuestPlugin {
             aside: HashMap::new(),
             visited: Vec::new(),
             looted: Vec::new(),
+            afoot: std::sync::Mutex::new(HashMap::new()),
+            now: 0.0,
             stuck_on: HashMap::new(),
             left_target: None,
             done: Vec::new(),
