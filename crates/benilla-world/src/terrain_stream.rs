@@ -739,7 +739,14 @@ fn stream_terrain(
 
     // Every tile the outer window touches on the 64×64 grid, less those the WDT's `MAIN` bit 0
     // says do not exist, as the reference tests (`0x69863c`).
-    let mut desired = window.wanted_tiles();
+    // Deviation: under the memory governor's Critical tier only the inner window's tiles are
+    // requested, not the outer ring the reference fetches ahead, so walking on starts no load it
+    // can defer; a tile already resident stays until the usual release.
+    let critical = crate::memory_governor::tier() >= crate::memory_governor::MemoryTier::Critical;
+    let mut desired = match critical {
+        true => window.inner_tiles(),
+        false => window.wanted_tiles(),
+    };
     if let Some(w) = wdt_index {
         desired.retain(|&(tx, ty)| w.has_tile(tx as u32, ty as u32));
     }

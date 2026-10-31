@@ -585,14 +585,28 @@ pub(super) fn resolve_spell_fx(
     time: Res<Time>,
     asset_server: Res<AssetServer>,
     mut emitters: Query<&mut benilla_world::particles::ParticleEmitter>,
+    (avatar, selection): (
+        Query<Entity, With<crate::net::SelfPlayer>>,
+        Option<Res<crate::target::Selection>>,
+    ),
 ) {
     let Some(mut fx) = fx else { return };
     let now = time.elapsed_secs();
+    // Deviation: the reference starts every kit effect it is told to. Under the memory governor's
+    // Critical tier, one on a unit that is neither the player nor the target does not start (its
+    // reap still runs); a persistent one skipped stays unshown until cast again.
+    let critical = benilla_world::memory_governor::tier()
+        >= benilla_world::memory_governor::MemoryTier::Critical;
+    let target = selection.and_then(|s| s.target);
+    let mine = |e: Entity| avatar.contains(e) || target == Some(e);
     let mut ops: EntityHashMap<Vec<&SpellKitFx>> = EntityHashMap::default();
     for ev in events.read() {
         let entity = match ev {
             SpellKitFx::Begin { entity, .. } | SpellKitFx::Reap { entity, .. } => *entity,
         };
+        if critical && matches!(ev, SpellKitFx::Begin { .. }) && !mine(entity) {
+            continue;
+        }
         ops.entry(entity).or_default().push(ev);
     }
     for (entity, edges) in ops {

@@ -21,8 +21,10 @@
 //! - [`MemoryTier::Low`]: other players past the nearest 60 wait unbuilt (`benilla-app`'s
 //!   `entities::body_cap`, a deviation written down there), and the view distance drops to
 //!   [`LOW_FARCLIP`] yards, the tile window with it ([`govern_view`]).
-//! - [`MemoryTier::Critical`]: the built players past the nearest 30 are taken down, and the view
-//!   distance drops to [`CRITICAL_FARCLIP`].
+//! - [`MemoryTier::Critical`]: the built players past the nearest 30 are taken down, the view
+//!   distance drops to [`CRITICAL_FARCLIP`], the streamer requests only the tiles it must have
+//!   (the inner window, not the ring ahead), and no new spell effect starts on a unit that is
+//!   neither the player nor the target (`benilla-app`'s `entities::spell_fx`).
 //!
 //! The visible cuts latch: taken under Low or Critical, they are given back only at Normal. Giving
 //! the view back reloads its tiles, which under Tight would push the governor straight back down.
@@ -32,8 +34,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use bevy::prelude::*;
 use bevy::time::Real;
 
-/// Real seconds between headroom reads (two syscalls each).
-const SAMPLE_SECS: f32 = 0.5;
+/// Real seconds between headroom reads (a syscall or two each): short, so a burst of loads (two
+/// tiles entering The Drag add ~160 MB within a second or two) is seen before it lands whole.
+const SAMPLE_SECS: f32 = 0.1;
 
 /// Headroom under which each tier begins, in MB: [`MemoryTier::Tight`], [`MemoryTier::Low`],
 /// [`MemoryTier::Critical`]. On the iPad Air 2 Orgrimmar starts ~310 MB under the kill.
