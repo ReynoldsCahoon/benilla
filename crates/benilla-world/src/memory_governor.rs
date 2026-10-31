@@ -19,8 +19,13 @@
 //!   swept by distance alone, take the use rule ([`crate::art_scope::ArtScope::apply_pressed`]).
 //!   Nothing drawn changes; art shown again rebuilds.
 //! - [`MemoryTier::Low`]: other players past the nearest 60 wait unbuilt (`benilla-app`'s
-//!   `entities::body_cap`, a deviation written down there).
-//! - [`MemoryTier::Critical`]: the built players past the nearest 30 are taken down.
+//!   `entities::body_cap`, a deviation written down there), and the view distance drops to
+//!   [`LOW_FARCLIP`] yards, the tile window with it ([`govern_view`]).
+//! - [`MemoryTier::Critical`]: the built players past the nearest 30 are taken down, and the view
+//!   distance drops to [`CRITICAL_FARCLIP`].
+//!
+//! The visible cuts latch: taken under Low or Critical, they are given back only at Normal. Giving
+//! the view back reloads its tiles, which under Tight would push the governor straight back down.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -217,6 +222,39 @@ fn govern(mut gov: ResMut<MemoryGovernor>, time: Res<Time<Real>>) {
     }
 }
 
+/// The view distance under [`MemoryTier::Low`], in yards: a 6-chunk tile window in place of 8.
+pub const LOW_FARCLIP: f32 = 130.0;
+
+/// The view distance under [`MemoryTier::Critical`]: a 5-chunk tile window.
+pub const CRITICAL_FARCLIP: f32 = 90.0;
+
+/// The view cap this tier asks for, given the one in force: Low and Critical tighten it, Normal
+/// lifts it, Tight keeps it.
+fn view_cap(tier: MemoryTier, now: Option<f32>) -> Option<f32> {
+    let tighten = |cap: f32| Some(now.map_or(cap, |c| c.min(cap)));
+    match tier {
+        MemoryTier::Normal => None,
+        MemoryTier::Tight => now,
+        MemoryTier::Low => tighten(LOW_FARCLIP),
+        MemoryTier::Critical => tighten(CRITICAL_FARCLIP),
+    }
+}
+
+/// Deviation: the reference's view distance is the player's `farclip`, never under 177 yd. Short
+/// of memory, the world runs at [`view_cap`]'s shorter one (`ViewDistance::governed`), so the
+/// streamer releases the tiles past it; the setting itself is untouched.
+fn govern_view(gov: Res<MemoryGovernor>, mut view: ResMut<crate::view::ViewDistance>) {
+    let cap = view_cap(gov.tier, view.governed);
+    if cap != view.governed {
+        info!(
+            "memory-governor: view distance {} ({:?})",
+            cap.map_or("restored".to_string(), |c| format!("capped at {c:.0} yd")),
+            gov.tier
+        );
+        view.governed = cap;
+    }
+}
+
 fn announce() {
     if disabled() {
         info!("memory-governor: off ($WOW_MEMORY_GOVERNOR=0)");
@@ -237,7 +275,7 @@ impl Plugin for MemoryGovernorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MemoryGovernor>()
             .add_systems(Startup, announce)
-            .add_systems(First, govern);
+            .add_systems(First, (govern, govern_view).chain());
     }
 }
 
@@ -252,6 +290,23 @@ mod tests {
         assert_eq!(MemoryTier::of(249), MemoryTier::Tight);
         assert_eq!(MemoryTier::of(149), MemoryTier::Low);
         assert_eq!(MemoryTier::of(10), MemoryTier::Critical);
+    }
+
+    /// The view cap tightens under Low and Critical, holds under Tight, and lifts only at Normal.
+    #[test]
+    fn the_view_cap_latches_until_normal() {
+        assert_eq!(view_cap(MemoryTier::Tight, None), None);
+        let low = view_cap(MemoryTier::Low, None);
+        assert_eq!(low, Some(LOW_FARCLIP));
+        assert_eq!(view_cap(MemoryTier::Tight, low), low);
+        let crit = view_cap(MemoryTier::Critical, low);
+        assert_eq!(crit, Some(CRITICAL_FARCLIP));
+        // Back to Low keeps the tighter cap.
+        assert_eq!(view_cap(MemoryTier::Low, crit), crit);
+        assert_eq!(view_cap(MemoryTier::Normal, crit), None);
+        assert!(
+            CRITICAL_FARCLIP < LOW_FARCLIP && LOW_FARCLIP < *crate::view::FARCLIP_RANGE.start()
+        );
     }
 
     /// Down at once, even several tiers; back up one tier at a time, each after a clear hold over

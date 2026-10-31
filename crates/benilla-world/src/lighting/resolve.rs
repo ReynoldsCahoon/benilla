@@ -121,7 +121,7 @@ pub(super) fn setup_lighting(
         "Elwynn noon lighting from Light.dbc: sun diffuse {:?}, ambient {:?}",
         atmo.sun_diffuse, atmo.ambient
     );
-    let (fog_start, fog_end) = scene_fog(atmo.fog_end, atmo.fog_start_frac, view.farclip);
+    let (fog_start, fog_end) = scene_fog(atmo.fog_end, atmo.fog_start_frac, view.far());
     commands.insert_resource(WowLighting {
         ambient: atmo.ambient,
         diffuse: atmo.sun_diffuse,
@@ -250,7 +250,7 @@ pub(super) fn update_time_lighting(
 
     // Elwynn commits 125/500 clear and −139/278 at full storm (`0x6cee30`): the negative start is
     // the near veil, and the short storm end whites out the middle distance.
-    let (fog_start, fog_end) = scene_fog(atmo.fog_end, atmo.fog_start_frac, view.farclip);
+    let (fog_start, fog_end) = scene_fog(atmo.fog_end, atmo.fog_start_frac, view.far());
     // The interior crossfade is its own triple; the scene fog stays untouched. Submerged, the
     // underwater param owns the fog and the ramp is bypassed, as the reference snaps it for magma
     // and slime inside an MFOG interior (`0x6cef6f`); the reference's MFOG underwater block
@@ -263,7 +263,7 @@ pub(super) fn update_time_lighting(
             atmo.fog_color,
             fog_start,
             fog_end,
-            view.farclip,
+            view.far(),
             time.delta_secs(),
         )
     };

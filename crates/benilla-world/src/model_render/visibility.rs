@@ -155,7 +155,7 @@ pub(super) fn apply_model_visibility(
                     };
                     // The particle draw-set gate reads the same rule, so no emitter outlives its
                     // doodad past the wall.
-                    crate::view::within_farclip(view.farclip, c, fwd, center, radius)
+                    crate::view::within_farclip(view.far(), c, fwd, center, radius)
                 }
             };
 

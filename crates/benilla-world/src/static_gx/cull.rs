@@ -327,7 +327,7 @@ pub(super) fn cull_cells(
         for (&cell, draw) in &world.cells {
             let center = draw.origin + Vec3::from(draw.aabb.center);
             let radius = Vec3::from(draw.aabb.half_extents).length();
-            if !crate::view::within_farclip(view.farclip, cam_pos, cam_fwd, center, radius) {
+            if !crate::view::within_farclip(view.far(), cam_pos, cam_fwd, center, radius) {
                 continue;
             }
             let sphere = bevy::camera::primitives::Sphere {
@@ -379,7 +379,7 @@ pub(super) fn cull_cells(
                 }
                 let center = draw.origin + Vec3::from(aabb.center);
                 let radius = Vec3::from(aabb.half_extents).length();
-                if !crate::view::within_farclip(view.farclip, cam_pos, cam_fwd, center, radius) {
+                if !crate::view::within_farclip(view.far(), cam_pos, cam_fwd, center, radius) {
                     continue;
                 }
                 let sphere = bevy::camera::primitives::Sphere {
@@ -441,7 +441,7 @@ pub(super) fn cull_cells(
                 }
                 let center = draw.origin + Vec3::from(aabb.center);
                 let radius = Vec3::from(aabb.half_extents).length();
-                if !crate::view::within_farclip(view.farclip, cam_pos, cam_fwd, center, radius) {
+                if !crate::view::within_farclip(view.far(), cam_pos, cam_fwd, center, radius) {
                     continue;
                 }
                 let sphere = bevy::camera::primitives::Sphere {

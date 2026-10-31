@@ -71,6 +71,9 @@ pub struct ViewDistance {
     pub farclip: f32,
     /// The camera near plane in yards, the `nearclip` CVar ([`stamp_near_clip`]).
     pub nearclip: f32,
+    /// The [`crate::memory_governor`]'s cap while short of memory, below [`FARCLIP_RANGE`]; the
+    /// setting itself (`farclip`, what the CVar saves) stays. Read through [`Self::far`].
+    pub governed: Option<f32>,
 }
 
 /// The settable range of [`ViewDistance::farclip`]: the range the reference's `farclip` callback
@@ -246,6 +249,13 @@ impl Plugin for MsaaSupportPlugin {
 pub const CAM_FAR: f32 = 3000.0;
 
 impl ViewDistance {
+    /// The view distance the world runs at: `farclip`, or the governor's cap when lower. Every
+    /// consumer of the distance reads this; only the setting's own plumbing reads `farclip`.
+    pub fn far(&self) -> f32 {
+        self.governed
+            .map_or(self.farclip, |cap| cap.min(self.farclip))
+    }
+
     /// Set the near plane from a `nearclip` write, clamped to [`NEARCLIP_RANGE`].
     pub fn set_nearclip(&mut self, v: f32) {
         self.nearclip = v.clamp(*NEARCLIP_RANGE.start(), *NEARCLIP_RANGE.end());
@@ -265,6 +275,7 @@ impl Default for ViewDistance {
         Self {
             farclip,
             nearclip: NEARCLIP_DEFAULT,
+            governed: None,
         }
     }
 }
@@ -405,6 +416,7 @@ mod tests {
         app.insert_resource(ViewDistance {
             farclip: 350.0,
             nearclip: 0.3,
+            governed: None,
         });
         app.update();
         let near = |app: &App| match app.world().get::<Projection>(cam).unwrap() {

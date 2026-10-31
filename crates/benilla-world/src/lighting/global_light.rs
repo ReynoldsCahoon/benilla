@@ -205,7 +205,7 @@ fn build_light_data(
 ) {
     let l = &*light;
     let fog_enable = if debug.lighting.disable_fog { 0.0 } else { 1.0 };
-    let farclip = view.farclip;
+    let farclip = view.far();
     // River and lake share the non-ocean swatch.
     let (rs, rd, rsa, rda) = l.water_colors(LiquidKind::Still);
     let (os, od, osa, oda) = l.water_colors(LiquidKind::Ocean);

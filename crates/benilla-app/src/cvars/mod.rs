@@ -2745,6 +2745,7 @@ mod tests {
             .insert_resource(ViewDistance {
                 farclip: 350.0,
                 nearclip: benilla_world::view::NEARCLIP_DEFAULT,
+                governed: None,
             })
             .insert_resource(MsaaSetting { samples: 1 })
             // Literal: `TexFilterSetting::default()` reads `$WOW_TRILINEAR`/`$WOW_ANISO`.

@@ -704,7 +704,7 @@ fn stream_terrain(
 
     // The residency window is the reference's, from the live `farclip` in chunk units.
     let center = focus.resolve(camera.single().ok().map(|c| c.translation));
-    let window = StreamWindow::at(view.farclip, center[0], center[1]);
+    let window = StreamWindow::at(view.far(), center[0], center[1]);
     let (cx, cy) = window.focus_tile();
     let same_window = state.streamed(&window);
     // Skip an unchanged frame only in a paced, complete, presentable world, since the tail it
@@ -733,7 +733,7 @@ fn stream_terrain(
             window.outer,
             window.outer as f32 * benilla_formats::CHUNK_SIZE,
             window.outer + window::KEEP_BAND_CHUNKS,
-            view.farclip
+            view.far()
         );
     }
 

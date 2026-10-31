@@ -355,7 +355,7 @@ pub(crate) fn build_horizon(
 ) {
     let t0 = std::time::Instant::now();
     let flags = flags.map_or(WorldFlags::default(), |f| *f);
-    let farclip = view.as_ref().map_or(350.0, |v| v.farclip);
+    let farclip = view.as_ref().map_or(350.0, |v| v.far());
     // The gates: `showCull`, the outside leg (`0x6811ca`), a perspective camera, and the forward
     // z band `HorizonView::new` checks.
     let horizon_view = cam

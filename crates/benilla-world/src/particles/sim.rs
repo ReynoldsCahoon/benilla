@@ -217,7 +217,7 @@ impl SceneGates<'_, '_> {
         cam: Option<(&GlobalTransform, &Projection)>,
     ) -> (f32, crate::exterior_cull::ExteriorGate, Option<Entity>) {
         (
-            self.view.farclip,
+            self.view.far(),
             crate::exterior_cull::ExteriorGate::build(&self.exterior_windows, cam),
             self.camera_claim.0.map(|c| c.room.instance),
         )

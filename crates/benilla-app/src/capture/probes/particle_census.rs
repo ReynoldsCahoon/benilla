@@ -90,7 +90,7 @@ fn fire_particle_census(
             if drawn {
                 max_drawn_depth = max_drawn_depth.max(d);
             }
-            if d > view.farclip {
+            if d > view.far() {
                 beyond_wall += 1;
                 if drawn {
                     drawn_beyond_wall += 1;
@@ -164,6 +164,6 @@ fn fire_particle_census(
         "PARTICLE_CENSUS emitters={n} booth={booth} live_total={total} farclip={:.0} \
          beyond_wall={beyond_wall} drawn_beyond_wall={drawn_beyond_wall} \
          drawn_beyond_wall_live={drawn_beyond_wall_live} max_drawn_depth={max_drawn_depth:.1}{where_}",
-        view.farclip,
+        view.far(),
     );
 }

@@ -102,8 +102,16 @@ pub fn inner_radius(farclip: f32) -> i32 {
     1 + (farclip / CHUNK_SIZE).trunc() as i32
 }
 
-/// The outer half-width in chunks: `max(inner + 2, 8)`.
+/// The outer half-width in chunks: `max(inner + 2, 8)`; over the settable `farclip` range the
+/// floor never binds (177 yd is already `inner` 6).
+///
+/// Deviation: below that range, which only the memory governor's cap reaches
+/// (`ViewDistance::governed`), the outer window is `inner + 2` with no floor, so a shorter view
+/// holds fewer tiles: the floor alone keeps a 17-chunk span, two tiles on each axis.
 pub fn outer_radius(inner: i32) -> i32 {
+    if inner < inner_radius(*crate::view::FARCLIP_RANGE.start()) {
+        return inner + 2;
+    }
     (inner + 2).max(OUTER_FLOOR_CHUNKS)
 }
 
