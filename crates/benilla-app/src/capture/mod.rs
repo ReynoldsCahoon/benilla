@@ -130,6 +130,7 @@ mod probe_chat;
 mod probe_crowd;
 mod probe_look;
 mod probe_pitch;
+mod probe_quest;
 mod probe_route;
 pub(crate) mod waterfx;
 
@@ -138,6 +139,7 @@ pub(crate) use probe_chat::ProbeChatPlugin;
 pub(crate) use probe_crowd::ProbeCrowdPlugin;
 pub(crate) use probe_look::ProbeLookPlugin;
 pub(crate) use probe_pitch::ProbePitchPlugin;
+pub(crate) use probe_quest::ProbeQuestPlugin;
 pub(crate) use probe_route::ProbeRoutePlugin;
 
 /// The screen a capture starts on, the dev arm of [`crate::run_mode::start_state`]: a glue capture

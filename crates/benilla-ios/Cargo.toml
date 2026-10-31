@@ -20,6 +20,7 @@ doctest = false
 route-probe = ["benilla-app/route-probe"]
 crowd-probe = ["benilla-app/crowd-probe"]
 chat-probe = ["benilla-app/chat-probe"]
+quest-probe = ["benilla-app/quest-probe"]
 
 [dependencies]
 # The player build: `default-features = false` keeps `dev` (and the source-tree paths) out.

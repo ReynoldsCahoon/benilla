@@ -99,6 +99,10 @@ mod probe_crowd;
 #[cfg(all(feature = "chat-probe", not(feature = "dev")))]
 #[path = "capture/probe_chat.rs"]
 mod probe_chat;
+/// The quest bot alone, in a `quest-probe` build without `dev` (the iPad's gameplay soaks).
+#[cfg(all(feature = "quest-probe", not(feature = "dev")))]
+#[path = "capture/probe_quest.rs"]
+mod probe_quest;
 /// The route walker alone, in a `route-probe` build without `dev` (the iPad's memory test walks).
 #[cfg(all(feature = "route-probe", not(feature = "dev")))]
 #[path = "capture/probe_route.rs"]

@@ -74,6 +74,8 @@ impl Plugin for DevProbesPlugin {
         if std::env::var("WOW_PROBE_CHAT").is_ok() {
             app.add_plugins(crate::probe_chat::ProbeChatPlugin);
         }
+        #[cfg(all(feature = "quest-probe", not(feature = "dev")))]
+        app.add_plugins(crate::probe_quest::ProbeQuestPlugin);
         #[cfg(feature = "dev")]
         {
             // `$WOW_CAPTURE`: one deterministic screenshot, then exit.
@@ -306,6 +308,7 @@ impl Plugin for DevProbesPlugin {
             app.add_plugins(crate::capture::ProbeLookPlugin);
             app.add_plugins(crate::capture::ProbeRoutePlugin);
             app.add_plugins(crate::capture::ProbeCrowdPlugin);
+            app.add_plugins(crate::capture::ProbeQuestPlugin);
             app.add_plugins(crate::capture::ProbePitchPlugin);
             app.add_plugins(crate::capture::ProbeCamPlugin);
             // The FPS journal (`WOW_FPS_JOURNAL`) is registered from `lib.rs` in every build.

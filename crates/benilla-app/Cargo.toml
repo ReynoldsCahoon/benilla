@@ -21,6 +21,8 @@ route-probe = []
 crowd-probe = []
 # The chat probe (`WOW_PROBE_CHAT`) alone, for the same reason: the iPad's teleport soaks.
 chat-probe = []
+# The quest bot (`WOW_PROBE_QUEST`) alone: the iPad's gameplay soaks.
+quest-probe = []
 tracy = ["bevy/trace_tracy"]
 # Writes every system's per-run span to `trace-<ts>.json` in the cwd.
 trace_chrome = ["bevy/trace_chrome"]
