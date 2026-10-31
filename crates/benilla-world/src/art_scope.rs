@@ -57,6 +57,24 @@ fn held_elsewhere<A: Asset>(handle: &Handle<A>) -> bool {
     }
 }
 
+/// A cache value the use rule can test: whether anything outside the cache holds it.
+pub trait HeldValue {
+    fn held_elsewhere(&self) -> bool;
+}
+
+impl<A: Asset> HeldValue for Handle<A> {
+    fn held_elsewhere(&self) -> bool {
+        held_elsewhere(self)
+    }
+}
+
+/// An empty entry (a build that produced nothing) costs nothing and keeps a rebuild from retrying.
+impl<A: Asset> HeldValue for Option<Handle<A>> {
+    fn held_elsewhere(&self) -> bool {
+        self.as_ref().is_none_or(held_elsewhere)
+    }
+}
+
 /// The far corner of the widest tile block the residency window keeps (at the `farclip` clamp's
 /// maximum), plus a tile: a stamp is where the viewer stood, so no smaller radius is safe.
 fn radius_floor() -> f32 {
@@ -191,6 +209,11 @@ pub struct ArtScope<'w> {
 }
 
 impl ArtScope<'_> {
+    /// Whether this frame sweeps: once a [`SWEEP_SECS`], for a cache with its own sweep.
+    pub fn due(&self) -> bool {
+        self.state.due
+    }
+
     /// Sweeps one cache on sweep frames and records its residency.
     pub fn apply<K: Eq + Hash, V>(&mut self, cache: &mut SpatialCache<K, V>, slot: ArtSlot) {
         let radius = match slot.entity_scoped() {
@@ -221,16 +244,16 @@ impl ArtScope<'_> {
     /// [`Self::apply`], then on sweep frames also drop the entries of a handle cache that nothing
     /// outside it has held for [`unused_grace`]: the use rule, which binds inside a city where
     /// the radius never does.
-    pub fn apply_unheld<K: Eq + Hash, A: Asset>(
+    pub fn apply_unheld<K: Eq + Hash, V: HeldValue>(
         &mut self,
-        cache: &mut SpatialCache<K, Handle<A>>,
+        cache: &mut SpatialCache<K, V>,
         slot: ArtSlot,
     ) {
         self.apply(cache, slot);
         if !self.state.due {
             return;
         }
-        let dropped = cache.drop_unheld(self.state.now, unused_grace(), held_elsewhere);
+        let dropped = cache.drop_unheld(self.state.now, unused_grace(), V::held_elsewhere);
         let i = slot.idx();
         self.census.live[i] = cache.len();
         self.census.dropped[i] += dropped;
@@ -248,9 +271,9 @@ impl ArtScope<'_> {
     /// [`Self::apply`], plus [`Self::apply_unheld`]'s use rule while the
     /// [`crate::memory_governor`] is short of memory: a handle cache otherwise swept only by
     /// distance (the tile-streamed art, which a city's walk revisits) gives up what nothing draws.
-    pub fn apply_pressed<K: Eq + Hash, A: Asset>(
+    pub fn apply_pressed<K: Eq + Hash, V: HeldValue>(
         &mut self,
-        cache: &mut SpatialCache<K, Handle<A>>,
+        cache: &mut SpatialCache<K, V>,
         slot: ArtSlot,
     ) {
         match crate::memory_governor::tier() >= crate::memory_governor::MemoryTier::Tight {

@@ -184,6 +184,27 @@ pub(crate) struct MergedFormsCache(HashMap<(usize, Vec<u32>), MergedForms>);
 const MERGED_FORMS_CAP: usize = 1024;
 
 impl MergedFormsCache {
+    /// Drop the groups no drawn part holds, whose meshes only this cache keeps alive: the memory
+    /// governor's sweep, since a crowd's bodies almost never share a group and a torn-down body's
+    /// forms would otherwise stay until the cap clears the cache.
+    pub(in crate::entities) fn drop_unheld(&mut self) {
+        use benilla_world::art_scope::HeldValue;
+        let before = self.0.len();
+        self.0.retain(|_, f| {
+            f.static_mesh.held_elsewhere()
+                || f.skinned_mesh
+                    .as_ref()
+                    .is_some_and(HeldValue::held_elsewhere)
+        });
+        if self.0.len() < before {
+            debug!(
+                "merged forms: dropped {} unheld groups ({} live)",
+                before - self.0.len(),
+                self.0.len()
+            );
+        }
+    }
+
     /// The forms of `group`, built on a miss; a singleton borrows the model's own, uncached.
     pub(in crate::entities) fn forms(
         &mut self,

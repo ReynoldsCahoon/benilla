@@ -53,6 +53,8 @@ use mount::reseat_mounts;
 pub(crate) mod corpse;
 
 mod live_display;
+// The low-memory crowd cap: players past the nearest few wait unbuilt.
+mod body_cap;
 use live_display::{refresh_live_display, tick_scale_ease};
 pub(crate) use live_display::{AppliedDisplay, DisplaySwapped};
 
@@ -580,16 +582,24 @@ fn sweep_display_cache<C, K: Copy + Eq + std::hash::Hash>(
     );
 }
 
-/// Expire composited skins by distance within a map. The display-id model caches sweep by use
-/// instead, in [`update_display_models`].
+/// Expire composited skins by distance within a map, and by use too while the memory governor is
+/// short (a crowd stands near, so distance never frees a skin there). The display-id model caches
+/// sweep by use instead, in [`update_display_models`]; the merged body forms only under pressure.
 fn scope_entity_art(
     mut scope: benilla_world::art_scope::ArtScope,
     mut composites: ResMut<SkinComposites>,
+    mut merged: ResMut<attach::MergedFormsCache>,
 ) {
-    scope.apply(
+    scope.apply_pressed(
         &mut composites.done,
         benilla_world::art_scope::ArtSlot::Skins,
     );
+    if scope.due()
+        && benilla_world::memory_governor::tier()
+            >= benilla_world::memory_governor::MemoryTier::Tight
+    {
+        merged.drop_unheld();
+    }
 }
 
 /// A built body's armed-idle box in model space, which [`publish_world_units`] restates as
@@ -768,7 +778,8 @@ impl Plugin for EntitiesPlugin {
                 build_glue_pet,
                 // The dressing room's preview, the same assembly and latch.
                 build_dressup_preview,
-                attach_entity_visuals,
+                // The crowd cap holds bodies back (or takes them down) before the frame's attach.
+                (body_cap::cap_player_bodies, attach_entity_visuals).chain(),
                 // A WMO GameObject's doodad props, spawned as each M2 lands.
                 resolve_wmo_gameobject_props,
                 spawn_wmo_gameobject_props,

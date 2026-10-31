@@ -238,9 +238,11 @@ pub(super) fn attach_entity_visuals(
             Has<super::live_display::ShownRebuild>,
         ),
         // A torn-down unit gets no model: the reference frees it at once (`0x464920`).
+        // A player the crowd cap holds back waits too.
         (
             Without<VisualAttached>,
             Without<benilla_world::model_fade::DespawnFade>,
+            Without<super::body_cap::BodyHeld>,
         ),
     >,
     // A mounted rider waits on its mount child, whose attachment-0 point is the seat.
