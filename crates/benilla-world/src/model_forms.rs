@@ -231,7 +231,11 @@ pub(crate) fn furnish_model_forms(
         }
     }
 
-    let cap = if focus.paced { MESH_BUDGET } else { usize::MAX };
+    let cap = if focus.budgeted() {
+        MESH_BUDGET
+    } else {
+        usize::MAX
+    };
 
     let mut pending: Vec<(i32, ModelKey)> = forms
         .entries

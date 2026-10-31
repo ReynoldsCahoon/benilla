@@ -444,6 +444,13 @@ impl ViewFocus {
     pub(crate) fn body_settled(&self) -> bool {
         self.body.is_some() && self.paced
     }
+
+    /// Whether the streamer's per-frame budgets bind: once the focus is paced, or always while the
+    /// memory governor is short of headroom ([`crate::memory_governor::pace_loads`]), when a load
+    /// behind the cover must not land in one frame.
+    pub(crate) fn budgeted(&self) -> bool {
+        self.paced || crate::memory_governor::pace_loads()
+    }
 }
 
 /// The stream focus when nothing else can say: the Human start in Northshire.
@@ -830,7 +837,7 @@ fn stream_terrain(
     // at once.
     let mut fresh_empty = true;
     if wdt_index.is_some() || state.wdt_ungated {
-        let live = focus.paced;
+        let live = focus.budgeted();
         let mut fresh: Vec<(i32, i32)> = desired
             .iter()
             .copied()

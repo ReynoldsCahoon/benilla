@@ -7,7 +7,7 @@
 //! `$WOW_MEMORY_BUDGET_MB` less the physical footprint (`task_info(TASK_VM_INFO)`), so a Mac run
 //! can play a small device. With no budget off iOS the governor never leaves [`MemoryTier::Normal`].
 //! On iOS a budget may lower the limit further, to rehearse the tiers early. `$WOW_MEMORY_GOVERNOR=0`
-//! turns it off everywhere (a before/after measurement).
+//! turns it off everywhere (a before/after measurement); `$WOW_MEMORY_TRACE=1` logs every reading.
 //!
 //! A tier is entered the moment headroom falls under its floor and left only once headroom has
 //! stayed [`RELEASE_MARGIN_MB`] over it for [`RELEASE_SECS`], so a burst that frees itself does
@@ -29,7 +29,7 @@
 //! The visible cuts latch: taken under Low or Critical, they are given back only at Normal. Giving
 //! the view back reloads its tiles, which under Tight would push the governor straight back down.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use bevy::prelude::*;
 use bevy::time::Real;
@@ -80,6 +80,21 @@ impl MemoryTier {
 
 /// The current tier, for code with no world access (the cache graces).
 static TIER: AtomicU8 = AtomicU8::new(MemoryTier::Normal as u8);
+
+/// The last headroom read in MB; `u64::MAX` where there is none.
+static HEADROOM_MB: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Headroom under which the streamer paces its loads even under the loading cover, in MB.
+const PACE_LOADS_UNDER_MB: u64 = 400;
+
+/// Whether loads must be paced: headroom is under [`PACE_LOADS_UNDER_MB`]. An unpaced load (a
+/// world entry or a teleport, behind the loading cover) builds a whole window in a few long frames,
+/// and no tier can act inside a frame: on the iPad Air 2 a same-map teleport into Orgrimmar from
+/// ~315 MB of headroom failed an allocation inside one 0.7 s frame. Paced, the burst spreads over
+/// short frames the governor reads between, and the cover stays up a little longer.
+pub fn pace_loads() -> bool {
+    HEADROOM_MB.load(Ordering::Relaxed) < PACE_LOADS_UNDER_MB
+}
 
 /// The tier the governor is in now.
 pub fn tier() -> MemoryTier {
@@ -190,6 +205,13 @@ fn disabled() -> bool {
     *OFF
 }
 
+/// `$WOW_MEMORY_TRACE=1`: log every reading (10 a second), to see a burst's shape.
+fn trace() -> bool {
+    static TRACE: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var("WOW_MEMORY_TRACE").is_ok_and(|v| v == "1"));
+    *TRACE
+}
+
 /// The headroom in MB: the OS's figure, the budget's, or the smaller of the two; `None` when off.
 fn headroom_mb() -> Option<u64> {
     if disabled() {
@@ -212,6 +234,11 @@ fn govern(mut gov: ResMut<MemoryGovernor>, time: Res<Time<Real>>) {
     let Some(headroom) = headroom_mb() else {
         return;
     };
+    HEADROOM_MB.store(headroom, Ordering::Relaxed);
+    if trace() {
+        let footprint = phys_footprint().map_or(-1, |b| (b >> 20) as i64);
+        info!("memory-trace: headroom {headroom} MB, footprint {footprint} MB");
+    }
     let was = gov.tier;
     let tier = gov.observe(headroom, now);
     if tier != was {

@@ -122,7 +122,11 @@ pub(super) fn flush_hull_welds(
     let welds = welds.into_inner();
     welds.frame = welds.frame.wrapping_add(1);
     let frame = welds.frame;
-    let idle = if focus.paced { WELD_IDLE_FRAMES } else { 1 };
+    let idle = if focus.budgeted() {
+        WELD_IDLE_FRAMES
+    } else {
+        1
+    };
     welds.tiles.retain(|&key, acc| {
         let Some(tile) = streamer.tiles.get_mut(&key) else {
             return false;

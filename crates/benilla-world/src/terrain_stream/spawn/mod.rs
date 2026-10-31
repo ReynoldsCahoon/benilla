@@ -129,8 +129,9 @@ pub(super) fn spawn_loaded_placements(
     retire_failed_placements(placements, &asset_server);
     let t0 = Instant::now();
     // The count cap bounds the render-side wave a time budget misses; off until the focus is
-    // paced, as the loading cover absorbs the burst and a cap would only lengthen the reveal.
-    let count_cap = if focus.paced {
+    // paced, as the loading cover absorbs the burst and a cap would only lengthen the reveal; on
+    // while short of memory, when the burst could not be absorbed (`ViewFocus::budgeted`).
+    let count_cap = if focus.budgeted() {
         SPAWN_COUNT_CAP
     } else {
         usize::MAX

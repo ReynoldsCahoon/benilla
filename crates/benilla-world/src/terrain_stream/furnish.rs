@@ -1,7 +1,8 @@
 //! Paced tile furnishing: cell meshes are built from a landed tile's decoded chunks
 //! ([`chunks_to_mesh`]) a bounded number per frame while live, nearest tile first, so crossing a
 //! tile line never uploads a whole row in one frame. While the body is not live (entry, teleport)
-//! the cap is off: the loading screen absorbs the burst and waits on furnished tiles. The held
+//! the cap is off: the loading screen absorbs the burst and waits on furnished tiles; short of
+//! memory it stays on ([`super::ViewFocus::budgeted`]). The held
 //! inner tiles are never capped: the reference builds an inner chunk with no limit (`0x6986a5`).
 
 use std::time::Instant;
@@ -35,7 +36,7 @@ pub(super) fn furnish_tile_cells(
     focus: Res<crate::terrain_stream::ViewFocus>,
 ) {
     let t0 = Instant::now();
-    let live = focus.paced;
+    let live = focus.budgeted();
     // The cap was measured in chunks; a cell is sixteen of them.
     let cap = if live {
         CELL_SPAWN_CAP / CHUNKS_PER_CELL

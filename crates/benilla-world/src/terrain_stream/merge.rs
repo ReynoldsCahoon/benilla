@@ -311,7 +311,11 @@ pub(super) fn flush_static_merge(
     let merge = merge.into_inner();
     merge.frame = merge.frame.wrapping_add(1);
     let frame = merge.frame;
-    let idle = if focus.paced { MERGE_IDLE_FRAMES } else { 1 };
+    let idle = if focus.budgeted() {
+        MERGE_IDLE_FRAMES
+    } else {
+        1
+    };
     let mut blobs = 0u64;
     {
         let StaticMerge {
