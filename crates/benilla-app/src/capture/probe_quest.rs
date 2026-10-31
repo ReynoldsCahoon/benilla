@@ -371,7 +371,14 @@ function BenillaBot.Pick(buttons, prefix, n)
   return nil
 end
 function BenillaBot.Dialog()
+  if not (LootFrame and LootFrame:IsVisible()) then BenillaBot.lootTicks = 0 end
   if LootFrame and LootFrame:IsVisible() then
+    -- A row that never goes (bags full, a unique item held) would hold the window open forever.
+    BenillaBot.lootTicks = (BenillaBot.lootTicks or 0) + 1
+    if BenillaBot.lootTicks > 12 then
+      BenillaBot.lootTicks = 0
+      CloseLoot() return "loot-stuck"
+    end
     -- A mouse click on a row takes it: 1.12's LootSlot is only the bind-on-pickup confirmation,
     -- and a scripted Click() on a LootButton does nothing. Report the first row's place on screen
     -- (UIParent units, y up) for the bot's mouse; the window closes itself once empty, else page
@@ -410,7 +417,11 @@ function BenillaBot.Dialog()
     if r then return r end
     CloseGossip() return "gossip-nothing"
   end
-  if MerchantFrame and MerchantFrame:IsVisible() then CloseMerchant() return "merchant-close" end
+  if MerchantFrame and MerchantFrame:IsVisible() then
+    -- A merchant is only opened to sell: everything but quest items and the hearthstone.
+    local n = BenillaBot.Sell()
+    CloseMerchant() return "sold " .. n
+  end
   if ClassTrainerFrame and ClassTrainerFrame:IsVisible() then CloseTrainer() return "trainer-close" end
   return ""
 end
@@ -456,12 +467,57 @@ function BenillaBot.Attacking()
   end
   return false
 end
+-- Bags: free slots, what to keep, selling at an open merchant, destroying the least valuable.
+function BenillaBot.Free()
+  local free = 0
+  for b = 0, 4 do
+    for s = 1, (GetContainerNumSlots(b) or 0) do
+      if not GetContainerItemLink(b, s) then free = free + 1 end
+    end
+  end
+  return free
+end
+function BenillaBot.Keep(b, s)
+  local link = GetContainerItemLink(b, s)
+  if not link then return true end
+  local _, _, id = string.find(link, "item:(%d+)")
+  id = tonumber(id)
+  if id == 6948 then return true end
+  local name, l, quality, minLevel, typ = GetItemInfo(id)
+  return typ == "Quest"
+end
+function BenillaBot.Sell()
+  local n = 0
+  for b = 0, 4 do
+    for s = 1, (GetContainerNumSlots(b) or 0) do
+      if not BenillaBot.Keep(b, s) then UseContainerItem(b, s) n = n + 1 end
+    end
+  end
+  return n
+end
+function BenillaBot.Destroy()
+  local bb, bs, bq
+  for b = 0, 4 do
+    for s = 1, (GetContainerNumSlots(b) or 0) do
+      if not BenillaBot.Keep(b, s) then
+        local tex, count, locked, quality = GetContainerItemInfo(b, s)
+        quality = quality or 0
+        if not bq or quality < bq then bb, bs, bq = b, s, quality end
+      end
+    end
+  end
+  if not bb then return "" end
+  local link = GetContainerItemLink(bb, bs) or "?"
+  PickupContainerItem(bb, bs)
+  DeleteCursorItem()
+  return "destroyed " .. link
+end
 function BenillaBot.State()
   local combat = UnitAffectingCombat("player") and "1" or "0"
   local hp = UnitHealth("player") or 0
   local maxhp = UnitHealthMax("player") or 1
   local attacking = BenillaBot.Attacking() and "1" or "0"
-  return combat .. "\t" .. hp .. "\t" .. maxhp .. "\t" .. (UnitLevel("player") or 0) .. "\t" .. attacking
+  return combat .. "\t" .. hp .. "\t" .. maxhp .. "\t" .. (UnitLevel("player") or 0) .. "\t" .. attacking .. "\t" .. BenillaBot.Free()
 end
 "#;
 
@@ -556,6 +612,11 @@ struct QuestBot {
     visited: Vec<([f32; 2], f32)>,
     /// Corpses already looted.
     looted: Vec<u64>,
+    /// Stucks on each target across goals, so switching between two unreachable targets cannot
+    /// reset the count; a target at [`UNSTICK_TRIES`] is set aside.
+    stuck_on: HashMap<u64, u32>,
+    /// The fight target the last "nearer" switch left, never switched straight back to.
+    left_target: Option<u64>,
     /// Quests turned in this run, by title.
     done: Vec<String>,
     walking: bool,
@@ -579,6 +640,8 @@ struct BotLua {
     pending: bool,
     /// Use the action bar once on the next pass.
     fight: bool,
+    /// Destroy the least valuable bag item on the next pass (bags full, no vendor to sell to).
+    destroy: bool,
     /// Chat lines to type.
     chat: Vec<String>,
     /// The open window's outcome, the player's state and the quest log, as the Lua half reports.
@@ -588,7 +651,7 @@ struct BotLua {
 /// The Lua half, after the bot's think: sets itself up once, then types the asked chat lines,
 /// uses the action bar when asked, and takes the readings.
 fn run_bot_lua(mut lua: ResMut<BotLua>, mut hosted_vm: crate::script_calls::HostedVm) {
-    if !lua.pending && !lua.fight && lua.chat.is_empty() {
+    if !lua.pending && !lua.fight && !lua.destroy && lua.chat.is_empty() {
         return;
     }
     hosted_vm.run(|script| {
@@ -627,6 +690,12 @@ fn run_bot_lua(mut lua: ResMut<BotLua>, mut hosted_vm: crate::script_calls::Host
             if !used.is_empty() {
                 info!("PROBE_QUEST: action bar: {used}");
             }
+        }
+        if std::mem::take(&mut lua.destroy) {
+            let gone: String = script
+                .eval("return BenillaBot.Destroy()")
+                .unwrap_or_else(|e| format!("error: {e}"));
+            info!("PROBE_QUEST: bags full, no vendor: {gone}");
         }
         if std::mem::take(&mut lua.pending) {
             let eval = |chunk: &str| -> String {
@@ -839,12 +908,13 @@ fn drive_quest_bot(
         return;
     }
     let mut st = state.split('\t').map(|v| v.parse::<u32>().unwrap_or(0));
-    let (combat, hp, maxhp, level, attacking) = (
+    let (combat, hp, maxhp, level, attacking, free) = (
         st.next().unwrap_or(0) == 1,
         st.next().unwrap_or(0),
         st.next().unwrap_or(1),
         st.next().unwrap_or(0),
         st.next().unwrap_or(0) == 1,
+        st.next().unwrap_or(99),
     );
     // The test's invulnerability: a deep pool, topped up on a level change or when it runs low.
     if level != bot.level || (maxhp > 0 && hp * 3 < maxhp) || maxhp < bot.hp_pool / 2 {
@@ -880,9 +950,10 @@ fn drive_quest_bot(
                 let d = dist2(here, [t.at[0], t.at[1]]);
                 // Not yet fighting it: a target of the same kind at least 10 yd nearer takes over
                 // (boars wander, and the first choice was the nearest when it was made).
-                if !attacking && !t.attacking_me {
+                if !attacking && !t.attacking_me && now - bot.goal_since > 5.0 {
                     if let Some(n) = nearest(&seen, here, |s| {
                         s.guid != t.guid
+                            && Some(s.guid) != bot.left_target
                             && s.kind == t.kind
                             && s.entry == t.entry
                             && !s.dead
@@ -890,6 +961,7 @@ fn drive_quest_bot(
                             && !bot.aside.contains_key(&s.guid)
                     }) {
                         if dist2(here, [n.at[0], n.at[1]]) + 10.0 < d {
+                            bot.left_target = Some(t.guid);
                             let why = format!("nearer {}", name_of(&bot.plan, n));
                             let goal = Goal::Fight {
                                 entity: n.entity,
@@ -994,7 +1066,7 @@ fn drive_quest_bot(
             if dist2(here, to) > USE_YD {
                 // Still on the way: anything worth fighting or talking to that came into view
                 // on the way takes over from the walk.
-                let next = choose(&bot, &seen, &log, here, level);
+                let next = choose(&bot, &seen, &log, here, level, free);
                 if matches!(next, Goal::Fight { .. } | Goal::Use { .. }) {
                     set_goal(&mut bot, next, now, &mut binds);
                 }
@@ -1006,7 +1078,13 @@ fn drive_quest_bot(
         Goal::Fight { .. } | Goal::Idle => {}
     }
 
-    let next = choose(&bot, &seen, &log, here, level);
+    let next = choose(&bot, &seen, &log, here, level, free);
+    // Bags full and no vendor to reach: make room.
+    if free == 0
+        && !matches!(next, Goal::Use { ref why, .. } | Goal::Walk { ref why, .. } if why.starts_with("sell"))
+    {
+        lua.destroy = true;
+    }
     if next != bot.goal {
         set_goal(&mut bot, next, now, &mut binds);
     }
@@ -1028,8 +1106,39 @@ fn nearest(seen: &[Seen], here: [f32; 2], f: impl Fn(&Seen) -> bool) -> Option<&
 
 /// The next goal, in a player's order: loot what we killed, turn in, take offers, work the
 /// objectives, else hunt the nearest thing the zone's quests want.
-fn choose(bot: &QuestBot, seen: &[Seen], log: &[LogQuest], here: [f32; 2], level: u32) -> Goal {
+fn choose(
+    bot: &QuestBot,
+    seen: &[Seen],
+    log: &[LogQuest],
+    here: [f32; 2],
+    level: u32,
+    bag_free: u32,
+) -> Goal {
     let free = |s: &Seen| !bot.aside.contains_key(&s.guid);
+    // 0. Bags nearly full: a vendor, those that open their shop at once first (no gossip bit).
+    if bag_free < 2 {
+        let vendors = |gossip: bool| -> Vec<(Kind, u32)> {
+            bot.plan
+                .names
+                .iter()
+                .filter(|(_, (_, f))| f & 0x4 != 0 && (f & 0x1 != 0) == gossip)
+                .map(|(&k, _)| k)
+                .collect()
+        };
+        for gossip in [false, true] {
+            if let Some(g) = goal_for_entries(
+                bot,
+                seen,
+                here,
+                &vendors(gossip),
+                |s| !s.dead,
+                "vendor",
+                "sell",
+            ) {
+                return g;
+            }
+        }
+    }
     // 1. Our kills' corpses with loot.
     if let Some(c) = nearest(seen, here, |s| {
         s.dead && s.lootable && !bot.looted.contains(&s.guid) && free(s)
@@ -1388,6 +1497,33 @@ fn step_movement(
         None => bot.moved_from = Some((here, now)),
         Some((from, since)) if now - since >= STUCK_WINDOW => {
             if dist2(from, here) < STUCK_YD {
+                if let Some(g) = bot.goal.guid() {
+                    let n = bot.stuck_on.entry(g).or_insert(0);
+                    *n += 1;
+                    if *n > UNSTICK_TRIES {
+                        warn!("PROBE_QUEST: stuck {n}x on {g:#x} across goals; set aside");
+                        bot.aside.insert(g, now + ASIDE_SECS);
+                        bot.stuck_on.remove(&g);
+                        bot.goal = Goal::Idle;
+                        bot.route = None;
+                        release_all(binds);
+                        bot.walking = false;
+                        bot.moved_from = None;
+                        return false;
+                    }
+                }
+                // On a route: the waypoint we cannot reach (an NPC may stand on it) is skipped.
+                if let Some(route) = bot.route.as_mut() {
+                    if route.len() > 2 {
+                        route.remove(0);
+                        info!(
+                            "PROBE_QUEST: stuck at ({:.1}, {:.1}); skipping a waypoint",
+                            here[0], here[1]
+                        );
+                        bot.moved_from = None;
+                        return false;
+                    }
+                }
                 // First stuck on this goal: walk back the way we came (out the door we came in by);
                 // then the walk graph's route; then the detours.
                 if bot.escape < 2 {
@@ -1592,6 +1728,15 @@ impl Plugin for ProbeQuestPlugin {
         let Ok(path) = std::env::var("WOW_PROBE_QUEST") else {
             return;
         };
+        // A relative path not found from the working folder is the state folder's (on the iPad,
+        // the app's Documents/benilla-config, where the workbench copies the plan).
+        let path = {
+            let p = std::path::PathBuf::from(&path);
+            match (p.is_relative() && !p.exists(), crate::local_state::home()) {
+                (true, Some(home)) => home.join(p).display().to_string(),
+                _ => path,
+            }
+        };
         let plan = match std::fs::read_to_string(&path) {
             Ok(text) => Plan::parse(&text),
             Err(e) => {
@@ -1625,6 +1770,8 @@ impl Plugin for ProbeQuestPlugin {
             aside: HashMap::new(),
             visited: Vec::new(),
             looted: Vec::new(),
+            stuck_on: HashMap::new(),
+            left_target: None,
             done: Vec::new(),
             walking: false,
             level: 0,
@@ -1640,6 +1787,7 @@ impl Plugin for ProbeQuestPlugin {
             set_up: false,
             pending: false,
             fight: false,
+            destroy: false,
             chat: Vec::new(),
             readings: None,
         })
