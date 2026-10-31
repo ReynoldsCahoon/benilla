@@ -371,6 +371,7 @@ pub(crate) fn add_every_instrument(app: &mut App) {
         app.add_plugins(crate::capture::LiveFpsPlugin);
         app.add_plugins(crate::capture::ProbeLookPlugin);
         app.add_plugins(crate::capture::ProbeRoutePlugin);
+        app.add_plugins(crate::capture::ProbeCrowdPlugin);
         app.add_plugins(crate::capture::ProbePitchPlugin);
         app.add_plugins(crate::capture::ProbeCamPlugin);
     }
