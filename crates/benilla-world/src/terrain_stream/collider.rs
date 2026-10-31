@@ -502,7 +502,7 @@ mod tests {
 
             let hf_shape = hf.shape().as_heightfield().expect("a heightfield");
             let mut down_facing = 0;
-            for (_, tri) in hf_shape.triangles().enumerate() {
+            for tri in hf_shape.triangles() {
                 if tri.normal().is_some_and(|n| n.y <= 0.0) {
                     down_facing += 1;
                 }
