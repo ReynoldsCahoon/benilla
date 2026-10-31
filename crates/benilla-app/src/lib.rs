@@ -71,6 +71,7 @@ mod item_lane;
 mod item_names;
 mod item_watch;
 mod items;
+mod jump_button;
 mod lanes;
 mod loading_screen;
 mod local_state;

@@ -15,6 +15,8 @@
 //!   no interface frame under it becomes the movement stick ([`crate::virtual_stick`]) and leaves
 //!   the mouse; while it is held another finger's drag is a right-drag, mouselook, so the
 //!   character turns with the view. A stick finger that never moved is a tap after all.
+//! - In the world, a finger landing on the jump button ([`crate::jump_button`]) with no interface
+//!   frame under it jumps, a frame later, once per touch, and leaves the mouse until it lifts.
 //!
 //! Each action is written twice, as bevy_winit writes a real mouse's: as its typed message (the
 //! button plane, motion and wheel the game reads) and into the window's ordered event stream
@@ -64,8 +66,14 @@ enum Mode {
     #[default]
     Idle,
     /// One finger down, not yet a press: a tap, a drag or a hold still to be told apart. `hold`:
-    /// it landed in the stick's zone, so it presses nothing until the stick is claimed or declined.
-    Pending { start: Vec2, since: f32, hold: bool },
+    /// it landed in the stick's zone or on the jump button (`jump`), so it presses nothing until
+    /// it is claimed or declined.
+    Pending {
+        start: Vec2,
+        since: f32,
+        hold: bool,
+        jump: bool,
+    },
     /// One finger holding this button: left, or right while the stick is held.
     Drag(MouseButton),
     /// Two fingers: the right button, and the pair's midpoint and spread last frame.
@@ -84,6 +92,12 @@ pub(crate) struct Gesture {
     stick: Option<StickFinger>,
     /// The stick's zone, `x` below this logical px; `None` outside the world.
     pub(crate) stick_zone: Option<f32>,
+    /// The jump button's ring, `(centre, radius)`; `None` outside the world.
+    pub(crate) jump_zone: Option<(Vec2, f32)>,
+    /// The finger holding the jump button, outside `fingers` and the mouse until it lifts.
+    jump_finger: Option<u64>,
+    /// A jump button press not yet taken ([`Self::take_jump`]).
+    jumped: bool,
     /// Actions held for the next frame: a click's release.
     next_frame: Vec<MouseOut>,
 }
@@ -107,14 +121,16 @@ impl Gesture {
                 start,
                 since,
                 hold: true,
+                ..
             } if since < now && self.fingers.len() == 1 => Some(start),
             _ => None,
         }
     }
 
-    /// Hand the pending finger to the stick; it pressed nothing, so the mouse is left as it was.
-    pub(crate) fn claim_stick(&mut self) {
-        let Mode::Pending { start, .. } = self.mode else {
+    /// Hand the pending finger to the jump button or the stick, whichever it landed on; it pressed
+    /// nothing, so the mouse is left as it was.
+    pub(crate) fn claim(&mut self) {
+        let Mode::Pending { start, jump, .. } = self.mode else {
             return;
         };
         let Some((&id, &at)) = self.fingers.iter().next() else {
@@ -122,6 +138,11 @@ impl Gesture {
         };
         self.fingers.remove(&id);
         self.mode = Mode::Idle;
+        if jump {
+            self.jump_finger = Some(id);
+            self.jumped = true;
+            return;
+        }
         self.stick = Some(StickFinger {
             id,
             center: start,
@@ -132,7 +153,7 @@ impl Gesture {
 
     /// Keep the pending finger for the mouse: a UI frame was under it. A finger already past the
     /// slop presses now, as it would have when it crossed.
-    pub(crate) fn decline_stick(&mut self) -> Vec<MouseOut> {
+    pub(crate) fn decline(&mut self) -> Vec<MouseOut> {
         let Mode::Pending { start, since, .. } = self.mode else {
             return Vec::new();
         };
@@ -140,6 +161,7 @@ impl Gesture {
             start,
             since,
             hold: false,
+            jump: false,
         };
         let Some(&at) = self.fingers.values().next() else {
             return Vec::new();
@@ -162,6 +184,11 @@ impl Gesture {
     /// The stick's finger, while one is down.
     pub(crate) fn stick(&self) -> Option<StickFinger> {
         self.stick
+    }
+
+    /// Whether the jump button was pressed since the last call.
+    pub(crate) fn take_jump(&mut self) -> bool {
+        std::mem::take(&mut self.jumped)
     }
 
     /// The button a one-finger drag holds: the right, mouselook, while the stick is held.
@@ -226,16 +253,28 @@ impl Gesture {
         if self.stick.is_some_and(|s| s.id == id) {
             return self.stick_touch(phase, at);
         }
+        if self.jump_finger == Some(id) {
+            // One jump per touch: its moves and lift do nothing more.
+            if matches!(phase, TouchPhase::Ended | TouchPhase::Canceled) {
+                self.jump_finger = None;
+            }
+            return Vec::new();
+        }
         let mut out = Vec::new();
         match phase {
             TouchPhase::Started => {
                 self.fingers.insert(id, at);
                 match self.mode {
                     Mode::Idle => {
+                        let jump = self.jump_finger.is_none()
+                            && self.jump_zone.is_some_and(|(c, r)| c.distance(at) <= r);
+                        let stick =
+                            self.stick.is_none() && self.stick_zone.is_some_and(|x| at.x < x);
                         self.mode = Mode::Pending {
                             start: at,
                             since: now,
-                            hold: self.stick.is_none() && self.stick_zone.is_some_and(|x| at.x < x),
+                            hold: jump || stick,
+                            jump,
                         };
                         out.push(MouseOut::Cursor(at));
                     }
@@ -365,7 +404,12 @@ impl Plugin for TouchMousePlugin {
     fn build(&self, app: &mut App) {
         if cfg!(target_os = "ios") {
             app.init_resource::<crate::virtual_stick::VirtualStick>()
-                .add_systems(PreUpdate, touch_to_mouse.before(InputSystems));
+                .add_systems(
+                    PreUpdate,
+                    touch_to_mouse
+                        .before(InputSystems)
+                        .after(crate::jump_button::place_button),
+                );
         }
     }
 }
@@ -379,6 +423,7 @@ struct StickGate<'w> {
     world_object: Option<Res<'w, crate::target::HoveredObject>>,
     client_state: Option<Res<'w, State<crate::client_state::ClientState>>>,
     stick: ResMut<'w, crate::virtual_stick::VirtualStick>,
+    jump: Option<ResMut<'w, crate::jump_button::JumpButton>>,
 }
 
 impl StickGate<'_> {
@@ -426,20 +471,31 @@ fn touch_to_mouse(
         .as_ref()
         .is_some_and(|s| *s.get() == crate::client_state::ClientState::InWorld);
     gesture.stick_zone = in_world.then(|| window.width() * crate::virtual_stick::ZONE_WIDTH);
+    gesture.jump_zone = stick_gate
+        .jump
+        .as_ref()
+        .and_then(|j| j.center)
+        .filter(|_| in_world)
+        .map(|c| (c, crate::jump_button::RADIUS));
     let mut out = gesture.begin_frame();
     // Last frame's hover saw the cursor where the pending finger landed: the world under it makes
-    // it the stick, a frame keeps it for the mouse.
+    // it the stick or the jump, a frame keeps it for the mouse.
     if gesture.pending_start(now).is_some() {
         if stick_gate.hover.as_ref().is_none_or(|h| h.0.is_none()) {
-            gesture.claim_stick();
+            gesture.claim();
         } else {
-            out.extend(gesture.decline_stick());
+            out.extend(gesture.decline());
         }
     }
     for touch in touches.read() {
         out.extend(gesture.touch(touch.id, touch.phase, touch.position, now));
     }
     out.extend(gesture.frame(now));
+    if gesture.take_jump() {
+        if let Some(jump) = stick_gate.jump.as_mut() {
+            jump.pressed = true;
+        }
+    }
     let stick = if in_world { gesture.stick() } else { None };
     let published = stick.map(|s| (s.center, s.at));
     if stick_gate.stick.0 != published {
@@ -530,7 +586,7 @@ mod tests {
         assert_eq!(g.touch(1, TouchPhase::Moved, far, 0.01), vec![Cursor(far)]);
         assert_eq!(g.pending_start(0.0), None, "not before a frame has passed");
         assert_eq!(g.pending_start(0.04), Some(start));
-        g.claim_stick();
+        g.claim();
         let stick = g.stick().expect("claimed");
         assert_eq!((stick.center, stick.at), (start, far));
         let further = start + Vec2::new(0.0, -50.0);
@@ -541,12 +597,78 @@ mod tests {
         assert_eq!(g.begin_frame(), vec![], "a moved stick is no click");
     }
 
+    /// In the world with the jump ring at (900, 250), radius 30.
+    fn with_jump() -> Gesture {
+        Gesture {
+            jump_zone: Some((Vec2::new(900.0, 250.0), 30.0)),
+            ..in_world()
+        }
+    }
+
+    #[test]
+    fn a_finger_on_the_jump_ring_jumps_once_and_presses_nothing() {
+        let mut g = with_jump();
+        let at = Vec2::new(905.0, 255.0);
+        assert_eq!(g.touch(1, TouchPhase::Started, at, 0.0), vec![Cursor(at)]);
+        assert!(!g.take_jump(), "not before the hover has seen it");
+        assert_eq!(g.pending_start(0.04), Some(at));
+        g.claim();
+        assert!(g.take_jump());
+        assert!(!g.take_jump(), "taken once");
+        assert_eq!(g.stick(), None, "the jump is no stick");
+        // Its moves, a hold past the dwell and its lift press nothing and jump no more.
+        let moved = at + Vec2::new(40.0, 0.0);
+        assert_eq!(g.touch(1, TouchPhase::Moved, moved, 0.1), vec![]);
+        assert_eq!(g.frame(1.0), vec![]);
+        assert_eq!(g.touch(1, TouchPhase::Ended, moved, 1.1), vec![]);
+        assert_eq!(g.begin_frame(), vec![], "no click on the lift");
+        assert!(!g.take_jump());
+        // The next touch on the ring jumps again.
+        g.touch(2, TouchPhase::Started, at, 2.0);
+        g.claim();
+        assert!(g.take_jump());
+    }
+
+    #[test]
+    fn a_frame_over_the_jump_ring_keeps_the_finger_for_the_mouse() {
+        let mut g = with_jump();
+        let at = Vec2::new(900.0, 250.0);
+        g.touch(1, TouchPhase::Started, at, 0.0);
+        assert_eq!(g.decline(), vec![]);
+        assert!(!g.take_jump());
+        assert_eq!(g.touch(1, TouchPhase::Ended, at, 0.1), vec![Cursor(at)]);
+        assert_eq!(g.begin_frame(), vec![Tap], "the frame under it is clicked");
+    }
+
+    #[test]
+    fn the_stick_held_the_other_thumb_jumps() {
+        let mut g = with_jump();
+        g.touch(1, TouchPhase::Started, Vec2::new(100.0, 500.0), 0.0);
+        g.claim();
+        let at = Vec2::new(900.0, 250.0);
+        g.touch(2, TouchPhase::Started, at, 0.1);
+        assert_eq!(g.pending_start(0.14), Some(at));
+        g.claim();
+        assert!(g.take_jump());
+        assert!(g.stick().is_some(), "the stick is still held");
+    }
+
+    #[test]
+    fn off_the_ring_a_finger_is_the_mouse() {
+        let mut g = with_jump();
+        let at = Vec2::new(900.0, 290.0);
+        g.touch(1, TouchPhase::Started, at, 0.0);
+        assert_eq!(g.pending_start(0.04), None, "no hold outside the ring");
+        assert_eq!(g.touch(1, TouchPhase::Ended, at, 0.1), vec![Cursor(at)]);
+        assert_eq!(g.begin_frame(), vec![Tap]);
+    }
+
     #[test]
     fn a_still_stick_finger_is_a_tap() {
         let mut g = in_world();
         let at = Vec2::new(100.0, 500.0);
         g.touch(1, TouchPhase::Started, at, 0.0);
-        g.claim_stick();
+        g.claim();
         assert_eq!(g.touch(1, TouchPhase::Ended, at, 0.1), vec![Cursor(at)]);
         assert_eq!(g.begin_frame(), vec![Tap]);
     }
@@ -558,7 +680,7 @@ mod tests {
         g.touch(1, TouchPhase::Started, start, 0.0);
         let far = start + Vec2::new(40.0, 0.0);
         g.touch(1, TouchPhase::Moved, far, 0.01);
-        assert_eq!(g.decline_stick(), vec![Cursor(start), Press(L)]);
+        assert_eq!(g.decline(), vec![Cursor(start), Press(L)]);
         assert_eq!(g.begin_frame(), vec![Cursor(far), Motion(far - start)]);
         assert_eq!(g.stick(), None);
     }
@@ -567,7 +689,7 @@ mod tests {
     fn with_the_stick_held_another_finger_drags_the_right_button() {
         let mut g = in_world();
         g.touch(1, TouchPhase::Started, Vec2::new(100.0, 500.0), 0.0);
-        g.claim_stick();
+        g.claim();
         let look = Vec2::new(800.0, 400.0);
         assert_eq!(
             g.touch(2, TouchPhase::Started, look, 0.1),
