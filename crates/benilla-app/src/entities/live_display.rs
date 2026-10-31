@@ -102,30 +102,7 @@ pub(super) fn refresh_live_display(
                 net.display_id = Some(live);
                 swapped.write(DisplaySwapped { entity });
                 // `attach_entity_visuals` rebuilds from scratch, fade-skipped by `Reattached`.
-                commands
-                    .entity(entity)
-                    .despawn_related::<Children>()
-                    .remove::<(
-                        VisualAttached,
-                        AppliedDisplay,
-                        super::equipment::AppliedEquipment,
-                        super::mount::AppliedMount,
-                        super::mount::MountChild,
-                        AnimationPlayer,
-                        bevy::animation::transition::AnimationTransitions,
-                        AnimationGraphHandle,
-                        benilla_assets::ModelAnimations,
-                        crate::creature_anim::AnimDriver,
-                        (
-                            benilla_world::rig_anim::RigPose,
-                            crate::creature_anim::BodyTwist,
-                            benilla_world::rig_anim::GlobalSeqDrive,
-                        ),
-                        benilla_world::rig_palette::RigSkin,
-                        super::BoneAttach,
-                        super::equipment::HeldAttached,
-                    )>()
-                    .insert(super::equipment::Reattached);
+                tear_down_visual(&mut commands, entity).insert(super::equipment::Reattached);
             }
         }
 
@@ -192,6 +169,38 @@ pub(super) fn tick_scale_ease(
     }
 }
 
+/// Tear a unit's visual down for `attach_entity_visuals` to build again from scratch: its parts and
+/// every component the build adds (a stale [`benilla_world::rig_palette::RigStarved`] too, which a
+/// starved rebuild re-marks). The caller marks how the rebuild runs.
+pub(super) fn tear_down_visual<'c>(
+    commands: &'c mut Commands,
+    unit: Entity,
+) -> bevy::ecs::system::EntityCommands<'c> {
+    let mut unit = commands.entity(unit);
+    unit.despawn_related::<Children>().remove::<(
+        VisualAttached,
+        AppliedDisplay,
+        super::equipment::AppliedEquipment,
+        super::mount::AppliedMount,
+        super::mount::MountChild,
+        AnimationPlayer,
+        bevy::animation::transition::AnimationTransitions,
+        AnimationGraphHandle,
+        benilla_assets::ModelAnimations,
+        crate::creature_anim::AnimDriver,
+        (
+            benilla_world::rig_anim::RigPose,
+            crate::creature_anim::BodyTwist,
+            benilla_world::rig_anim::GlobalSeqDrive,
+        ),
+        benilla_world::rig_palette::RigSkin,
+        super::BoneAttach,
+        super::equipment::HeldAttached,
+        benilla_world::rig_palette::RigStarved,
+    )>();
+    unit
+}
+
 /// A rebuild of a body that was drawn, benilla's own palette heal: its composite is forced, so the
 /// body never drops out for frames as an arriving one waits, and rebuilds at once as it always has.
 #[derive(Component)]
@@ -227,30 +236,7 @@ pub(super) fn heal_rig_starved(
             "rig heal: guid {:016x} was denied a palette rig at attach — rebuilding (0x60abe0 shape)",
             guid.0
         );
-        commands
-            .entity(entity)
-            .despawn_related::<Children>()
-            .remove::<(
-                VisualAttached,
-                AppliedDisplay,
-                super::equipment::AppliedEquipment,
-                super::mount::AppliedMount,
-                super::mount::MountChild,
-                AnimationPlayer,
-                bevy::animation::transition::AnimationTransitions,
-                AnimationGraphHandle,
-                benilla_assets::ModelAnimations,
-                crate::creature_anim::AnimDriver,
-                (
-                    benilla_world::rig_anim::RigPose,
-                    crate::creature_anim::BodyTwist,
-                    benilla_world::rig_anim::GlobalSeqDrive,
-                ),
-                benilla_world::rig_palette::RigSkin,
-                super::BoneAttach,
-                super::equipment::HeldAttached,
-                benilla_world::rig_palette::RigStarved,
-            )>()
+        tear_down_visual(&mut commands, entity)
             .insert((super::equipment::Reattached, ShownRebuild));
     }
 }
