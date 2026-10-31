@@ -18,7 +18,9 @@
 //!   grace ([`crate::art_scope::unused_grace`]), and the tile-streamed handle caches, otherwise
 //!   swept by distance alone, take the use rule ([`crate::art_scope::ArtScope::apply_pressed`]).
 //!   Nothing drawn changes; art shown again rebuilds.
-//! - [`MemoryTier::Low`], [`MemoryTier::Critical`]: as Tight, for now.
+//! - [`MemoryTier::Low`]: other players past the nearest 60 wait unbuilt (`benilla-app`'s
+//!   `entities::body_cap`, a deviation written down there).
+//! - [`MemoryTier::Critical`]: the built players past the nearest 30 are taken down.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
