@@ -266,6 +266,29 @@ impl PipelineCache {
         self.waiting_pipelines.iter().copied()
     }
 
+    /// benilla: whether any pipeline is queued or still compiling.
+    pub fn compiling(&self) -> bool {
+        !self.waiting_pipelines.is_empty()
+            || !self
+                .new_pipelines
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
+    }
+
+    /// benilla: drop every composable module the shader composer has parsed (each import, once
+    /// per shader-def set it was built for), returning how many. The shader cache re-adds an
+    /// import from its kept source the next time a pipeline needs it, so this trades a slower
+    /// first compile later for the memory now (~26 MB on the iPad Air 2).
+    pub fn trim_shader_composer(&self) -> usize {
+        let mut cache = self.shader_cache.lock().unwrap();
+        let names: Vec<String> = cache.composer.module_sets.keys().cloned().collect();
+        for name in &names {
+            cache.composer.remove_composable_module(name);
+        }
+        names.len()
+    }
+
     /// Create a new pipeline cache associated with the given render device.
     pub fn new(
         device: RenderDevice,

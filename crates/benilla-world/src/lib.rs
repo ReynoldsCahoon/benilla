@@ -149,6 +149,7 @@ pub mod rig_anim;
 pub mod rig_palette;
 pub mod rig_rider;
 pub mod schedule;
+mod shader_trim;
 mod shaders;
 pub mod sky;
 pub mod sky_order;

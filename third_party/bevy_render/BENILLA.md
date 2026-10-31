@@ -4,6 +4,14 @@ Upstream: [`bevyengine/bevy`](https://github.com/bevyengine/bevy) (`bevy_render`
 version `0.18.1`, copied from the cargo registry as published and wired in through
 `[patch.crates-io]` in the workspace root.
 
+## The patch — the shader composer can be emptied
+
+`PipelineCache::compiling` and `PipelineCache::trim_shader_composer` (`src/render_resource/
+pipeline_cache.rs`): naga_oil's composer keeps every import it parsed, once per shader-def set,
+for the session (~26 MB on the iPad Air 2 once the pipelines are warm). benilla empties it after
+the cache has been idle a while (`benilla_world::shader_trim`); `bevy_shader`'s cache re-adds an
+import from its kept source when a later pipeline needs it. Additive: nothing calls them upstream.
+
 ## The patch — cube-array fallback on all of iOS
 
 Bevy binds point-light shadows as a cube-array texture in the mesh view bindings every mesh
