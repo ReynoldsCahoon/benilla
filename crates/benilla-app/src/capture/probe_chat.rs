@@ -49,7 +49,13 @@ fn fire_probe_chat(
     time: ProbeClock,
     mut hosted_vm: crate::script_calls::HostedVm,
     self_player: Query<(), With<crate::net::SelfPlayer>>,
+    idle: Option<ResMut<crate::ui_chat::idle::LastInput>>,
 ) {
+    // The probe stands in for a player at the keyboard: without input the idle handler marks
+    // them AFK at 5 minutes and camps them at 30 (`ui_chat::idle`), which ends a long memory soak.
+    if let (Some(mut idle), false) = (idle, self_player.is_empty()) {
+        idle.stamp_present(time.elapsed());
+    }
     hosted_vm.run(|script| {
         if probe.lines.is_empty() {
             return;

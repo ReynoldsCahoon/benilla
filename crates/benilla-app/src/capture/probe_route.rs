@@ -118,9 +118,15 @@ fn drive_probe_route(
     mut entered: Local<Option<f32>>,
     mut ready: Local<bool>,
     mut exit: MessageWriter<AppExit>,
+    idle: Option<ResMut<crate::ui_chat::idle::LastInput>>,
 ) {
     if self_player.is_empty() || route.done {
         return;
+    }
+    // The probe stands in for a player at the keyboard: without input the idle handler marks
+    // them AFK at 5 minutes and camps them at 30 (`ui_chat::idle`), which ends a long memory soak.
+    if let Some(mut idle) = idle {
+        idle.stamp_present(time.elapsed());
     }
     let now = time.elapsed_secs();
     let entered = *entered.get_or_insert(now);

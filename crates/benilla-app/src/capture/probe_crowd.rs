@@ -223,6 +223,12 @@ fn drive_probe_crowd(world: &mut World, mut entered: Local<Option<f32>>) {
     if !in_world {
         return;
     }
+    // The probe stands in for a player at the keyboard: without input the idle handler marks
+    // them AFK at 5 minutes and camps them at 30 (`ui_chat::idle`), which ends a long memory soak.
+    let elapsed = world.resource::<Time<bevy::time::Real>>().elapsed();
+    if let Some(mut idle) = world.get_resource_mut::<crate::ui_chat::idle::LastInput>() {
+        idle.stamp_present(elapsed);
+    }
     let entered = *entered.get_or_insert(now);
     let Some(mut crowd) = world.remove_resource::<ProbeCrowd>() else {
         return;
