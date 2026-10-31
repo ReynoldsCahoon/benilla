@@ -64,12 +64,16 @@ pub(crate) struct DevProbesPlugin;
 impl Plugin for DevProbesPlugin {
     #[cfg_attr(not(feature = "dev"), allow(unused_variables))]
     fn build(&self, app: &mut App) {
-        // `route-probe`/`crowd-probe` alone: the route walker and the synthetic crowd without the
-        // rest of the fleet (the iPad build's memory tests).
+        // `route-probe`/`crowd-probe`/`chat-probe` alone: the route walker, the synthetic crowd and
+        // the chat lines without the rest of the fleet (the iPad build's memory tests).
         #[cfg(all(feature = "route-probe", not(feature = "dev")))]
         app.add_plugins(crate::probe_route::ProbeRoutePlugin);
         #[cfg(all(feature = "crowd-probe", not(feature = "dev")))]
         app.add_plugins(crate::probe_crowd::ProbeCrowdPlugin);
+        #[cfg(all(feature = "chat-probe", not(feature = "dev")))]
+        if std::env::var("WOW_PROBE_CHAT").is_ok() {
+            app.add_plugins(crate::probe_chat::ProbeChatPlugin);
+        }
         #[cfg(feature = "dev")]
         {
             // `$WOW_CAPTURE`: one deterministic screenshot, then exit.

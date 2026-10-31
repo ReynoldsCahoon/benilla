@@ -19,6 +19,7 @@ doctest = false
 # through `ios/build-rust.sh`); off in a shipped build.
 route-probe = ["benilla-app/route-probe"]
 crowd-probe = ["benilla-app/crowd-probe"]
+chat-probe = ["benilla-app/chat-probe"]
 
 [dependencies]
 # The player build: `default-features = false` keeps `dev` (and the source-tree paths) out.
