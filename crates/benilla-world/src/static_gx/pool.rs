@@ -1,10 +1,14 @@
 //! The retained pass's shared texture-array pool. A texture keeps one (class, layer) slot, deduped
 //! across cells and regions, and its layer copy is encoded once. A full class opens a sibling
-//! rather than growing, so no bind group goes stale. The pool resets only with the map.
+//! rather than growing, so no bind group goes stale. The pool resets with the map, and a layer
+//! whose texture is gone ([`GxTexturePool::release_missing`]) is reused: the art caches evict and
+//! reload textures under new ids, so without reuse every revisit of an area took fresh layers
+//! (a Ratchet-Orgrimmar round trip on the iPad grew the arrays ~20 MB each, 25 -> 91 MB in three).
 
 use bevy::asset::AssetId;
 use bevy::image::Image;
 use bevy::platform::collections::HashMap;
+use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::texture::GpuImage;
@@ -17,8 +21,10 @@ struct GxPoolClass {
     array: Texture,
     view: TextureView,
     capacity: u32,
-    /// Layers assigned so far (≤ capacity).
+    /// Layers ever taken (≤ capacity); a freed one waits in `free`.
     members: u32,
+    /// Layers whose texture is gone, reused before a new one is taken.
+    free: Vec<u32>,
     /// Queued (source, layer) copies, encoded once by [`GxTexturePool::drain_pending`].
     pending: Vec<(Texture, u32)>,
 }
@@ -53,8 +59,10 @@ impl GxTexturePool {
         let key = (size, g.texture.format(), g.texture.mip_level_count());
         let ci = self.class_with_room(key, render_device);
         let class = &mut self.classes[ci];
-        let layer = class.members;
-        class.members += 1;
+        let layer = class.free.pop().unwrap_or_else(|| {
+            class.members += 1;
+            class.members - 1
+        });
         class.pending.push((g.texture.clone(), layer));
         let slot = (
             u16::try_from(ci).expect("gx pool under u16 classes"),
@@ -111,6 +119,22 @@ impl GxTexturePool {
         self.classes.is_empty()
     }
 
+    /// Free the slot of every texture no longer resident, returning how many. A baked item holds
+    /// its texture's handle, so a texture leaves `images` only after the last cell drawing it has
+    /// gone, and its layer is free to take.
+    pub(super) fn release_missing(&mut self, images: &RenderAssets<GpuImage>) -> usize {
+        let classes = &mut self.classes;
+        let before = self.assigned.len();
+        self.assigned.retain(|id, &mut (ci, layer)| {
+            let keep = images.get(*id).is_some();
+            if !keep {
+                classes[usize::from(ci)].free.push(u32::from(layer));
+            }
+            keep
+        });
+        before - self.assigned.len()
+    }
+
     /// A key's class with a free layer, opening a new sibling when every one is full.
     fn class_with_room(
         &mut self,
@@ -118,11 +142,9 @@ impl GxTexturePool {
         render_device: &RenderDevice,
     ) -> usize {
         let max_layers = render_device.limits().max_texture_array_layers;
-        if let Some(ci) = self
-            .classes
-            .iter()
-            .position(|c| (c.size, c.format, c.mips) == key && c.members < c.capacity)
-        {
+        if let Some(ci) = self.classes.iter().position(|c| {
+            (c.size, c.format, c.mips) == key && (c.members < c.capacity || !c.free.is_empty())
+        }) {
             return ci;
         }
         let capacity = self
@@ -176,6 +198,7 @@ impl GxTexturePool {
             view,
             capacity,
             members: 0,
+            free: Vec::new(),
             pending: Vec::new(),
         });
         self.classes.len() - 1

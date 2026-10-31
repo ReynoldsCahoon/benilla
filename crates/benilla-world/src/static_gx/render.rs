@@ -289,6 +289,7 @@ fn prepare_static_gx(
     asset_server: Res<AssetServer>,
     images: Res<RenderAssets<GpuImage>>,
     views: Query<GxViewKey>,
+    mut last_release: Local<Option<std::time::Instant>>,
 ) {
     let _t = super::gx_perf_guard(3);
     let Some((view, msaa, _, _)) = views.iter().next() else {
@@ -438,6 +439,15 @@ fn prepare_static_gx(
         }
     }
     pool.drain_pending(&render_device, &render_queue);
+    // Once a second, free the layers of textures that left: a second also outlasts any draw of a
+    // region released a frame before its texture.
+    if last_release.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {
+        *last_release = Some(std::time::Instant::now());
+        let freed = pool.release_missing(&images);
+        if freed > 0 {
+            debug!("static_gx: {freed} pool layers freed for reuse");
+        }
+    }
 
     // The kill-bit sync: on a new bitmap revision, rewrite the kill column, re-upload and rebuild
     // the runs. A cell that changed out of view syncs on re-entry.
