@@ -1306,7 +1306,7 @@ fn drop_streamed_world(
 /// Expire the placement material dedup by distance, the within-map half of
 /// [`drop_streamed_world`]'s clear.
 fn scope_placement_art(mut scope: crate::art_scope::ArtScope, mut placements: ResMut<Placements>) {
-    scope.apply(
+    scope.apply_pressed(
         &mut placements.materials,
         crate::art_scope::ArtSlot::PlaceMats,
     );

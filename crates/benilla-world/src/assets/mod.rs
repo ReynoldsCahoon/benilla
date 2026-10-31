@@ -38,8 +38,8 @@ fn evict_world_art(
 /// samples, so `textures` is what frees VRAM. The UI sprite caches stay, as on a map change.
 fn scope_world_art(mut scope: ArtScope, assets: Option<ResMut<WorldAssets>>) {
     if let Some(mut a) = assets {
-        scope.apply(&mut a.model_materials, ArtSlot::ClutterMats);
-        scope.apply(&mut a.textures, ArtSlot::Textures);
+        scope.apply_pressed(&mut a.model_materials, ArtSlot::ClutterMats);
+        scope.apply_pressed(&mut a.textures, ArtSlot::Textures);
     }
 }
 

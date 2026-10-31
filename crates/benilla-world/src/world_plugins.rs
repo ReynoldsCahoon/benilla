@@ -72,6 +72,8 @@ impl PluginGroup for WorldPlugins {
             .add(crate::straddle::plugin)
             // Within-map art residency: the dedup caches expire by distance.
             .add(crate::art_scope::ArtScopePlugin)
+            // The low-memory safety net: headroom tiers, which the art caches' grace reads.
+            .add(crate::memory_governor::MemoryGovernorPlugin)
             // Opens the patch chain (`AssetSet::Open`), which every other startup runs after.
             .add(crate::assets::AssetPlugin)
             // Map.dbc and the current map, keyed off by the streamers, loading screen and lighting.

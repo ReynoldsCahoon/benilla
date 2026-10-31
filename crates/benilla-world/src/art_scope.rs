@@ -33,8 +33,12 @@ const ENTITY_RADIUS_YD: f32 = 250.0;
 const UNUSED_GRACE_SECS: f32 = 60.0;
 
 /// [`UNUSED_GRACE_SECS`], or `$WOW_DISPLAY_GRACE` seconds: a test knob, so a route run's end census
-/// need not wait out the full grace. The display-model caches in `benilla-app` share it.
+/// need not wait out the full grace. The display-model caches in `benilla-app` share it. None while
+/// the [`crate::memory_governor`] is short of memory: an unused entry drops at the next sweep.
 pub fn unused_grace() -> f32 {
+    if crate::memory_governor::tier() >= crate::memory_governor::MemoryTier::Tight {
+        return 0.0;
+    }
     static GRACE: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
         std::env::var("WOW_DISPLAY_GRACE")
             .ok()
@@ -236,6 +240,22 @@ impl ArtScope<'_> {
                 slot.column(),
                 cache.len()
             );
+        }
+    }
+}
+
+impl ArtScope<'_> {
+    /// [`Self::apply`], plus [`Self::apply_unheld`]'s use rule while the
+    /// [`crate::memory_governor`] is short of memory: a handle cache otherwise swept only by
+    /// distance (the tile-streamed art, which a city's walk revisits) gives up what nothing draws.
+    pub fn apply_pressed<K: Eq + Hash, A: Asset>(
+        &mut self,
+        cache: &mut SpatialCache<K, Handle<A>>,
+        slot: ArtSlot,
+    ) {
+        match crate::memory_governor::tier() >= crate::memory_governor::MemoryTier::Tight {
+            true => self.apply_unheld(cache, slot),
+            false => self.apply(cache, slot),
         }
     }
 }
