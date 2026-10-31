@@ -565,6 +565,11 @@ pub(super) struct PendingKnockback {
 }
 
 impl Player {
+    /// Walk mode ([`Self::walking`]), for the touch stick that toggles it.
+    pub(crate) fn walking(&self) -> bool {
+        self.walking
+    }
+
     /// A player whose last streamed movement word is `flags`, for the gates that read it.
     /// Riding `entity`, placed on its deck at its origin, for other modules' tests.
     #[cfg(test)]

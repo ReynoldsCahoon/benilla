@@ -6,11 +6,16 @@
 //!   up forward, down backward, left and right strafe, so a diagonal holds two.
 //! - The directions go in as the bindings' own calls (`MoveForwardStart`/`Stop` and the strafes'),
 //!   so the mover, the wire and the camera's follow read them as they read W.
+//! - How far the knob is out picks the gait: inside [`WALK_BELOW`] of the radius the character
+//!   walks, past [`RUN_ABOVE`] it runs, between them it keeps its gait. The switch is the walk
+//!   toggle, `ToggleRun()` (`0x513d50`), the only gait 1.12 has: walk speed or run speed, no
+//!   speed between, so the server sees a player pressing the walk key. Letting go of the stick
+//!   after a walk toggles back to running.
 //!
 //! Deviation: benilla's own control. The reference has no touch input; its movement comes from
 //! keys and mice alone.
 
-use benilla_ui::script::{BindingInput, HeldInput};
+use benilla_ui::script::{BindingInput, FiredInput, HeldInput};
 use bevy::prelude::*;
 
 /// The stick's zone: a finger landing on the left of this fraction of the window's width.
@@ -25,6 +30,13 @@ const DEAD: f32 = 0.25;
 /// The fraction of [`RADIUS`] an axis must pass to hold its direction: sin 22.5°, so the eight
 /// sectors are equal.
 const AXIS: f32 = 0.38;
+
+/// The fraction of [`RADIUS`] under which a running stick walks.
+const WALK_BELOW: f32 = 0.55;
+
+/// The fraction of [`RADIUS`] over which a walking stick runs; the gap keeps a finger on the
+/// boundary from toggling every frame.
+const RUN_ABOVE: f32 = 0.7;
 
 /// The stick this frame, `(centre, finger)` in logical px; `None` with no stick finger down.
 #[derive(Resource, Default, Clone, Copy, PartialEq)]
@@ -48,21 +60,55 @@ fn held(center: Vec2, at: Vec2) -> [bool; 4] {
     [v.y < -AXIS, v.y > AXIS, v.x < -AXIS, v.x > AXIS]
 }
 
+/// The gait the stick asks for: `Some(true)` to walk, `Some(false)` to run, from the knob's reach
+/// (`None` with no stick) and the gait it asked for last. Inside the dead zone it keeps the last.
+fn gait(reach: Option<f32>, last: Option<bool>) -> Option<bool> {
+    let reach = reach?;
+    if reach < DEAD {
+        return last;
+    }
+    Some(match last {
+        Some(true) => reach <= RUN_ABOVE,
+        _ => reach < WALK_BELOW,
+    })
+}
+
+/// Whether to press the walk toggle: the stick's gait changed, or it let go after a walk, and the
+/// player's walk mode is not already what that asks for.
+fn toggle_gait(want: Option<bool>, last: Option<bool>, walking: bool) -> bool {
+    let target = match (want, last) {
+        (Some(w), l) if l != Some(w) => w,
+        (None, Some(true)) => false,
+        _ => return false,
+    };
+    target != walking
+}
+
 /// The stick's directions into the bindings, after the frame's binding calls: a Start each frame a
 /// direction is held, which is no new edge on a held bit and restores one the loading cover's bulk
-/// clear dropped, and a Stop when it lets go.
+/// clear dropped, and a Stop when it lets go; and the walk toggle when the gait changes.
 pub(crate) fn hold_directions(
     stick: Option<Res<VirtualStick>>,
+    player: Option<Res<crate::player::Player>>,
     mut binds: ResMut<crate::bindings::BindingsState>,
     mut last: Local<[bool; 4]>,
+    mut last_gait: Local<Option<bool>>,
 ) {
-    let now = stick
-        .and_then(|s| s.0)
-        .map_or([false; 4], |(center, at)| held(center, at));
+    let stick = stick.and_then(|s| s.0);
+    let now = stick.map_or([false; 4], |(center, at)| held(center, at));
     if now != *last {
         info!("virtual stick: forward/back/left/right {now:?}");
     }
+    let reach = stick.map(|(center, at)| ((at - center) / RADIUS).length().min(1.0));
+    let want = gait(reach, *last_gait);
     let mut calls = Vec::new();
+    if let Some(player) = player {
+        if toggle_gait(want, *last_gait, player.walking()) {
+            info!("virtual stick: walk {}", want == Some(true));
+            calls.push(BindingInput::Fire(FiredInput::ToggleRun));
+        }
+    }
+    *last_gait = want;
     for (i, input) in DIRECTIONS.into_iter().enumerate() {
         if now[i] {
             calls.push(BindingInput::Start(input));
@@ -165,6 +211,52 @@ mod tests {
     use super::*;
 
     const C: Vec2 = Vec2::new(200.0, 500.0);
+
+    #[test]
+    fn a_short_push_walks_and_a_long_push_runs() {
+        assert_eq!(gait(Some(0.4), None), Some(true));
+        assert_eq!(gait(Some(0.9), None), Some(false));
+        assert_eq!(gait(None, Some(true)), None);
+    }
+
+    #[test]
+    fn between_the_thresholds_the_gait_holds() {
+        // Walking: on past the walk edge, still walking until RUN_ABOVE.
+        assert_eq!(gait(Some(0.65), Some(true)), Some(true));
+        assert_eq!(gait(Some(0.75), Some(true)), Some(false));
+        // Running: back inside RUN_ABOVE, still running until WALK_BELOW.
+        assert_eq!(gait(Some(0.65), Some(false)), Some(false));
+        assert_eq!(gait(Some(0.5), Some(false)), Some(true));
+        // The dead zone keeps whatever the stick last asked for.
+        assert_eq!(gait(Some(0.1), Some(true)), Some(true));
+        assert_eq!(gait(Some(0.1), None), None);
+    }
+
+    #[test]
+    fn the_toggle_fires_on_a_change_of_gait_only_when_the_mode_differs() {
+        assert!(
+            toggle_gait(Some(true), None, false),
+            "a first walk from a run"
+        );
+        assert!(
+            !toggle_gait(Some(true), Some(true), false),
+            "no edge, no press"
+        );
+        assert!(!toggle_gait(Some(true), None, true), "already walking");
+        assert!(toggle_gait(Some(false), Some(true), true), "out to a run");
+        assert!(
+            toggle_gait(None, Some(true), true),
+            "let go after a walk: back to running"
+        );
+        assert!(
+            !toggle_gait(None, Some(false), false),
+            "let go after a run: nothing"
+        );
+        assert!(
+            !toggle_gait(None, None, true),
+            "no stick, a walk set elsewhere stays"
+        );
+    }
 
     #[test]
     fn inside_the_dead_zone_nothing_is_held() {
