@@ -838,7 +838,8 @@ fn clamp_seat_disabled() -> bool {
 }
 
 /// A stamped unit re-enters [`mark_swimming_creatures`] only when its `Transform` or its
-/// descriptors change (a `UNIT_FIELD_FLAGS` delta must re-ask); an unstamped one every frame.
+/// descriptors change (a `UNIT_FIELD_FLAGS` delta must re-ask); an unstamped one every frame, and
+/// a stale stamp's (a collider epoch since) in the sweep that follows the epoch change.
 type SwimMarkGate = Or<(
     Changed<Transform>,
     Changed<ObjectStore>,
@@ -852,7 +853,7 @@ type SwimMarkQuery = (
     Option<&'static CollisionHeight>,
     Option<&'static ObjectStore>,
     Has<CreatureSwimming>,
-    Has<SwimEvaluated>,
+    Option<&'static SwimEvaluated>,
     // [`ground_derived`]'s other inputs: the mark and the clamp must walk the same population.
     Has<Spline>,
     Has<GroundClamped>,
@@ -860,10 +861,15 @@ type SwimMarkQuery = (
     Has<crate::net::RemoteMotion>,
 );
 
-/// The stamp [`mark_swimming_creatures`] leaves once a unit's room claim settles; 1.12 water is
-/// static, so it holds until the unit moves or the `ColliderEpoch` bumps.
+/// The stamp [`mark_swimming_creatures`] leaves once a unit's room claim settles, with the
+/// collider epoch it settled under; 1.12 water is static, so it holds until the unit moves or the
+/// `ColliderEpoch` bumps. The epoch is a field, not a marker taken off every unit at each bump:
+/// a removal moves each unit into another archetype, and the ECS keeps every archetype it ever
+/// made (wow-optimize FINDINGS, "What the ECS bookkeeping grows from").
 #[derive(Component)]
-pub(in crate::net) struct SwimEvaluated;
+pub(in crate::net) struct SwimEvaluated {
+    epoch: u64,
+}
 
 /// The exit band (yd) below the swim boundary: the player boundary's 1/36-yd hysteresis
 /// (`0x7ff9d0`), an absolute distance, not scaled with collision height.
@@ -935,32 +941,45 @@ fn creature_swim_state(marked: bool, depth: f32, boundary: f32, unit_flags: u32)
 pub(in crate::net) fn mark_swimming_creatures(
     mut commands: Commands,
     units: Query<SwimMarkQuery, SwimMarkGate>,
-    stamped: Query<Entity, With<SwimEvaluated>>,
+    stamped: Query<SwimMarkQuery, With<SwimEvaluated>>,
     world: benilla_world::world_point::WorldPoint,
     epoch: Res<benilla_world::collision::ColliderEpoch>,
     mut last_epoch: Local<Option<u64>>,
+    mut sweep: Local<bool>,
 ) {
-    // A collider epoch change (liquid streams with the colliders) drops every stamp.
+    // A collider epoch change (liquid streams with the colliders) makes every stamp stale: the
+    // sweep re-asks each stale unit every frame until its claim settles again.
     let now = epoch.get();
     if last_epoch.replace(now) != Some(now) {
-        for e in &stamped {
-            commands.entity(e).remove::<SwimEvaluated>();
-        }
+        *sweep = true;
     }
-    for (e, net, t, collision, store, marked, evaluated, splined, clamped, embodied, relayed) in
-        &units
-    {
+    // Whether the unit was left unstamped, its room claim not yet settled.
+    let mut mark = |(
+        e,
+        net,
+        t,
+        collision,
+        store,
+        marked,
+        stamp,
+        splined,
+        clamped,
+        embodied,
+        relayed,
+    ): bevy::ecs::query::QueryItem<'_, '_, SwimMarkQuery>|
+     -> bool {
         if !ground_derived(net.kind, splined, clamped, embodied, relayed) {
-            continue; // GameObjects don't swim; a relayed player's flag arrives on the wire
+            return false; // GameObjects don't swim; a relayed player's flag arrives on the wire
         }
         // The unit's own room decides whose liquid answers (an interior's, not the ADT water over
         // it). An unsettled claim may not enter swim, but a stale mark may always clear.
         let who = benilla_world::world_point::Subject::Unit(e);
         if !marked && !world.room_settled(who) {
-            continue; // unstamped, so retried until the claim lands
+            return true; // unstamped, so retried until the claim lands
         }
-        if !evaluated {
-            commands.entity(e).insert(SwimEvaluated);
+        if stamp.is_none_or(|s| s.epoch != now) {
+            // Over a stale stamp this replaces the value: no archetype move.
+            commands.entity(e).insert(SwimEvaluated { epoch: now });
         }
         let wow = bevy_to_wow(t.translation);
         let depth = world
@@ -977,6 +996,20 @@ pub(in crate::net) fn mark_swimming_creatures(
                 commands.entity(e).remove::<CreatureSwimming>();
             }
         }
+        false
+    };
+    for item in &units {
+        mark(item);
+    }
+    if *sweep {
+        // A unit both moved and stale is asked twice: the same answer, so the same commands.
+        let mut unsettled = false;
+        for item in &stamped {
+            if item.6.is_some_and(|s| s.epoch != now) {
+                unsettled |= mark(item);
+            }
+        }
+        *sweep = unsettled;
     }
 }
 
@@ -1750,6 +1783,41 @@ mod server_moved_players {
         assert!(
             crate::player::may_swim(0x8),
             "PLAYER_CONTROLLED alone admits a player to the depth decision (0x60310b bit 3)"
+        );
+    }
+
+    /// A collider epoch re-asks a stamped unit that has not moved, and the unit keeps its stamp
+    /// through it: the epoch is the stamp's field, so no unit is moved into another archetype.
+    #[test]
+    fn a_collider_epoch_re_asks_a_still_unit_without_taking_its_stamp() {
+        let (mut app, bot) = hollow(EntityKind::Player);
+        walking(&mut app, bot);
+        app.world_mut().entity_mut(bot).insert(CreatureSwimming);
+        app.add_systems(Update, super::mark_swimming_creatures);
+        app.update();
+        let first = app
+            .world()
+            .get::<super::SwimEvaluated>(bot)
+            .map(|s| s.epoch);
+        assert!(first.is_some(), "the first ask stamps it");
+        assert!(app.world().get::<CreatureSwimming>(bot).is_none());
+
+        // Swimming again on dry ground: only a re-ask clears it.
+        app.world_mut().entity_mut(bot).insert(CreatureSwimming);
+        app.world_mut().resource_mut::<ColliderEpoch>().bump();
+        app.update();
+        let now = app.world().resource::<ColliderEpoch>().get();
+        assert_ne!(first, Some(now));
+        assert_eq!(
+            app.world()
+                .get::<super::SwimEvaluated>(bot)
+                .map(|s| s.epoch),
+            Some(now),
+            "the stamp stays on and takes the new epoch"
+        );
+        assert!(
+            app.world().get::<CreatureSwimming>(bot).is_none(),
+            "the epoch re-asked it"
         );
     }
 
