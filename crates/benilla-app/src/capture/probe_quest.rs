@@ -456,8 +456,9 @@ function BenillaBot.Train()
 end
 function BenillaBot.Place()
   -- Every 8th check (~2 s): an active ability in the spellbook that is on no action slot goes on
-  -- an empty slot of the bar shown, as a player drags it there. Passives ("Passive" rank) have
-  -- no button.
+  -- an empty slot of the bar shown, as a player drags it there. Passives have no button:
+  -- IsSpellPassive, which also catches those whose rank text is not "Passive" (Axe
+  -- Specialization, Command, Hardiness were each dragged twice before).
   BenillaBot.placeTick = ((BenillaBot.placeTick or 0) + 1)
   if BenillaBot.placeTick - math.floor(BenillaBot.placeTick / 8) * 8 ~= 0 then return nil end
   local onBar = {}
@@ -477,7 +478,7 @@ function BenillaBot.Place()
     local nextName = GetSpellName(i + 1, "spell")
     -- The highest rank only (ranks of a spell sit together, lowest first).
     BenillaBot.noButton = BenillaBot.noButton or {}
-    if rank ~= "Passive" and tex and not onBar[tex] and not onBar["form:" .. name] and nextName ~= name
+    if rank ~= "Passive" and not IsSpellPassive(i, "spell") and tex and not onBar[tex] and not onBar["form:" .. name] and nextName ~= name
         and not BenillaBot.noButton[name] then
       for j = 1, 12 do
         local b, s = BenillaBot.Button(j)
