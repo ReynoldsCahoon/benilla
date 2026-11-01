@@ -159,6 +159,7 @@ pub mod static_merge;
 pub mod straddle;
 pub mod sun;
 pub mod surface;
+mod table_trim;
 pub mod terrain_stream;
 pub mod thread_qos;
 pub mod view;

@@ -76,6 +76,8 @@ impl PluginGroup for WorldPlugins {
             .add(crate::memory_governor::MemoryGovernorPlugin)
             // The shader composer's parsed imports, dropped once the pipelines are warm.
             .add(crate::shader_trim::plugin)
+            // ECS table capacity no entity uses any more, given back every couple of seconds.
+            .add(crate::table_trim::plugin)
             // Opens the patch chain (`AssetSet::Open`), which every other startup runs after.
             .add(crate::assets::AssetPlugin)
             // Map.dbc and the current map, keyed off by the streamers, loading screen and lighting.
