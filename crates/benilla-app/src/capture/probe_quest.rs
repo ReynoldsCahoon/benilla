@@ -60,6 +60,8 @@ const UNSTICK_LEG: f32 = 0.8;
 const UNSTICK_TRIES: u32 = 6;
 /// How long a set-aside target stays aside, seconds.
 const ASIDE_SECS: f32 = 120.0;
+/// A fight target whose health has not dropped for this long is set aside, in combat or not.
+const NO_DAMAGE_SECS: f32 = 20.0;
 /// Right-clicks on one goal before it is set aside (a click that never takes).
 const CLICK_TRIES: u32 = 6;
 /// `DialogStatus`: an offer (`!`) and a reward (`?`), the two marks worth a walk.
@@ -848,6 +850,9 @@ struct QuestBot {
     stuck_on: HashMap<u64, u32>,
     /// The fight target the last "nearer" switch left, never switched straight back to.
     left_target: Option<u64>,
+    /// The fight target's lowest health seen and when it last dropped: no drop in
+    /// [`NO_DAMAGE_SECS`] is a target we cannot hit (a wall or a tunnel floor between).
+    fight_hp: Option<(u64, u32, f32)>,
     /// Quests turned in this run, by title.
     done: Vec<String>,
     /// When the last stuck jump was.
@@ -991,6 +996,7 @@ struct Seen {
     npc_flags: u32,
     status: Option<u32>,
     level: u32,
+    health: u32,
 }
 
 fn env_f32(name: &str) -> Option<f32> {
@@ -1062,6 +1068,11 @@ fn look(
                 status: quest_giver.and_then(|q| q.status(guid.0)),
                 level: if creature {
                     f.unit_level().unwrap_or(0)
+                } else {
+                    0
+                },
+                health: if creature {
+                    f.unit_health().unwrap_or(0)
                 } else {
                     0
                 },
@@ -1205,22 +1216,41 @@ fn drive_quest_bot(
         let target = seen.iter().find(|s| s.guid == guid);
         match target {
             Some(t) if !t.dead => {
-                // Not reached in 20 s and no fight begun (a wall between, a ledge): another target.
-                if !combat
-                    && now - bot.goal_since > 20.0
-                    && dist2(here, [t.at[0], t.at[1]]) > MELEE_YD + 1.0
-                {
+                // Progress is damage: each drop in its health restarts the clock.
+                let since = match bot.fight_hp {
+                    Some((g, hp, at)) if g == t.guid && t.health >= hp => at,
+                    _ => {
+                        let at = if bot.fight_hp.is_some_and(|(g, ..)| g == t.guid) {
+                            now
+                        } else {
+                            bot.goal_since
+                        };
+                        bot.fight_hp = Some((t.guid, t.health, at));
+                        at
+                    }
+                };
+                // No damage dealt in 20 s (not reached; a wall, a ledge, or a tunnel above or
+                // below, which the flat distance reads as in reach): another target. In combat
+                // too: a mob that aggroed from the far side of a wall keeps us in combat while
+                // neither can reach the other.
+                if now - since.max(bot.goal_since) > NO_DAMAGE_SECS {
                     warn!(
-                        "PROBE_QUEST: {} not reached in 20 s; another target",
-                        name_of(&bot.plan, t)
+                        "PROBE_QUEST: {} took no damage in {NO_DAMAGE_SECS:.0} s ({:.1} yd away, {:.1} \
+                         up); another target",
+                        name_of(&bot.plan, t),
+                        dist2(here, [t.at[0], t.at[1]]),
+                        t.at[2] - here3[2]
                     );
                     bot.aside.insert(t.guid, now + 60.0);
+                    bot.fight_hp = None;
                     set_goal(&mut bot, Goal::Idle, now, &mut binds);
                     return;
                 }
                 // Hit by something else while this one is not fighting us: turn on the attacker.
                 if !t.attacking_me {
-                    if let Some(a) = nearest(&seen, here, |s| s.attacking_me && !s.dead) {
+                    if let Some(a) = nearest(&seen, here, |s| {
+                        s.attacking_me && !s.dead && !bot.aside.contains_key(&s.guid)
+                    }) {
                         let why = format!("attacked by {}", name_of(&bot.plan, a));
                         let goal = Goal::Fight {
                             entity: a.entity,
@@ -1303,8 +1333,11 @@ fn drive_quest_bot(
         }
     }
 
-    // Something attacking us comes first.
-    if let Some(a) = nearest(&seen, here, |s| s.attacking_me && !s.dead) {
+    // Something attacking us comes first, unless set aside as out of reach (it stays in combat
+    // with us from the far side of a wall until we walk off).
+    if let Some(a) = nearest(&seen, here, |s| {
+        s.attacking_me && !s.dead && !bot.aside.contains_key(&s.guid)
+    }) {
         if bot.goal.guid() != Some(a.guid) {
             let why = format!("attacked by {}", name_of(&bot.plan, a));
             set_goal(
@@ -2256,6 +2289,7 @@ impl Plugin for ProbeQuestPlugin {
             now: 0.0,
             stuck_on: HashMap::new(),
             left_target: None,
+            fight_hp: None,
             done: Vec::new(),
             jumped: -10.0,
             trained: 0,
