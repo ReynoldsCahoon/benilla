@@ -62,6 +62,8 @@ const UNSTICK_TRIES: u32 = 6;
 const ASIDE_SECS: f32 = 120.0;
 /// A fight target whose health has not dropped for this long is set aside, in combat or not.
 const NO_DAMAGE_SECS: f32 = 20.0;
+/// A creature this far above or below is on another level (a tunnel overhead), not in the way.
+const IN_THE_WAY_DZ: f32 = 6.0;
 /// Right-clicks on one goal before it is set aside (a click that never takes).
 const CLICK_TRIES: u32 = 6;
 /// `DialogStatus`: an offer (`!`) and a reward (`?`), the two marks worth a walk.
@@ -1376,6 +1378,7 @@ fn drive_quest_bot(
                     .is_some_and(|(_, f)| *f == 0)
                 && !bot.plan.use_target(s.entry)
                 && d <= 20.0
+                && (s.at[2] - here3[2]).abs() < IN_THE_WAY_DZ
                 && off.abs() < 60f32.to_radians()
                 && s.level <= level + 2
                 && !bot.aside.contains_key(&s.guid)
