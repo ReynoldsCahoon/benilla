@@ -86,6 +86,8 @@ pub(crate) struct PlanQuest {
     pub(crate) kills: Vec<(Kind, u32, u32)>,
     /// Items to bring: `(item, count, name)`.
     pub(crate) items: Vec<(u32, u32, String)>,
+    /// An item to use on the creature objectives instead of fighting them (`QU`).
+    pub(crate) use_item: Option<u32>,
 }
 
 #[derive(Default, Debug)]
@@ -169,6 +171,13 @@ impl Plan {
                         "QG" => q.givers.push((k, e)),
                         "QT" => q.enders.push((k, e)),
                         _ => q.kills.push((k, e, n(4).unwrap_or(1))),
+                    }
+                }
+                Some("QU") => {
+                    if let (Some(id), Some(item)) = (n(1), n(2)) {
+                        if let Some(q) = index.get(&id).map(|&i| &mut plan.quests[i].1) {
+                            q.use_item = Some(item);
+                        }
                     }
                 }
                 Some("QI") => {
@@ -294,6 +303,16 @@ impl Plan {
         path.reverse();
         path.push(to);
         Some(path)
+    }
+
+    /// Whether a creature is a use-item objective (a friendly to use an item on, never to fight).
+    fn use_target(&self, entry: u32) -> bool {
+        self.quests.iter().any(|(_, q)| {
+            q.use_item.is_some()
+                && q.kills
+                    .iter()
+                    .any(|&(k, e, _)| k == Kind::Creature && e == entry)
+        })
     }
 
     fn quest_titled(&self, title: &str) -> Option<&PlanQuest> {
@@ -508,6 +527,14 @@ function BenillaBot.Upgrade()
     end
   end
   return nil
+end
+function BenillaBot.UseItem(id)
+  for b = 0, 4 do
+    for s = 1, (GetContainerNumSlots(b) or 0) do
+      if BenillaBot.Id(GetContainerItemLink(b, s)) == id then UseContainerItem(b, s) return true end
+    end
+  end
+  return false
 end
 function BenillaBot.Choice()
   -- The usable choice that gains the most over what is worn; with no gain, the best price.
@@ -1279,10 +1306,18 @@ fn drive_quest_bot(
             let off = (yaw_toward(here, [s.at[0], s.at[1]]) - facing + std::f32::consts::PI)
                 .rem_euclid(std::f32::consts::TAU)
                 - std::f32::consts::PI;
+            // A creature the plan knows as fightable (no NPC, no critter): a neutral rabbit is not
+            // in the way, and Tab could never select it.
             s.kind == Kind::Creature
                 && !s.dead
                 && s.npc_flags == 0
                 && !s.tapped_by_other
+                && bot
+                    .plan
+                    .names
+                    .get(&(s.kind, s.entry))
+                    .is_some_and(|(_, f)| *f == 0)
+                && !bot.plan.use_target(s.entry)
                 && d <= 20.0
                 && off.abs() < 60f32.to_radians()
                 && s.level <= level + 2
@@ -1317,6 +1352,25 @@ fn drive_quest_bot(
                 bot.loots += 1;
                 set_goal(&mut bot, Goal::Idle, now, &mut binds);
                 return;
+            }
+            // A use-item goal: the right-click selected it; a second later, use the item from the
+            // bag on it, and leave that one (it wakes, it moves off) for the next.
+            if let Some(item) = why
+                .strip_prefix("use item ")
+                .and_then(|r| r.split(' ').next())
+                .and_then(|v| v.parse::<u32>().ok())
+            {
+                if bot.route.is_none()
+                    && dist2(here, [t.at[0], t.at[1]]) <= USE_YD + 0.5
+                    && bot.clicks > 0
+                    && now - bot.last_click > 1.0
+                {
+                    lua.code.push(format!("BenillaBot.UseItem({item})"));
+                    info!("PROBE_QUEST: used item {item} on {guid:#x}");
+                    bot.aside.insert(guid, now + 90.0);
+                    set_goal(&mut bot, Goal::Idle, now, &mut binds);
+                    return;
+                }
             }
             // Still on a route is not there yet: close by in a straight line can be the far side
             // of a wall.
@@ -1487,6 +1541,38 @@ fn choose(
             if *done {
                 continue;
             }
+            // A use-item objective: walk to the nearest such creature not yet used on.
+            if let Some((item, pq)) = bot
+                .plan
+                .quest_titled(&q.title)
+                .and_then(|pq| pq.use_item.map(|i| (i, pq)))
+                .filter(|_| ty != "item")
+            {
+                // The log may word it its own way ("Peons awoken"): then the quest's creatures.
+                let mut entries = bot.plan.entries_named(name);
+                if entries.is_empty() {
+                    entries = pq.kills.iter().map(|&(k, e, _)| (k, e)).collect();
+                }
+                if let Some(t) = nearest(seen, here, |s| {
+                    entries.contains(&(s.kind, s.entry))
+                        && !s.dead
+                        && !bot.aside.contains_key(&s.guid)
+                        && afoot(bot, (s.guid as i64, 0), here, [s.at[0], s.at[1]], bot.now)
+                }) {
+                    return Goal::Use {
+                        entity: t.entity,
+                        guid: t.guid,
+                        why: format!("use item {item} on {name}"),
+                    };
+                }
+                if let Some(to) = nearest_spawn(bot, here, &entries) {
+                    return Goal::Walk {
+                        to,
+                        why: format!("objective: {name}"),
+                    };
+                }
+                continue;
+            }
             let wanted: Vec<(Kind, u32)> = match ty.as_str() {
                 "item" => bot
                     .plan
@@ -1555,6 +1641,7 @@ fn choose(
                 .names
                 .get(&(s.kind, s.entry))
                 .is_some_and(|(_, f)| *f == 0)
+            && !bot.plan.use_target(s.entry)
     }) {
         return Goal::Fight {
             entity: m.entity,
