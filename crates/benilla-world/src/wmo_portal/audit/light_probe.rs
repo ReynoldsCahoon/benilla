@@ -44,7 +44,7 @@ fn raw_downray_winner(model: &WmoModel, probe: [f32; 3]) -> Option<(usize, f32)>
     let mut best: Option<(usize, f32)> = None;
     for (gi, tris) in model.group_collision_tris.iter().enumerate() {
         for t in tris {
-            if let Some(z) = floor_z_at(t, probe[0], probe[1]) {
+            if let Some(z) = floor_z_at(&t, probe[0], probe[1]) {
                 if z <= probe[2] && best.is_none_or(|(_, bz)| z > bz) {
                     best = Some((gi, z));
                 }
@@ -77,7 +77,10 @@ fn forge_floor_lane_map() {
             },
             g.bbox_min[2],
             g.bbox_max[2],
-            model.group_collision_tris.get(gi).map_or(0, Vec::len),
+            model
+                .group_collision_tris
+                .get(gi)
+                .map_or(0, benilla_assets::GroupTris::len),
             model
                 .group_footprints
                 .get(gi)
@@ -105,7 +108,7 @@ fn forge_floor_lane_map() {
                 .group_collision_tris
                 .iter()
                 .flatten()
-                .filter_map(|t| floor_z_at(t, x, y))
+                .filter_map(|t| floor_z_at(&t, x, y))
                 .filter(|&z| z <= 4.0)
                 .fold(f32::NEG_INFINITY, f32::max);
             row.push(if floor == f32::NEG_INFINITY {
@@ -194,7 +197,10 @@ fn inn_corridor_light_probe() {
             },
             g.bbox_min[2],
             g.bbox_max[2],
-            model.group_collision_tris.get(gi).map_or(0, Vec::len),
+            model
+                .group_collision_tris
+                .get(gi)
+                .map_or(0, benilla_assets::GroupTris::len),
         );
     }
 
@@ -261,7 +267,7 @@ fn inn_corridor_light_probe() {
             .group_collision_tris
             .iter()
             .flatten()
-            .filter_map(|t| floor_z_at(t, probe_xy[0], probe_xy[1]))
+            .filter_map(|t| floor_z_at(&t, probe_xy[0], probe_xy[1]))
             .filter(|&z| z <= 4.0)
             .fold(f32::NEG_INFINITY, f32::max);
         if floor > f32::NEG_INFINITY {

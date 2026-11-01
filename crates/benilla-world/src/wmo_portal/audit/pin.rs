@@ -129,7 +129,7 @@ fn wmo_group_census() {
         );
         for (gi, tris) in subject.model.group_collision_tris.iter().enumerate() {
             for t in tris {
-                if let Some(z) = benilla_formats::triangle_z_at(t, local[0], local[1]) {
+                if let Some(z) = benilla_formats::triangle_z_at(&t, local[0], local[1]) {
                     let w = bevy_to_wow(
                         placed
                             .world_from_local
@@ -244,12 +244,12 @@ fn wmo_group_census() {
                 .model
                 .group_collision_tris
                 .get(gi)
-                .map_or(0, Vec::len),
+                .map_or(0, benilla_assets::GroupTris::len),
             subject
                 .model
                 .group_camera_only_tris
                 .get(gi)
-                .map_or(0, Vec::len),
+                .map_or(0, benilla_assets::GroupTris::len),
             liquid[gi]
                 .map(|(lo, hi)| format!("  LIQUID local z[{lo:.1},{hi:.1}]"))
                 .unwrap_or_default(),

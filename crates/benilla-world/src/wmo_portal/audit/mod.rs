@@ -240,6 +240,10 @@ fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
             .unwrap_or_default();
     }
     let portals = root.portals();
+    let group_collision_tris: Vec<benilla_assets::GroupTris> =
+        group_collision_tris.into_iter().map(Into::into).collect();
+    let group_camera_only_tris: Vec<benilla_assets::GroupTris> =
+        group_camera_only_tris.into_iter().map(Into::into).collect();
     let (group_collision_bounds, collision_bounds) =
         benilla_assets::collision_tri_bounds(&group_collision_tris);
     let model = WmoModel {
@@ -348,7 +352,7 @@ fn reachable_spots(subject: &Subject, start: [f32; 3]) -> Vec<[f32; 3]> {
             .group_collision_tris
             .iter()
             .flatten()
-            .filter_map(|t| floor_z_at(t, x, y))
+            .filter_map(|t| floor_z_at(&t, x, y))
             .filter(|&z| z >= below && z <= above)
             .fold(None, |acc: Option<f32>, z| {
                 Some(acc.map_or(z, |a: f32| a.max(z)))
@@ -639,7 +643,7 @@ fn column_top(model: &WmoModel, x: f32, y: f32) -> Option<(usize, f32)> {
     let mut best: Option<(usize, f32)> = None;
     for (gi, tris) in model.group_collision_tris.iter().enumerate() {
         for t in tris {
-            if let Some(z) = floor_z_at(t, x, y) {
+            if let Some(z) = floor_z_at(&t, x, y) {
                 if best.is_none_or(|(_, bz)| z > bz) {
                     best = Some((gi, z));
                 }
@@ -668,7 +672,7 @@ fn interior_standing_eye(model: &WmoModel, gi: usize) -> Option<[f32; 3]> {
     let ceiling = model.group_nav.get(gi)?.bbox_max[2];
     let floor = tris
         .iter()
-        .filter_map(|t| floor_z_at(t, cx, cy))
+        .filter_map(|t| floor_z_at(&t, cx, cy))
         .filter(|&z| z <= ceiling - EYE_HEIGHT)
         .fold(f32::NEG_INFINITY, f32::max);
     (floor > f32::NEG_INFINITY).then_some([cx, cy, floor + EYE_HEIGHT])
@@ -695,7 +699,10 @@ fn wmo_pvs_audit() {
             g.bbox_max[2],
             g.ref_start,
             g.ref_count,
-            model.group_collision_tris.get(gi).map_or(0, Vec::len),
+            model
+                .group_collision_tris
+                .get(gi)
+                .map_or(0, benilla_assets::GroupTris::len),
         );
     }
     for (pi, p) in model.portal_infos.iter().enumerate() {

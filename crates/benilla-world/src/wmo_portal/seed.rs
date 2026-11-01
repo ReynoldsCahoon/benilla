@@ -52,6 +52,10 @@ pub fn down_ray_seeds(model: &WmoModel, eye: [f32; 3], terrain_z: Option<f32>) -
 /// `shared` is the best depth the earlier placements set: a face must beat it strictly and a
 /// portal comes within the tie of it. An exterior winner is outside but keeps its depth; a miss, a
 /// hit past the floor drop, a hit the terrain beats and nothing past `shared` have none.
+/// The faces of a group past the model's list: none.
+static NO_TRIS: std::sync::LazyLock<benilla_assets::GroupTris> =
+    std::sync::LazyLock::new(benilla_assets::GroupTris::default);
+
 pub(crate) fn down_ray_seeds_scored(
     model: &WmoModel,
     eye: [f32; 3],
@@ -75,9 +79,9 @@ pub(crate) fn down_ray_seeds_scored(
 /// [`down_ray_pick_scored`]'s verdict over the pieces a test builds.
 #[cfg(test)]
 pub(crate) fn down_ray_pick(
-    tris: &[Vec<[[f32; 3]; 3]>],
+    tris: &[benilla_assets::GroupTris],
     grids: &[Option<ColumnGrid>],
-    camera_only_tris: &[Vec<[[f32; 3]; 3]>],
+    camera_only_tris: &[benilla_assets::GroupTris],
     nav: &[WmoGroupNav],
     portal_vertices: &[[f32; 3]],
     portal_infos: &[WmoPortalInfo],
@@ -105,9 +109,9 @@ pub(crate) fn down_ray_pick(
 /// space, or `None` where there is none to hit: off the streamed tiles, or a hole cut through the
 /// ground into this interior.
 fn down_ray_pick_scored(
-    tris: &[Vec<[[f32; 3]; 3]>],
+    tris: &[benilla_assets::GroupTris],
     grids: &[Option<ColumnGrid>],
-    camera_only_tris: &[Vec<[[f32; 3]; 3]>],
+    camera_only_tris: &[benilla_assets::GroupTris],
     nav: &[WmoGroupNav],
     portal_vertices: &[[f32; 3]],
     portal_infos: &[WmoPortalInfo],
@@ -142,16 +146,16 @@ fn down_ray_pick_scored(
                 }
             }
         };
-        let group_tris = tris.get(gi).map(Vec::as_slice).unwrap_or_default();
+        let group_tris = tris.get(gi).unwrap_or(&NO_TRIS);
         match grids.get(gi).and_then(Option::as_ref) {
             Some(grid) => {
                 for i in grid.candidates(eye[0], eye[1]) {
                     if let Some(tri) = group_tris.get(i) {
-                        consider(tri);
+                        consider(&tri);
                     }
                 }
             }
-            None => group_tris.iter().for_each(&mut consider),
+            None => group_tris.iter().for_each(|t| consider(&t)),
         }
     }
 
@@ -234,7 +238,7 @@ fn down_ray_pick_scored(
                 continue;
             }
             for tri in camera_only_tris.get(gi).into_iter().flatten() {
-                if let Some(z) = floor_z_at(tri, eye[0], eye[1]) {
+                if let Some(z) = floor_z_at(&tri, eye[0], eye[1]) {
                     if z <= eye[2] && z > fb_z {
                         fb_z = z;
                         fb = Some(gi);
@@ -291,7 +295,7 @@ const ZONE_RAY_LEN: f32 = 1000.0;
 /// not claim the interior. `None` is outdoors; [`down_ray_claim`] keeps an outdoor-class winner.
 #[cfg(test)]
 pub(crate) fn area_down_ray(
-    tris: &[Vec<[[f32; 3]; 3]>],
+    tris: &[benilla_assets::GroupTris],
     bounds: &[Option<([f32; 3], [f32; 3])>],
     grids: &[Option<ColumnGrid>],
     nav: &[WmoGroupNav],
@@ -318,7 +322,7 @@ pub(crate) struct DownRayClaim {
 /// `area_down_ray` without the outdoor collapse: the light chain tells an outdoor-class face (a
 /// deck) from open terrain.
 pub(crate) fn down_ray_claim(
-    tris: &[Vec<[[f32; 3]; 3]>],
+    tris: &[benilla_assets::GroupTris],
     bounds: &[Option<([f32; 3], [f32; 3])>],
     grids: &[Option<ColumnGrid>],
     nav: &[WmoGroupNav],
@@ -345,7 +349,7 @@ pub(crate) fn down_ray_claim(
 /// 1000 yd upward (`0x6a908d`, `0x6a9093`). No terrain race: a cast up from under a floor cannot
 /// lose to the ground below it.
 pub(crate) fn up_ray_claim(
-    tris: &[Vec<[[f32; 3]; 3]>],
+    tris: &[benilla_assets::GroupTris],
     bounds: &[Option<([f32; 3], [f32; 3])>],
     grids: &[Option<ColumnGrid>],
     nav: &[WmoGroupNav],
@@ -358,7 +362,7 @@ pub(crate) fn up_ray_claim(
 /// The shared body: `up` flips which side of the probe a face must lie on; the nearest in the
 /// cast's direction wins.
 fn ray_claim(
-    tris: &[Vec<[[f32; 3]; 3]>],
+    tris: &[benilla_assets::GroupTris],
     bounds: &[Option<([f32; 3], [f32; 3])>],
     grids: &[Option<ColumnGrid>],
     nav: &[WmoGroupNav],
@@ -405,11 +409,11 @@ fn ray_claim(
             Some(grid) => {
                 for i in grid.candidates(eye[0], eye[1]) {
                     if let Some(tri) = group_tris.get(i) {
-                        consider(tri);
+                        consider(&tri);
                     }
                 }
             }
-            None => group_tris.iter().for_each(&mut consider),
+            None => group_tris.iter().for_each(|t| consider(&t)),
         }
     }
     let in_group = best?;
@@ -485,12 +489,18 @@ mod tests {
         ]
     }
 
+    /// Whole-triangle test groups as the loader's [`benilla_assets::GroupTris`].
+    fn groups_of(tris: &[Vec<[[f32; 3]; 3]>]) -> Vec<benilla_assets::GroupTris> {
+        tris.iter().map(|g| g.clone().into()).collect()
+    }
+
     /// `down_ray_pick` with no portal graph and no terrain (the face-only leg), in-group only.
     fn faces_only(
         tris: &[Vec<[[f32; 3]; 3]>],
         nav: &[WmoGroupNav],
         eye: [f32; 3],
     ) -> Option<usize> {
+        let tris = &groups_of(tris);
         down_ray_pick(
             tris,
             &benilla_assets::collision_tri_grids(tris),
@@ -514,6 +524,7 @@ mod tests {
         portal_refs: &[WmoPortalRef],
         eye: [f32; 3],
     ) -> DownRaySeeds {
+        let tris = &groups_of(tris);
         down_ray_pick(
             tris,
             &benilla_assets::collision_tri_grids(tris),
@@ -826,6 +837,7 @@ mod tests {
         eye: [f32; 3],
         terrain_z: Option<f32>,
     ) -> Option<usize> {
+        let tris = &groups_of(tris);
         let (bounds, _) = benilla_assets::collision_tri_bounds(tris);
         let grids = benilla_assets::collision_tri_grids(tris);
         area_down_ray(tris, &bounds, &grids, nav, eye, terrain_z, EXTERIOR)
@@ -891,8 +903,8 @@ mod tests {
                 )
             })
             .collect();
-        let (bounds, _) = benilla_assets::collision_tri_bounds(&tris);
-        let grids = benilla_assets::collision_tri_grids(&tris);
+        let (bounds, _) = benilla_assets::collision_tri_bounds(&groups_of(&tris));
+        let grids = benilla_assets::collision_tri_grids(&groups_of(&tris));
         assert!(
             grids.iter().all(Option::is_some),
             "each storey must actually be indexed"
@@ -902,9 +914,17 @@ mod tests {
             for gy in -1..=32 {
                 for eye_z in [1.0f32, 9.5, 17.0, 25.0] {
                     let eye = [gx as f32 * 0.97, gy as f32 * 1.03, eye_z];
-                    let linear = down_ray_claim(&tris, &bounds, &[], &navs, eye, None, EXTERIOR);
-                    let indexed =
-                        down_ray_claim(&tris, &bounds, &grids, &navs, eye, None, EXTERIOR);
+                    let linear =
+                        down_ray_claim(&groups_of(&tris), &bounds, &[], &navs, eye, None, EXTERIOR);
+                    let indexed = down_ray_claim(
+                        &groups_of(&tris),
+                        &bounds,
+                        &grids,
+                        &navs,
+                        eye,
+                        None,
+                        EXTERIOR,
+                    );
                     assert_eq!(
                         linear, indexed,
                         "column {eye:?}: the index changed the down-ray claim"
@@ -978,16 +998,24 @@ mod tests {
         // but outdoors on the unit-lighting law (`MOGI & 0x48`).
         let street = nav(EXTERIOR_LIT, [-10.0, -10.0, 0.0], [10.0, 10.0, 10.0], 0, 0);
         let tris = [quad(0.0, 10.0)];
-        let (bounds, _) = benilla_assets::collision_tri_bounds(&tris);
+        let (bounds, _) = benilla_assets::collision_tri_bounds(&groups_of(&tris));
         let eye = [0.0, 0.0, 1.0];
         assert_eq!(
-            area_down_ray(&tris, &bounds, &[], &[street], eye, None, EXTERIOR),
+            area_down_ray(
+                &groups_of(&tris),
+                &bounds,
+                &[],
+                &[street],
+                eye,
+                None,
+                EXTERIOR
+            ),
             Some(0),
             "zone-text law: indoors"
         );
         assert_eq!(
             area_down_ray(
-                &tris,
+                &groups_of(&tris),
                 &bounds,
                 &[],
                 &[street],
@@ -1007,15 +1035,15 @@ mod tests {
         // (`0x6a908d`) finds the floor.
         let room = nav(0, [-10.0, -10.0, 0.0], [10.0, 10.0, 10.0], 0, 0);
         let tris = [quad(0.0, 10.0)]; // the chamber floor at z = 0
-        let (bounds, _) = benilla_assets::collision_tri_bounds(&tris);
+        let (bounds, _) = benilla_assets::collision_tri_bounds(&groups_of(&tris));
         let mask = EXTERIOR | EXTERIOR_LIT;
         let under = [0.0, 0.0, -40.0];
         assert_eq!(
-            down_ray_claim(&tris, &bounds, &[], &[room], under, None, mask),
+            down_ray_claim(&groups_of(&tris), &bounds, &[], &[room], under, None, mask),
             None,
             "nothing is below an anchor that is itself below the floor"
         );
-        let c = up_ray_claim(&tris, &bounds, &[], &[room], under, mask)
+        let c = up_ray_claim(&groups_of(&tris), &bounds, &[], &[room], under, mask)
             .expect("the floor above claims the column on the retry");
         assert!(!c.outdoor && c.group == 0);
         assert!(
@@ -1025,7 +1053,14 @@ mod tests {
         );
         // The retry is still a ray: a face below the probe never claims it.
         assert_eq!(
-            up_ray_claim(&tris, &bounds, &[], &[room], [0.0, 0.0, 40.0], mask),
+            up_ray_claim(
+                &groups_of(&tris),
+                &bounds,
+                &[],
+                &[room],
+                [0.0, 0.0, 40.0],
+                mask
+            ),
             None
         );
     }
@@ -1042,11 +1077,11 @@ mod tests {
             0,
         );
         let tris = [quad(5.0, 10.0)]; // the deck surface, 30-ish yd over terrain at z -25
-        let (bounds, _) = benilla_assets::collision_tri_bounds(&tris);
+        let (bounds, _) = benilla_assets::collision_tri_bounds(&groups_of(&tris));
         let mask = EXTERIOR | EXTERIOR_LIT;
         // On the deck, terrain far below: an outdoor claim, depth = probe − face.
         let c = down_ray_claim(
-            &tris,
+            &groups_of(&tris),
             &bounds,
             &[],
             &[deck],
@@ -1060,7 +1095,7 @@ mod tests {
         // Terrain strictly nearer, over a buried deck: no claim.
         assert_eq!(
             down_ray_claim(
-                &tris,
+                &groups_of(&tris),
                 &bounds,
                 &[],
                 &[deck],
@@ -1071,8 +1106,16 @@ mod tests {
             None
         );
         let room = nav(0, [-10.0, -10.0, 0.0], [10.0, 10.0, 10.0], 0, 0);
-        let c = down_ray_claim(&tris, &bounds, &[], &[room], [0.0, 0.0, 5.5], None, mask)
-            .expect("the room face claims the column");
+        let c = down_ray_claim(
+            &groups_of(&tris),
+            &bounds,
+            &[],
+            &[room],
+            [0.0, 0.0, 5.5],
+            None,
+            mask,
+        )
+        .expect("the room face claims the column");
         assert!(!c.outdoor);
     }
 
@@ -1095,7 +1138,7 @@ mod tests {
         // A camera 2 yd over the tunnel floor, no terrain: inside.
         assert_eq!(
             down_ray_pick(
-                &tris,
+                &groups_of(&tris),
                 &[],
                 &[],
                 &[mine],
@@ -1111,7 +1154,7 @@ mod tests {
         // Hillside terrain at z=8 is above the eye, off the segment: the tunnel stays inside.
         assert_eq!(
             down_ray_pick(
-                &tris,
+                &groups_of(&tris),
                 &[],
                 &[],
                 &[mine],
@@ -1127,7 +1170,7 @@ mod tests {
         // A camera 12 yd up over ground at z=8, above the tunnel floor: the terrain wins, outside.
         assert_eq!(
             down_ray_pick(
-                &tris,
+                &groups_of(&tris),
                 &[],
                 &[],
                 &[mine],
@@ -1143,7 +1186,7 @@ mod tests {
         // Terrain exactly at the WMO floor keeps the WMO (the client's strict `<`).
         assert_eq!(
             down_ray_pick(
-                &tris,
+                &groups_of(&tris),
                 &[],
                 &[],
                 &[mine],
@@ -1159,7 +1202,7 @@ mod tests {
         // Terrain just above the floor steals the column.
         assert_eq!(
             down_ray_pick(
-                &tris,
+                &groups_of(&tris),
                 &[],
                 &[],
                 &[mine],
@@ -1183,9 +1226,9 @@ mod tests {
         let detail = [quad(0.0, 10.0)];
         // Legs A and B miss, no terrain below: Leg C names the room, a single root.
         let s = down_ray_pick(
-            &walk,
+            &groups_of(&walk),
             &[],
-            &detail,
+            &groups_of(&detail),
             &[pocket],
             &[],
             &[],
@@ -1198,9 +1241,9 @@ mod tests {
         // Terrain above the eye is off the segment: Leg C still fires.
         assert_eq!(
             down_ray_pick(
-                &walk,
+                &groups_of(&walk),
                 &[],
-                &detail,
+                &groups_of(&detail),
                 &[pocket],
                 &[],
                 &[],
@@ -1220,9 +1263,9 @@ mod tests {
         // Any terrain at or below the eye keeps the client's outside verdict.
         assert_eq!(
             down_ray_pick(
-                &[Vec::new()],
+                &[Default::default()],
                 &[],
-                &detail,
+                &groups_of(&detail),
                 &[pocket],
                 &[],
                 &[],
@@ -1239,9 +1282,9 @@ mod tests {
         let det2: [Vec<[[f32; 3]; 3]>; 2] = [quad(0.0, 10.0), Vec::new()];
         assert_eq!(
             down_ray_pick(
-                &walk,
+                &groups_of(&walk),
                 &[],
-                &det2,
+                &groups_of(&det2),
                 &[pocket, hall],
                 &[],
                 &[],
@@ -1256,9 +1299,9 @@ mod tests {
         let ext = nav(EXTERIOR, [-10.0, -10.0, 0.0], [10.0, 10.0, 12.0], 0, 0);
         assert_eq!(
             down_ray_pick(
-                &[Vec::new()],
+                &[Default::default()],
                 &[],
-                &detail,
+                &groups_of(&detail),
                 &[ext],
                 &[],
                 &[],

@@ -485,7 +485,7 @@ pub(super) fn spawn_loaded_placements(
                     // Two colliders, each on its layer: the reference gathers different faces for
                     // the body (drops DETAIL) and the camera (drops NOCAMCOLLIDE, keeps DETAIL).
                     if let Some((verts, tris)) =
-                        placement_collider_data(m.collision.as_ref(), &p.transform)
+                        placement_collider_data(m.collision.as_deref(), &p.transform)
                     {
                         ents.push(
                             commands

@@ -37,6 +37,125 @@ pub struct WmoGroupNav {
     pub group_liquid: u32,
 }
 
+/// One WMO group's faces, a slice of a shared indexed mesh. The walking set is a slice of
+/// [`WmoModel::collision`] itself, so the per-group view holds no copy: it was a 36-byte-a-face
+/// triangle list beside the same faces in the flat collider, ~45 MB for Stormwind loaded whole,
+/// part of the landing spike that killed the iPad Air 2 (wow-optimize FINDINGS, "Teleports keep
+/// the tables").
+#[derive(Clone, Default, Debug)]
+pub struct GroupTris {
+    mesh: Arc<CollisionMesh>,
+    /// The first of the group's indices in `mesh.indices` (three per face).
+    start: u32,
+    /// The group's face count.
+    count: u32,
+}
+
+impl GroupTris {
+    /// Consecutive groups over `mesh`: group `g` takes the next `faces[g]` faces.
+    pub fn slices(mesh: &Arc<CollisionMesh>, faces: &[u32]) -> Vec<Self> {
+        let mut start = 0;
+        faces
+            .iter()
+            .map(|&count| {
+                let g = Self {
+                    mesh: mesh.clone(),
+                    start,
+                    count,
+                };
+                start += count * 3;
+                g
+            })
+            .collect()
+    }
+
+    /// A group of its own from whole triangles (tests and the audit's synthetic buildings).
+    pub fn from_tris(tris: impl IntoIterator<Item = [[f32; 3]; 3]>) -> Self {
+        let mut mesh = CollisionMesh::default();
+        for t in tris {
+            let base = mesh.positions.len() as u32;
+            mesh.positions.extend_from_slice(&t);
+            mesh.indices.extend([base, base + 1, base + 2]);
+        }
+        let count = (mesh.indices.len() / 3) as u32;
+        Self {
+            mesh: Arc::new(mesh),
+            start: 0,
+            count,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Face `i`'s corners. Panics past [`Self::len`], as indexing the old list did.
+    pub fn tri(&self, i: usize) -> [[f32; 3]; 3] {
+        assert!(i < self.len(), "face {i} of {}", self.len());
+        let b = self.start as usize + 3 * i;
+        let ix = &self.mesh.indices[b..b + 3];
+        let p = &self.mesh.positions;
+        [p[ix[0] as usize], p[ix[1] as usize], p[ix[2] as usize]]
+    }
+
+    pub fn get(&self, i: usize) -> Option<[[f32; 3]; 3]> {
+        (i < self.len()).then(|| self.tri(i))
+    }
+
+    pub fn iter(&self) -> GroupTrisIter<'_> {
+        self.into_iter()
+    }
+}
+
+/// [`GroupTris`]'s faces by value, in order.
+#[derive(Clone)]
+pub struct GroupTrisIter<'a> {
+    group: &'a GroupTris,
+    next: usize,
+}
+
+impl Iterator for GroupTrisIter<'_> {
+    type Item = [[f32; 3]; 3];
+    fn next(&mut self) -> Option<Self::Item> {
+        let t = self.group.get(self.next)?;
+        self.next += 1;
+        Some(t)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.group.len() - self.next;
+        (n, Some(n))
+    }
+}
+
+impl ExactSizeIterator for GroupTrisIter<'_> {}
+
+impl<'a> IntoIterator for &'a GroupTris {
+    type Item = [[f32; 3]; 3];
+    type IntoIter = GroupTrisIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        GroupTrisIter {
+            group: self,
+            next: 0,
+        }
+    }
+}
+
+impl From<Vec<[[f32; 3]; 3]>> for GroupTris {
+    fn from(tris: Vec<[[f32; 3]; 3]>) -> Self {
+        Self::from_tris(tris)
+    }
+}
+
+impl FromIterator<[[f32; 3]; 3]> for GroupTris {
+    fn from_iter<I: IntoIterator<Item = [[f32; 3]; 3]>>(tris: I) -> Self {
+        Self::from_tris(tris)
+    }
+}
+
 /// One WMO group's collision faces in WMO-local coords, with their AABB.
 pub struct GroupCollision {
     pub mesh: CollisionMesh,
@@ -85,12 +204,12 @@ pub struct WmoModel {
     pub skybox: Option<String>,
     /// Per-group walking-collision faces (non-DETAIL, no orientation filter): the reference's
     /// walking BSP set (`0x6be250`, mask `0x84`) that the current-group down-ray casts on.
-    pub group_collision_tris: Vec<Vec<[[f32; 3]; 3]>>,
+    pub group_collision_tris: Vec<GroupTris>,
     /// Per-group camera-only faces (DETAIL `0x04` set, NOCAMCOLLIDE `0x02` clear). Deviation: the
     /// down-ray tries them when the walking and portal legs miss and no terrain lies below the eye,
     /// because the reference reads outside there and blanks the building around a camera sealed in
     /// an all-DETAIL pocket.
-    pub group_camera_only_tris: Vec<Vec<[[f32; 3]; 3]>>,
+    pub group_camera_only_tris: Vec<GroupTris>,
     /// Per-group AABB of [`Self::group_collision_tris`], from the faces rather than MOGI: an
     /// authored MOGI box can sit above its own floor (Northshire Abbey group 3, by 1.5 yd).
     pub group_collision_bounds: Vec<Option<([f32; 3], [f32; 3])>>,
@@ -98,8 +217,9 @@ pub struct WmoModel {
     pub group_collision_grids: Vec<Option<ColumnGrid>>,
     /// The union of [`Self::group_collision_bounds`]: the whole-building broad phase.
     pub collision_bounds: Option<([f32; 3], [f32; 3])>,
-    /// Walking collision across all groups in WMO-local coords, DETAIL faces excluded.
-    pub collision: Option<CollisionMesh>,
+    /// Walking collision across all groups in WMO-local coords, DETAIL faces excluded; shared with
+    /// [`Self::group_collision_tris`], which slice it.
+    pub collision: Option<Arc<CollisionMesh>>,
     /// Camera collision, per group with faces: DETAIL kept, NOCAMCOLLIDE dropped. Per group so a
     /// placement builds only the groups within the boom's reach (`terrain_stream::camera_collider`).
     pub collision_camera: Arc<[GroupCollision]>,
@@ -213,12 +333,27 @@ pub fn footprint_tri_grids(footprints: &[Option<FootprintTris>]) -> Vec<Option<C
         .collect()
 }
 
+/// Drops a trailing partial face and any face with a corner past `positions`, keeping the rest in
+/// order: what the per-group lists kept when they were built face by face.
+fn keep_whole_faces(positions: &[[f32; 3]], indices: &mut Vec<u32>) {
+    let n = positions.len() as u32;
+    let mut kept = 0;
+    for f in 0..indices.len() / 3 {
+        let t = [indices[3 * f], indices[3 * f + 1], indices[3 * f + 2]];
+        if t.iter().all(|&i| i < n) {
+            indices[3 * kept..3 * kept + 3].copy_from_slice(&t);
+            kept += 1;
+        }
+    }
+    indices.truncate(3 * kept);
+}
+
 /// Per-group column indexes over a per-group triangle set.
-pub fn collision_tri_grids(tris: &[Vec<[[f32; 3]; 3]>]) -> Vec<Option<ColumnGrid>> {
+pub fn collision_tri_grids(tris: &[GroupTris]) -> Vec<Option<ColumnGrid>> {
     tris.iter()
         .map(|group| {
             ColumnGrid::build(group.len(), |i| {
-                let t = &group[i];
+                let t = group.tri(i);
                 (
                     [
                         t[0][0].min(t[1][0]).min(t[2][0]),
@@ -237,7 +372,7 @@ pub fn collision_tri_grids(tris: &[Vec<[[f32; 3]; 3]>]) -> Vec<Option<ColumnGrid
 /// Per-group AABBs of a per-group triangle set, and their union; shared with the down-ray tests.
 #[allow(clippy::type_complexity)]
 pub fn collision_tri_bounds(
-    tris: &[Vec<[[f32; 3]; 3]>],
+    tris: &[GroupTris],
 ) -> (
     Vec<Option<([f32; 3], [f32; 3])>>,
     Option<([f32; 3], [f32; 3])>,
@@ -246,8 +381,8 @@ pub fn collision_tri_bounds(
         .iter()
         .map(|group| {
             let mut bounds: Option<([f32; 3], [f32; 3])> = None;
-            for tri in group {
-                for v in tri {
+            for tri in group.iter() {
+                for v in &tri {
                     let (min, max) = bounds.get_or_insert((*v, *v));
                     for a in 0..3 {
                         min[a] = min[a].min(v[a]);
@@ -433,10 +568,10 @@ impl AssetLoader for WmoModelLoader {
                 }
             })
             .collect();
-        let mut group_collision_tris: Vec<Vec<[[f32; 3]; 3]>> =
-            vec![Vec::new(); root.group_count() as usize];
-        let mut group_camera_only_tris: Vec<Vec<[[f32; 3]; 3]>> =
-            vec![Vec::new(); root.group_count() as usize];
+        // Per group, the faces each set took (unread groups take none), for the slices.
+        let mut walk_faces: Vec<u32> = vec![0; root.group_count() as usize];
+        let mut cam_only_faces: Vec<u32> = vec![0; root.group_count() as usize];
+        let mut cam_only = CollisionMesh::default();
         let mut col_pos: Vec<[f32; 3]> = Vec::new();
         let mut col_idx: Vec<u32> = Vec::new();
         let mut collision_camera: Vec<GroupCollision> = Vec::new();
@@ -465,18 +600,11 @@ impl AssetLoader for WmoModelLoader {
             let mut gpos: Vec<[f32; 3]> = Vec::new();
             let mut gidx: Vec<u32> = Vec::new();
             accumulate_wmo_group_collision(&gbytes, &mut gpos, &mut gidx);
-            if let Some(tris) = group_collision_tris.get_mut(gi as usize) {
-                // Exact: grown a push at a time, a city's lists held up to twice their faces.
-                tris.reserve_exact(gidx.len() / 3);
-                for t in gidx.as_chunks::<3>().0 {
-                    if let (Some(&a), Some(&b), Some(&c)) = (
-                        gpos.get(t[0] as usize),
-                        gpos.get(t[1] as usize),
-                        gpos.get(t[2] as usize),
-                    ) {
-                        tris.push([a, b, c]);
-                    }
-                }
+            // Whole faces whose corners all exist, so the group's slice of the flat mesh reads
+            // as the per-group list did.
+            keep_whole_faces(&gpos, &mut gidx);
+            if let Some(n) = walk_faces.get_mut(gi as usize) {
+                *n = (gidx.len() / 3) as u32;
             }
             let base = col_pos.len() as u32;
             col_pos.extend_from_slice(&gpos);
@@ -491,17 +619,12 @@ impl AssetLoader for WmoModelLoader {
             }
             let (mut dpos, mut didx): (Vec<[f32; 3]>, Vec<u32>) = (Vec::new(), Vec::new());
             accumulate_wmo_group_camera_only_collision(&gbytes, &mut dpos, &mut didx);
-            if let Some(tris) = group_camera_only_tris.get_mut(gi as usize) {
-                tris.reserve_exact(didx.len() / 3);
-                for t in didx.as_chunks::<3>().0 {
-                    if let (Some(&a), Some(&b), Some(&c)) = (
-                        dpos.get(t[0] as usize),
-                        dpos.get(t[1] as usize),
-                        dpos.get(t[2] as usize),
-                    ) {
-                        tris.push([a, b, c]);
-                    }
-                }
+            keep_whole_faces(&dpos, &mut didx);
+            if let Some(n) = cam_only_faces.get_mut(gi as usize) {
+                *n = (didx.len() / 3) as u32;
+                let base = cam_only.positions.len() as u32;
+                cam_only.positions.extend_from_slice(&dpos);
+                cam_only.indices.extend(didx.iter().map(|i| i + base));
             }
             let subs = wmo_group_submeshes(&gbytes, &root).map_err(to_io)?;
             // The reference walks MODR at `0x695aa0` and MOLR at `0x695c00`.
@@ -570,10 +693,17 @@ impl AssetLoader for WmoModelLoader {
             &group_light_refs,
         );
 
-        let collision = (!col_idx.is_empty()).then_some(CollisionMesh {
+        col_pos.shrink_to_fit();
+        col_idx.shrink_to_fit();
+        let walk = Arc::new(CollisionMesh {
             positions: col_pos,
             indices: col_idx,
         });
+        let group_collision_tris = GroupTris::slices(&walk, &walk_faces);
+        let collision = (!walk.indices.is_empty()).then_some(walk);
+        cam_only.positions.shrink_to_fit();
+        cam_only.indices.shrink_to_fit();
+        let group_camera_only_tris = GroupTris::slices(&Arc::new(cam_only), &cam_only_faces);
         resolve_shared_liquid_cells(&mut group_liquids);
         let portals = root.portals();
         let (group_collision_bounds, collision_bounds) =
@@ -886,5 +1016,47 @@ mod doodad_base_tests {
         // A doodad named twice by one group counts once.
         assert_eq!(&*modr_refs(1, &[vec![0u16, 0u16]])[0], &[0]);
         assert!(modr_refs(2, &[])[0].is_empty());
+    }
+}
+
+#[cfg(test)]
+mod group_tris_tests {
+    use super::*;
+
+    /// Two groups' faces laid end to end in one mesh read back per group, corner for corner, as
+    /// the per-group lists held them; a whole-triangle group reads its own triangles.
+    #[test]
+    fn group_slices_read_each_groups_faces_from_the_shared_mesh() {
+        let p = |x: f32| [x, 0.0, 0.0];
+        let mesh = Arc::new(CollisionMesh {
+            positions: vec![p(0.0), p(1.0), p(2.0), p(3.0), p(10.0), p(11.0), p(12.0)],
+            // group 0: faces (0,1,2), (1,2,3); group 1: none; group 2: (4,5,6)
+            indices: vec![0, 1, 2, 1, 2, 3, 4, 5, 6],
+        });
+        let groups = GroupTris::slices(&mesh, &[2, 0, 1]);
+        assert_eq!(
+            groups.iter().map(GroupTris::len).collect::<Vec<_>>(),
+            [2, 0, 1]
+        );
+        assert_eq!(groups[0].tri(1), [p(1.0), p(2.0), p(3.0)]);
+        assert_eq!(groups[2].tri(0), [p(10.0), p(11.0), p(12.0)]);
+        assert_eq!(groups[0].get(2), None);
+        assert!(groups[1].iter().next().is_none());
+        assert_eq!(
+            (&groups[0]).into_iter().collect::<Vec<_>>(),
+            [[p(0.0), p(1.0), p(2.0)], [p(1.0), p(2.0), p(3.0)]]
+        );
+        let own = GroupTris::from(vec![[p(5.0), p(6.0), p(7.0)]]);
+        assert_eq!((own.len(), own.tri(0)), (1, [p(5.0), p(6.0), p(7.0)]));
+    }
+
+    /// A face with a corner past the vertices, and a trailing partial face, drop; the rest keep
+    /// their order: what the per-group lists kept when built face by face.
+    #[test]
+    fn only_whole_faces_are_kept() {
+        let positions = [[0.0; 3]; 4];
+        let mut indices = vec![0, 1, 2, 0, 9, 3, 1, 2, 3, 2];
+        keep_whole_faces(&positions, &mut indices);
+        assert_eq!(indices, [0, 1, 2, 1, 2, 3]);
     }
 }

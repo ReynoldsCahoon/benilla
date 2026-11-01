@@ -452,7 +452,7 @@ pub(super) fn build_parts(
                 return;
             }
             if gameobject {
-                collider = model.collision.as_ref().and_then(model_local_collider);
+                collider = model.collision.as_deref().and_then(model_local_collider);
             }
             let stat_forms = forms.slices(h).stat;
             model

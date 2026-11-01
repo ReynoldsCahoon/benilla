@@ -58,7 +58,7 @@ impl TraceLog {
         for (gi, tris) in model.group_collision_tris.iter().enumerate() {
             let mut best = f32::NEG_INFINITY;
             for tri in tris {
-                if let Some(z) = floor_z_at(tri, eye[0], eye[1]) {
+                if let Some(z) = floor_z_at(&tri, eye[0], eye[1]) {
                     if z <= eye[2] && z > best {
                         best = z;
                     }

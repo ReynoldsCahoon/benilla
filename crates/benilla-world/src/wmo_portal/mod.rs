@@ -1440,7 +1440,13 @@ mod tests {
                 nav(EXTERIOR, [2.0, 30.0, 0.0], [6.0, 34.0, 2.0], 0, 0),
                 nav(0x2000, [7.0, -0.5, 0.0], [11.0, 0.5, 2.0], 3, 1),
             ],
-            group_collision_tris: vec![floor(0.0), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            group_collision_tris: vec![
+                floor(0.0).into(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            ],
             ..portal_model()
         }
     }

@@ -262,10 +262,11 @@ pub(crate) fn insert_test_room(world: &mut World, flags: u32) {
     let floor = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
         [[a[0], a[1], 30.0], [b[0], b[1], 30.0], [c[0], c[1], 30.0]]
     };
-    let tris = vec![vec![
+    let tris: Vec<benilla_assets::GroupTris> = vec![vec![
         floor([-5.0, -5.0], [5.0, -5.0], [5.0, 5.0]),
         floor([-5.0, -5.0], [5.0, 5.0], [-5.0, 5.0]),
-    ]];
+    ]
+    .into()];
     let (bounds, all) = benilla_assets::collision_tri_bounds(&tris);
     let room = WmoModel {
         group_nav: vec![WmoGroupNav {
