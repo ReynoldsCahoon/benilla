@@ -101,8 +101,8 @@ pub(crate) struct Plan {
     /// The class trainers for the plan's class, by creature entry.
     pub(crate) trainers: Vec<u32>,
     /// Gear met here: `item -> (equipment slot, score for the class, sell price, required level,
-    /// usable by the class)`.
-    pub(crate) items: HashMap<u32, (u32, f32, u32, u32, bool)>,
+    /// usable by the class, two-handed)`.
+    pub(crate) items: HashMap<u32, (u32, f32, u32, u32, bool, bool)>,
     /// The zone's walk graph, from the server's navmesh: node positions and each node's neighbours.
     pub(crate) nodes: Vec<[f32; 3]>,
     pub(crate) edges: Vec<Vec<usize>>,
@@ -121,10 +121,11 @@ impl Plan {
     /// req, usable}`.
     pub(crate) fn items_lua(&self) -> String {
         let mut out = String::from("BenillaBot.items = {}\nlocal I = BenillaBot.items\n");
-        for (id, (slot, score, sell, req, ok)) in &self.items {
+        for (id, (slot, score, sell, req, ok, two)) in &self.items {
             out.push_str(&format!(
-                "I[{id}] = {{{slot}, {score:.1}, {sell}, {req}, {}}}\n",
-                if *ok { "true" } else { "false" }
+                "I[{id}] = {{{slot}, {score:.1}, {sell}, {req}, {}, {}}}\n",
+                if *ok { "true" } else { "false" },
+                if *two { "true" } else { "false" }
             ));
         }
         out
@@ -207,7 +208,9 @@ impl Plan {
                     if let (Some(item), Some(slot), Some(score), Some(sell), Some(req), Some(ok)) =
                         (n(1), n(2), fl(3), n(4), n(5), n(6))
                     {
-                        plan.items.insert(item, (slot, score, sell, req, ok == 1));
+                        let two = n(7) == Some(1);
+                        plan.items
+                            .insert(item, (slot, score, sell, req, ok == 1, two));
                     }
                 }
                 Some("T") => {
@@ -511,6 +514,11 @@ end
 function BenillaBot.Gain(id)
   local it = BenillaBot.items and BenillaBot.items[id or 0]
   if not it or not it[5] or it[4] > (UnitLevel("player") or 1) then return nil end
+  -- No off-hand item beside a two-handed weapon.
+  if it[1] == 17 then
+    local main = BenillaBot.items[BenillaBot.Id(GetInventoryItemLink("player", 16)) or 0]
+    if main and main[6] then return nil end
+  end
   return it[2] - BenillaBot.Worn(it[1])
 end
 function BenillaBot.Upgrade()
@@ -520,7 +528,10 @@ function BenillaBot.Upgrade()
     for s = 1, (GetContainerNumSlots(b) or 0) do
       local link = GetContainerItemLink(b, s)
       local gain = BenillaBot.Gain(BenillaBot.Id(link))
-      if gain and gain > 0.5 then
+      -- An item still in the bags after two tries will not go on (a skill, a rule): leave it.
+      BenillaBot.equipTries = BenillaBot.equipTries or {}
+      if gain and gain > 0.5 and (BenillaBot.equipTries[link] or 0) < 2 then
+        BenillaBot.equipTries[link] = (BenillaBot.equipTries[link] or 0) + 1
         UseContainerItem(b, s)
         return "equip " .. link .. string.format(" (+%.1f)", gain)
       end
@@ -1194,6 +1205,19 @@ fn drive_quest_bot(
         let target = seen.iter().find(|s| s.guid == guid);
         match target {
             Some(t) if !t.dead => {
+                // Not reached in 20 s and no fight begun (a wall between, a ledge): another target.
+                if !combat
+                    && now - bot.goal_since > 20.0
+                    && dist2(here, [t.at[0], t.at[1]]) > MELEE_YD + 1.0
+                {
+                    warn!(
+                        "PROBE_QUEST: {} not reached in 20 s; another target",
+                        name_of(&bot.plan, t)
+                    );
+                    bot.aside.insert(t.guid, now + 60.0);
+                    set_goal(&mut bot, Goal::Idle, now, &mut binds);
+                    return;
+                }
                 // Hit by something else while this one is not fighting us: turn on the attacker.
                 if !t.attacking_me {
                     if let Some(a) = nearest(&seen, here, |s| s.attacking_me && !s.dead) {
@@ -1333,6 +1357,23 @@ fn drive_quest_bot(
             set_goal(&mut bot, goal, now, &mut binds);
             return;
         }
+    }
+    // A walk or a visit not done in 60 s: something is in the way; choose again (a person or a
+    // spawn point is set aside for that long).
+    if matches!(bot.goal, Goal::Walk { .. } | Goal::Use { .. }) && now - bot.goal_since > 60.0 {
+        warn!(
+            "PROBE_QUEST: {} not done in 60 s; choosing again",
+            bot.goal.label()
+        );
+        match bot.goal.clone() {
+            Goal::Use { guid, .. } => {
+                bot.aside.insert(guid, now + 60.0);
+            }
+            Goal::Walk { to, .. } => bot.visited.push((to, now + 60.0)),
+            _ => {}
+        }
+        set_goal(&mut bot, Goal::Idle, now, &mut binds);
+        return;
     }
     // A goal in progress: click when there, else keep walking (movement above).
     match bot.goal.clone() {
@@ -2326,11 +2367,17 @@ E\t0\t1\nE\t1\t2\nE\t2\t3\n",
 
     #[test]
     fn gear_parses_and_becomes_a_lua_table() {
-        let p = Plan::parse("I\t4923\t16\t9.1\t25\t0\t1\nI\t4924\t16\t9.3\t25\t0\t0\n");
-        assert_eq!(p.items[&4923], (16, 9.1, 25, 0, true));
+        let p = Plan::parse(
+            "I\t4923\t16\t9.1\t25\t0\t1\t0\nI\t4924\t16\t9.3\t25\t0\t0\t0\nI\t12282\t16\t4.8\t8\t1\t1\t1\n",
+        );
+        assert_eq!(p.items[&4923], (16, 9.1, 25, 0, true, false));
         assert!(!p.items[&4924].4, "a club the class cannot use");
+        assert!(p.items[&12282].5, "the Worn Battleaxe is two-handed");
         let lua = p.items_lua();
-        assert!(lua.contains("I[4923] = {16, 9.1, 25, 0, true}"), "{lua}");
+        assert!(
+            lua.contains("I[4923] = {16, 9.1, 25, 0, true, false}"),
+            "{lua}"
+        );
     }
 
     #[test]
