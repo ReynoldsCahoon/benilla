@@ -62,6 +62,8 @@ const UNSTICK_TRIES: u32 = 6;
 const ASIDE_SECS: f32 = 120.0;
 /// A fight target whose health has not dropped for this long is set aside, in combat or not.
 const NO_DAMAGE_SECS: f32 = 20.0;
+/// The client's Tab reach (`target::scan::TAB_RANGE`): a fight target this near is selected.
+const SELECT_YD: f32 = 41.0;
 /// A creature this far above or below is on another level (a tunnel overhead), not in the way.
 const IN_THE_WAY_DZ: f32 = 6.0;
 /// Right-clicks on one goal before it is set aside (a click that never takes).
@@ -852,6 +854,8 @@ struct QuestBot {
     stuck_on: HashMap<u64, u32>,
     /// The fight target the last "nearer" switch left, never switched straight back to.
     left_target: Option<u64>,
+    /// When the last select click (a left-click on the fight target) was sent.
+    last_select: f32,
     /// The fight target's lowest health seen and when it last dropped: no drop in
     /// [`NO_DAMAGE_SECS`] is a target we cannot hit (a wall or a tunnel floor between).
     fight_hp: Option<(u64, u32, f32)>,
@@ -976,6 +980,8 @@ const AIM: [(f32, f32); 5] = [(1.0, 0.0), (1.8, 0.0), (0.5, 0.0), (1.0, 0.5), (1
 struct BotClick {
     entity: Option<Entity>,
     ui: Option<Vec2>,
+    /// A left-click on `entity`: select it as the target without attacking or using it.
+    select: bool,
     stage: u8,
     /// Which of [`AIM`] the cursor is on: a target the pick does not hover there is tried at the
     /// next (the camera close behind in a building can put our own body or a wall in the way).
@@ -1095,6 +1101,7 @@ fn drive_quest_bot(
     quest_giver: Option<Res<crate::ui_quest::QuestGiver>>,
     mut lua: ResMut<BotLua>,
     idle: Option<ResMut<crate::ui_chat::idle::LastInput>>,
+    selection: Option<Res<crate::target::Selection>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let Ok(me) = self_player.single() else {
@@ -1247,6 +1254,39 @@ fn drive_quest_bot(
                     bot.fight_hp = None;
                     set_goal(&mut bot, Goal::Idle, now, &mut binds);
                     return;
+                }
+                // Tagged by someone else and not on us: theirs. Another, untagged target (one that
+                // is attacking us is still fought, here or as an attacker below).
+                if t.tapped_by_other && !t.attacking_me {
+                    info!(
+                        "PROBE_QUEST: {} tagged by another; another target",
+                        name_of(&bot.plan, t)
+                    );
+                    bot.aside.insert(t.guid, now + 60.0);
+                    bot.fight_hp = None;
+                    set_goal(&mut bot, Goal::Idle, now, &mut binds);
+                    return;
+                }
+                // Not our target yet and within Tab's reach ahead: select it now, so it is the
+                // target from the moment it is in reach, not only when we arrive.
+                let d_sel = dist2(here, [t.at[0], t.at[1]]);
+                let ahead = {
+                    let off = (yaw_toward(here, [t.at[0], t.at[1]]) - player.facing()
+                        + std::f32::consts::PI)
+                        .rem_euclid(std::f32::consts::TAU)
+                        - std::f32::consts::PI;
+                    off.abs() < 60f32.to_radians()
+                };
+                if selection.as_ref().and_then(|s| s.guid) != Some(t.guid)
+                    && d_sel <= SELECT_YD
+                    && ahead
+                    && now - bot.last_select > 2.0
+                {
+                    info!(
+                        "PROBE_QUEST: select {} at {d_sel:.0} yd",
+                        name_of(&bot.plan, t)
+                    );
+                    request_select(&mut bot, &mut click, t.entity, now);
                 }
                 // Hit by something else while this one is not fighting us: turn on the attacker.
                 if !t.attacking_me {
@@ -2121,10 +2161,25 @@ fn request_click(
         return;
     }
     click.entity = Some(entity);
+    click.select = false;
     click.stage = 0;
     click.aim = 0;
     bot.clicks += 1;
     bot.last_click = now;
+}
+
+/// A left-click on `entity`, selecting it as the target from afar (as a player clicks the mob
+/// they mean to pull), so the right mob, not just one of its name, is the target before Tab or a
+/// right-click; counts against no goal's click tries.
+fn request_select(bot: &mut QuestBot, click: &mut BotClick, entity: Entity, now: f32) {
+    if click.entity.is_some() || click.ui.is_some() {
+        return;
+    }
+    click.entity = Some(entity);
+    click.select = true;
+    click.stage = 0;
+    click.aim = 0;
+    bot.last_select = now;
 }
 
 /// The click in flight, before the input pass: the cursor onto the target for a frame (so the
@@ -2148,7 +2203,7 @@ fn press_bot_click(
         return;
     };
     let size = Vec2::new(window.width(), window.height());
-    let button = if click.ui.is_some() {
+    let button = if click.ui.is_some() || click.select {
         MouseButton::Left
     } else {
         MouseButton::Right
@@ -2293,6 +2348,7 @@ impl Plugin for ProbeQuestPlugin {
             stuck_on: HashMap::new(),
             left_target: None,
             fight_hp: None,
+            last_select: 0.0,
             done: Vec::new(),
             jumped: -10.0,
             trained: 0,
