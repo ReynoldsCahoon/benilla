@@ -60,8 +60,28 @@ pub(crate) struct SoundKits {
     catalog: SoundKitCatalog,
     /// Decoded SFX by lowercased path, cloned per play with shared frames (SoundFileDataCache).
     cache: HashMap<String, StaticSoundData>,
+    /// Each cached path's last use on [`Self::clock`], for the size cap's eviction order.
+    last_use: HashMap<String, u64>,
+    /// Counts [`Self::sfx`] calls: the recency clock.
+    clock: u64,
     pick: HashMap<u32, PickState>,
     rng: Rng,
+}
+
+/// The decoded-SFX cache's budget: past it, the least recently played files are dropped before the
+/// next decode. Deviation (user, 2026-11-01): the cache is otherwise unbounded until a map change
+/// (`evict_kit_cache`), ~16 MB in 10 minutes of questing and growing over a session on one
+/// continent; a file dropped and played again is decoded again, a first-play read on the main
+/// thread. Low-memory iOS keeps 16 MB, other targets 64 MB.
+const SFX_CACHE_BYTES: usize = if cfg!(target_os = "ios") {
+    16 << 20
+} else {
+    64 << 20
+};
+
+/// A decoded file's resident size: stereo `f32` frames.
+fn sfx_bytes(d: &StaticSoundData) -> usize {
+    d.frames.len() * std::mem::size_of::<kira::Frame>()
 }
 
 impl SoundKits {
@@ -820,6 +840,8 @@ impl SoundKits {
         Self {
             catalog,
             cache: HashMap::new(),
+            last_use: HashMap::new(),
+            clock: 0,
             pick: HashMap::new(),
             rng: Rng(0x9e37_79b9),
         }
@@ -874,12 +896,47 @@ impl SoundKits {
         st.remaining.len() - 1
     }
 
+    /// Drop the least recently used decoded files until the cache holds at most `budget` bytes;
+    /// a playing channel keeps its own reference to the frames, so nothing audible cuts. Runs on a
+    /// miss only, so the file about to be decoded may take the cache past the budget until the
+    /// next miss.
+    fn evict_to(&mut self, budget: usize) {
+        let mut held: usize = self.cache.values().map(sfx_bytes).sum();
+        if held <= budget {
+            return;
+        }
+        let mut order: Vec<(u64, String)> = self
+            .cache
+            .keys()
+            .map(|k| (self.last_use.get(k).copied().unwrap_or(0), k.clone()))
+            .collect();
+        order.sort_unstable();
+        for (_, k) in order {
+            if held <= budget {
+                break;
+            }
+            if let Some(d) = self.cache.remove(&k) {
+                held -= sfx_bytes(&d);
+            }
+            self.last_use.remove(&k);
+        }
+        // Paths played but never cached (a failed read) need no recency; the one this call is
+        // about to decode keeps its stamp.
+        let now = self.clock;
+        let cache = &self.cache;
+        self.last_use
+            .retain(|k, t| *t == now || cache.contains_key(k));
+    }
+
     /// A decoded kit file, read and decoded whole on a cache miss.
     fn sfx(&mut self, assets: &WorldAssets, path: &str) -> Result<StaticSoundData> {
         let key = path.to_ascii_lowercase();
+        self.clock += 1;
+        self.last_use.insert(key.clone(), self.clock);
         if let Some(d) = self.cache.get(&key) {
             return Ok(d.clone());
         }
+        self.evict_to(SFX_CACHE_BYTES);
         // An addon's loose file, then the chain ([`benilla_assets::read_loose_or_chain`]):
         // `PlaySoundFile` is by path, and addon audio lives on disk, never in an MPQ.
         let bytes = assets
@@ -1067,6 +1124,7 @@ fn evict_kit_cache(
     changes.clear();
     if let Some(mut k) = kits {
         k.cache.clear();
+        k.last_use.clear();
     }
 }
 
@@ -1137,6 +1195,35 @@ mod tests {
             Some(Bus(3)),
             "bus 0 is another domain"
         );
+    }
+
+    /// Past the budget the least recently played files go first, and a channel still holding one
+    /// keeps its frames.
+    #[test]
+    fn the_sfx_cache_drops_the_least_recently_played_past_its_budget() {
+        let mut kits = SoundKits::new(benilla_formats::SoundKitCatalog::empty_for_tests());
+        let clip = || StaticSoundData {
+            sample_rate: 100,
+            frames: (0..1000)
+                .map(|_| kira::Frame::from_mono(0.5))
+                .collect::<std::sync::Arc<[kira::Frame]>>(),
+            settings: Default::default(),
+            slice: None,
+        };
+        let one = sfx_bytes(&clip());
+        for (key, at) in [("a", 4), ("b", 2), ("c", 3)] {
+            kits.cache.insert(key.into(), clip());
+            kits.last_use.insert(key.into(), at);
+        }
+        kits.clock = 4;
+        let playing = kits.cache["b"].clone();
+        kits.evict_to(2 * one);
+        assert!(!kits.cache.contains_key("b"), "b was played longest ago");
+        assert!(kits.cache.contains_key("a") && kits.cache.contains_key("c"));
+        assert!(!kits.last_use.contains_key("b"));
+        assert_eq!(playing.frames.len(), 1000);
+        kits.evict_to(0);
+        assert!(kits.cache.is_empty());
     }
 
     /// With all-1 weights every variation plays once per cycle (`0x45bb70`/`0x45bd40`).
