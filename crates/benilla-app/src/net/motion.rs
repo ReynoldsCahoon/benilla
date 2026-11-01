@@ -68,8 +68,8 @@ pub(super) fn pose_transform(position: [f32; 3], rotation: Quat) -> Transform {
 /// Writes a raw-WoW pose onto an existing entity, keeping the renderer's baked scale; an entity
 /// not yet query-visible on its spawn frame is skipped, as its spawn pose already placed it.
 ///
-/// A wire pose overrides the local facing turn, so it drops any [`DisplayFacing`] and the smoother
-/// re-seeds from this pose, as the reference's resync sets the goal and wipes the ring
+/// A wire pose overrides the local facing turn, so it releases any [`DisplayFacing`] and the
+/// smoother re-seeds from this pose, as the reference's resync sets the goal and wipes the ring
 /// (`0x601020`).
 pub(super) fn write_pose(
     commands: &mut Commands,
@@ -81,7 +81,7 @@ pub(super) fn write_pose(
     if let Ok(mut t) = transforms.get_mut(e) {
         t.translation = wow_to_bevy(position);
         t.rotation = rotation;
-        commands.entity(e).remove::<DisplayFacing>();
+        DisplayFacing::release(commands, e);
     }
 }
 

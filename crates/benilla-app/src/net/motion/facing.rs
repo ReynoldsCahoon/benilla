@@ -39,13 +39,19 @@ const UNIT_FLAG_STUNNED: u32 = 0x0004_0000;
 const EMOTE_PERMITS_FACING: u32 = benilla_formats::EMOTE_FLAG_INTERACTION;
 
 /// A stationary unit's display-facing state, the client's `CGUnit+0xc98` goal and
-/// `+0xc9c..+0xca8` delta ring; present only while [`drive_display_facing`] governs the unit.
+/// `+0xc9c..+0xca8` delta ring; live only while [`drive_display_facing`] governs the unit
+/// (`governed`). Once on a unit it stays, ungoverned while a path or the relay drives it: taking
+/// it off at every walk and putting it back at every stop moved the unit between archetypes, and
+/// the ECS keeps every archetype it makes (wow-optimize FINDINGS, "What the ECS bookkeeping grows
+/// from").
 #[derive(Component)]
 pub(crate) struct DisplayFacing {
     /// The raw wire yaw (`CMovement+0x1c`), never written client-side.
     wire: f32,
     /// A zero head means the next pump takes the ring-fill leg.
     hist: [f32; 4],
+    /// False: no state is kept, and the next governed frame seeds from the pose (`0x601020`).
+    governed: bool,
 }
 
 impl DisplayFacing {
@@ -55,7 +61,16 @@ impl DisplayFacing {
         Self {
             wire,
             hist: [0.0; 4],
+            governed: true,
         }
+    }
+
+    /// Drops the state, keeping the component: what removing it did.
+    pub(in crate::net) fn release(commands: &mut Commands, e: Entity) {
+        commands
+            .entity(e)
+            .entry::<DisplayFacing>()
+            .and_modify(|mut d| d.governed = false);
     }
 }
 
@@ -66,7 +81,13 @@ pub(in crate::net) fn set_raw_facing(commands: &mut Commands, e: Entity, wire: f
     commands
         .entity(e)
         .entry::<DisplayFacing>()
-        .and_modify(move |mut d| d.wire = wire)
+        .and_modify(move |mut d| {
+            if d.governed {
+                d.wire = wire;
+            } else {
+                *d = DisplayFacing::seeded(wire);
+            }
+        })
         .or_insert(DisplayFacing::seeded(wire));
 }
 
@@ -281,13 +302,10 @@ pub(crate) fn drive_display_facing(
             continue;
         };
         let cur = yaw_of(tf.rotation).rem_euclid(std::f32::consts::TAU);
-        let Ok(mut state) = facings.get_mut(e) else {
+        let Some(mut state) = facings.get_mut(e).ok().filter(|s| s.governed) else {
             // First frame governed: the transform still holds the wire's facing, so seed from it
             // with a clean ring (`0x601020`).
-            commands.entity(e).insert(DisplayFacing {
-                wire: cur,
-                hist: [0.0; 4],
-            });
+            commands.entity(e).insert(DisplayFacing::seeded(cur));
             continue;
         };
         // The raw facing is a goal, not a freeze: it swings an NPC back when its window closes.
@@ -314,7 +332,11 @@ pub(crate) fn drive_display_facing(
         }
     }
     for e in &ungoverned {
-        commands.entity(e).remove::<DisplayFacing>();
+        if let Ok(mut state) = facings.get_mut(e) {
+            if state.governed {
+                state.governed = false;
+            }
+        }
     }
 }
 
@@ -682,6 +704,64 @@ mod tests {
             app.world().resource::<Dirty>().0,
             0,
             "a settled unit must stop dirtying its transform"
+        );
+    }
+
+    /// A path releases the smoother's state without taking the component, so the unit keeps its
+    /// archetype; at the path's end the next governed frame seeds from the pose, as before.
+    #[test]
+    fn a_path_releases_the_display_facing_and_its_end_re_seeds_it() {
+        let mut app = App::new();
+        app.init_resource::<GuidIndex>()
+            .init_resource::<crate::ui_session::InteractNpc>()
+            .add_systems(Update, drive_display_facing);
+        let npc = app
+            .world_mut()
+            .spawn((
+                NetEntity {
+                    kind: EntityKind::Unit,
+                    display_id: None,
+                    scale: 1.0,
+                },
+                ObjectStore::default(),
+                Transform::from_rotation(Quat::from_rotation_y(0.0)),
+            ))
+            .id();
+        let state = |app: &App| {
+            let d = app.world().entity(npc).get::<DisplayFacing>().unwrap();
+            (d.governed, d.wire)
+        };
+        app.update();
+        assert_eq!(state(&app), (true, 0.0), "the seeding frame");
+
+        app.world_mut().entity_mut(npc).insert(Spline {
+            deck: None,
+            final_facing: benilla_protocol::MonsterMoveFacing::None,
+            points: vec![[0.0; 3], [1.0, 0.0, 0.0]],
+            start: std::time::Instant::now(),
+            duration: std::time::Duration::from_secs(1),
+            id: 1,
+            grounded: true,
+            run_mode: false,
+        });
+        app.update();
+        assert!(
+            !state(&app).0,
+            "a path releases the state and keeps the component"
+        );
+
+        app.world_mut().entity_mut(npc).remove::<Spline>();
+        app.world_mut()
+            .entity_mut(npc)
+            .get_mut::<Transform>()
+            .unwrap()
+            .rotation = Quat::from_rotation_y(1.0);
+        app.update();
+        let (governed, wire) = state(&app);
+        assert!(governed);
+        assert!(
+            (wire - 1.0).abs() < 1.0e-6,
+            "re-seeded from the pose the path left: {wire}"
         );
     }
 
