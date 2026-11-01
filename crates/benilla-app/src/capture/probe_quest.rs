@@ -96,6 +96,11 @@ pub(crate) struct Plan {
     /// Names and `UNIT_NPC_FLAGS` by `(kind, entry)`.
     pub(crate) names: HashMap<(Kind, u32), (String, u32)>,
     pub(crate) spawns: HashMap<(Kind, u32), Vec<[f32; 3]>>,
+    /// The class trainers for the plan's class, by creature entry.
+    pub(crate) trainers: Vec<u32>,
+    /// Gear met here: `item -> (equipment slot, score for the class, sell price, required level,
+    /// usable by the class)`.
+    pub(crate) items: HashMap<u32, (u32, f32, u32, u32, bool)>,
     /// The zone's walk graph, from the server's navmesh: node positions and each node's neighbours.
     pub(crate) nodes: Vec<[f32; 3]>,
     pub(crate) edges: Vec<Vec<usize>>,
@@ -110,6 +115,19 @@ fn kind(s: &str) -> Option<Kind> {
 }
 
 impl Plan {
+    /// The gear table as a Lua chunk for the Lua half: `BenillaBot.items[id] = {slot, score, sell,
+    /// req, usable}`.
+    pub(crate) fn items_lua(&self) -> String {
+        let mut out = String::from("BenillaBot.items = {}\nlocal I = BenillaBot.items\n");
+        for (id, (slot, score, sell, req, ok)) in &self.items {
+            out.push_str(&format!(
+                "I[{id}] = {{{slot}, {score:.1}, {sell}, {req}, {}}}\n",
+                if *ok { "true" } else { "false" }
+            ));
+        }
+        out
+    }
+
     pub(crate) fn parse(text: &str) -> Plan {
         let mut plan = Plan::default();
         let mut index: HashMap<u32, usize> = HashMap::new();
@@ -174,6 +192,18 @@ impl Plan {
                         (f.get(1).and_then(|s| kind(s)), n(2), n(3), f.get(4))
                     {
                         plan.names.insert((k, e), ((*name).to_string(), flags));
+                    }
+                }
+                Some("I") => {
+                    if let (Some(item), Some(slot), Some(score), Some(sell), Some(req), Some(ok)) =
+                        (n(1), n(2), fl(3), n(4), n(5), n(6))
+                    {
+                        plan.items.insert(item, (slot, score, sell, req, ok == 1));
+                    }
+                }
+                Some("T") => {
+                    if let Some(e) = n(1) {
+                        plan.trainers.push(e);
                     }
                 }
                 Some("W") => {
@@ -373,7 +403,130 @@ function BenillaBot.Pick(buttons, prefix, n)
   end
   return nil
 end
+-- Training: the gossip option that opens the trainer, buying what is new and affordable, and
+-- putting each learned ability on an empty slot of the bar shown (once the server has taught it).
+function BenillaBot.TrainOption()
+  for i = 1, 32 do
+    local b = getglobal("GossipTitleButton" .. i)
+    if b and b:IsVisible() and b.type == "Gossip" then
+      local t = string.lower(b:GetText() or "")
+      if string.find(t, "train") then b:Click() return "gossip: " .. (b:GetText() or "") end
+    end
+  end
+  return nil
+end
+function BenillaBot.Train()
+  local bought = 0
+  for i = 1, GetNumTrainerServices() do
+    local name, rank, category = GetTrainerServiceInfo(i)
+    if category == "available" and (GetTrainerServiceCost(i) or 0) <= GetMoney() then
+      BuyTrainerService(i)
+      bought = bought + 1
+    end
+  end
+  return bought
+end
+function BenillaBot.Place()
+  -- Every 8th check (~2 s): an active ability in the spellbook that is on no action slot goes on
+  -- an empty slot of the bar shown, as a player drags it there. Passives ("Passive" rank) have
+  -- no button.
+  BenillaBot.placeTick = ((BenillaBot.placeTick or 0) + 1)
+  if BenillaBot.placeTick - math.floor(BenillaBot.placeTick / 8) * 8 ~= 0 then return nil end
+  local onBar = {}
+  -- Stances live on the stance bar the stock interface shows; they need no action button.
+  for k = 1, (GetNumShapeshiftForms and GetNumShapeshiftForms() or 0) do
+    local icon, fname = GetShapeshiftFormInfo(k)
+    if fname then onBar["form:" .. fname] = true end
+  end
+  for s = 1, 120 do
+    local t = HasAction(s) and GetActionTexture(s)
+    if t then onBar[t] = true end
+  end
+  for i = 1, 200 do
+    local name, rank = GetSpellName(i, "spell")
+    if not name then break end
+    local tex = GetSpellTexture(i, "spell")
+    local nextName = GetSpellName(i + 1, "spell")
+    -- The highest rank only (ranks of a spell sit together, lowest first).
+    BenillaBot.noButton = BenillaBot.noButton or {}
+    if rank ~= "Passive" and tex and not onBar[tex] and not onBar["form:" .. name] and nextName ~= name
+        and not BenillaBot.noButton[name] then
+      for j = 1, 12 do
+        local b, s = BenillaBot.Button(j)
+        if s and not HasAction(s) then
+          -- A passive with another rank text (a weapon specialization) will not go on a bar:
+          -- still off every bar after two tries, it is not tried again.
+          BenillaBot.tries = BenillaBot.tries or {}
+          BenillaBot.tries[name] = (BenillaBot.tries[name] or 0) + 1
+          if BenillaBot.tries[name] > 2 then
+            BenillaBot.noButton[name] = true
+            return "no button for " .. name
+          end
+          PickupSpell(i, "spell")
+          PlaceAction(s)
+          ClearCursor()
+          return name .. " on button " .. j
+        end
+      end
+      return nil
+    end
+  end
+  return nil
+end
+-- Gear: an item's id from its link; the score of what is worn in a slot (a ring either finger,
+-- the weaker); equipping a bag item that beats it; the best quest reward.
+function BenillaBot.Id(link)
+  if not link then return nil end
+  local _, _, id = string.find(link, "item:(%d+)")
+  return tonumber(id)
+end
+function BenillaBot.Worn(slot)
+  local function at(s)
+    local it = BenillaBot.items and BenillaBot.items[BenillaBot.Id(GetInventoryItemLink("player", s)) or 0]
+    return it and it[2] or 0
+  end
+  if slot == 11 then return math.min(at(11), at(12)) end
+  if slot == 13 then return math.min(at(13), at(14)) end
+  return at(slot)
+end
+function BenillaBot.Gain(id)
+  local it = BenillaBot.items and BenillaBot.items[id or 0]
+  if not it or not it[5] or it[4] > (UnitLevel("player") or 1) then return nil end
+  return it[2] - BenillaBot.Worn(it[1])
+end
+function BenillaBot.Upgrade()
+  BenillaBot.gearTick = (BenillaBot.gearTick or 0) + 1
+  if BenillaBot.gearTick - math.floor(BenillaBot.gearTick / 8) * 8 ~= 0 then return nil end
+  for b = 0, 4 do
+    for s = 1, (GetContainerNumSlots(b) or 0) do
+      local link = GetContainerItemLink(b, s)
+      local gain = BenillaBot.Gain(BenillaBot.Id(link))
+      if gain and gain > 0.5 then
+        UseContainerItem(b, s)
+        return "equip " .. link .. string.format(" (+%.1f)", gain)
+      end
+    end
+  end
+  return nil
+end
+function BenillaBot.Choice()
+  -- The usable choice that gains the most over what is worn; with no gain, the best price.
+  local best, bestGain, cheap, cheapPrice = nil, 0.5, 1, -1
+  for i = 1, GetNumQuestChoices() do
+    local name, tex, n, quality, usable = GetQuestItemInfo("choice", i)
+    local id = BenillaBot.Id(GetQuestItemLink("choice", i))
+    local gain = usable and BenillaBot.Gain(id)
+    if gain and gain > bestGain then best, bestGain = i, gain end
+    local it = BenillaBot.items and BenillaBot.items[id or 0]
+    if it and it[3] > cheapPrice then cheap, cheapPrice = i, it[3] end
+  end
+  return best or cheap, best and "upgrade" or "best price"
+end
 function BenillaBot.Dialog()
+  local worn = BenillaBot.Upgrade()
+  if worn then return worn end
+  local placed = BenillaBot.Place()
+  if placed then return "placed " .. placed end
   if not (LootFrame and LootFrame:IsVisible()) then BenillaBot.lootTicks = 0 end
   if LootFrame and LootFrame:IsVisible() then
     -- A row that never goes (bags full, a unique item held) would hold the window open forever.
@@ -406,9 +559,20 @@ function BenillaBot.Dialog()
     if IsQuestCompletable() then QuestFrameCompleteButton:Click() return "complete" end
     QuestFrameGoodbyeButton:Click() return "progress-not-done"
   end
+  if QuestFrameRewardPanel and QuestFrameRewardPanel:IsVisible()
+      and BenillaBot.Free() < 1 and (GetNumQuestChoices() + GetNumQuestRewards()) > 0 then
+    -- No room for the reward: the server refuses the turn-in. Close it, sell, come back.
+    HideUIPanel(QuestFrame) return "reward-no-room"
+  end
   if QuestFrameRewardPanel and QuestFrameRewardPanel:IsVisible() then
-    if GetNumQuestChoices() > 0 then QuestFrameRewardPanel.itemChoice = 1 end
-    QuestFrameCompleteQuestButton:Click() return "reward " .. (GetTitleText() or "")
+    local why = ""
+    if GetNumQuestChoices() > 0 then
+      local pick, how = BenillaBot.Choice()
+      QuestFrameRewardPanel.itemChoice = pick
+      why = " (choice " .. pick .. ", " .. how .. ")"
+    end
+    local title = GetTitleText() or ""
+    QuestFrameCompleteQuestButton:Click() return "reward " .. title .. why
   end
   if QuestFrameGreetingPanel and QuestFrameGreetingPanel:IsVisible() then
     local r = BenillaBot.Pick(nil, "QuestTitleButton", 32)
@@ -416,6 +580,10 @@ function BenillaBot.Dialog()
     QuestFrameGreetingGoodbyeButton:Click() return "greeting-nothing"
   end
   if GossipFrame and GossipFrame:IsVisible() then
+    if BenillaBot.wantTrain then
+      local t = BenillaBot.TrainOption()
+      if t then return t end
+    end
     local r = BenillaBot.Pick(nil, "GossipTitleButton", 32)
     if r then return r end
     CloseGossip() return "gossip-nothing"
@@ -425,7 +593,11 @@ function BenillaBot.Dialog()
     local n = BenillaBot.Sell()
     CloseMerchant() return "sold " .. n
   end
-  if ClassTrainerFrame and ClassTrainerFrame:IsVisible() then CloseTrainer() return "trainer-close" end
+  if ClassTrainerFrame and ClassTrainerFrame:IsVisible() then
+    local n = BenillaBot.wantTrain and BenillaBot.Train() or 0
+    BenillaBot.wantTrain = nil
+    CloseTrainer() return "trained " .. n
+  end
   return ""
 end
 -- The action button shown in place i: a stance's bar (BonusActionButton, slots 73-84 for a
@@ -520,7 +692,7 @@ function BenillaBot.State()
   local hp = UnitHealth("player") or 0
   local maxhp = UnitHealthMax("player") or 1
   local attacking = BenillaBot.Attacking() and "1" or "0"
-  return combat .. "\t" .. hp .. "\t" .. maxhp .. "\t" .. (UnitLevel("player") or 0) .. "\t" .. attacking .. "\t" .. BenillaBot.Free()
+  return combat .. "\t" .. hp .. "\t" .. maxhp .. "\t" .. (UnitLevel("player") or 0) .. "\t" .. attacking .. "\t" .. BenillaBot.Free() .. "\t" .. (GetMoney() or 0)
 end
 "#;
 
@@ -627,6 +799,10 @@ struct QuestBot {
     left_target: Option<u64>,
     /// Quests turned in this run, by title.
     done: Vec<String>,
+    /// When the last stuck jump was.
+    jumped: f32,
+    /// The level last trained at (or found at), so each new level from 4 visits the trainer once.
+    trained: u32,
     walking: bool,
     level: u32,
     // Counters for the summary.
@@ -643,6 +819,8 @@ struct QuestBot {
 #[derive(Resource)]
 struct BotLua {
     hp_pool: u32,
+    /// The plan's gear table as Lua ([`Plan::items_lua`]), loaded with the Lua half.
+    items: String,
     set_up: bool,
     /// Take readings (and work any open window) on the next pass.
     pending: bool,
@@ -652,6 +830,8 @@ struct BotLua {
     destroy: bool,
     /// Chat lines to type.
     chat: Vec<String>,
+    /// Lua to run before the next readings (the bot's intent for the window it opens).
+    code: Vec<String>,
     /// The open window's outcome, the player's state and the quest log, as the Lua half reports.
     readings: Option<(String, String, String)>,
 }
@@ -659,7 +839,7 @@ struct BotLua {
 /// The Lua half, after the bot's think: sets itself up once, then types the asked chat lines,
 /// uses the action bar when asked, and takes the readings.
 fn run_bot_lua(mut lua: ResMut<BotLua>, mut hosted_vm: crate::script_calls::HostedVm) {
-    if !lua.pending && !lua.fight && !lua.destroy && lua.chat.is_empty() {
+    if !lua.pending && !lua.fight && !lua.destroy && lua.chat.is_empty() && lua.code.is_empty() {
         return;
     }
     hosted_vm.run(|script| {
@@ -670,6 +850,9 @@ fn run_bot_lua(mut lua: ResMut<BotLua>, mut hosted_vm: crate::script_calls::Host
             if let Err(e) = script.run(LUA) {
                 warn!("PROBE_QUEST: the Lua half failed to load: {e}");
                 return;
+            }
+            if let Err(e) = script.run(&lua.items) {
+                warn!("PROBE_QUEST: the gear table failed to load: {e}");
             }
             let hp = lua.hp_pool;
             script.push_chat_input(format!(".modify hp {hp}"));
@@ -690,6 +873,11 @@ fn run_bot_lua(mut lua: ResMut<BotLua>, mut hosted_vm: crate::script_calls::Host
         }
         for line in std::mem::take(&mut lua.chat) {
             script.push_chat_input(line);
+        }
+        for chunk in std::mem::take(&mut lua.code) {
+            if let Err(e) = script.run(&chunk) {
+                warn!("PROBE_QUEST: {chunk}: {e}");
+            }
         }
         if std::mem::take(&mut lua.fight) {
             let used: String = script
@@ -890,7 +1078,10 @@ fn drive_quest_bot(
             bot.accepted += 1;
         } else if let Some(title) = dialog.strip_prefix("reward ") {
             bot.turned_in += 1;
+            let title = title.split(" (choice ").next().unwrap_or(title);
             bot.done.push(title.to_string());
+        } else if dialog.starts_with("trained ") {
+            bot.trained = bot.level.max(bot.trained);
         } else if let Some(at) = dialog.strip_prefix("lootclick ") {
             // A loot row to click with the mouse, at its place in UIParent units (y up).
             let v: Vec<f32> = at.split(' ').filter_map(|v| v.parse().ok()).collect();
@@ -925,6 +1116,7 @@ fn drive_quest_bot(
         st.next().unwrap_or(0) == 1,
         st.next().unwrap_or(99),
     );
+    let money = st.next().unwrap_or(0);
     // The test's invulnerability: a deep pool, topped up on a level change or when it runs low.
     if level != bot.level || (maxhp > 0 && hp * 3 < maxhp) || maxhp < bot.hp_pool / 2 {
         if level != bot.level && bot.level != 0 {
@@ -956,6 +1148,19 @@ fn drive_quest_bot(
         let target = seen.iter().find(|s| s.guid == guid);
         match target {
             Some(t) if !t.dead => {
+                // Hit by something else while this one is not fighting us: turn on the attacker.
+                if !t.attacking_me {
+                    if let Some(a) = nearest(&seen, here, |s| s.attacking_me && !s.dead) {
+                        let why = format!("attacked by {}", name_of(&bot.plan, a));
+                        let goal = Goal::Fight {
+                            entity: a.entity,
+                            guid: a.guid,
+                            why,
+                        };
+                        set_goal(&mut bot, goal, now, &mut binds);
+                        return;
+                    }
+                }
                 let d = dist2(here, [t.at[0], t.at[1]]);
                 // Not yet fighting it: a target of the same kind at least 10 yd nearer takes over
                 // (boars wander, and the first choice was the nearest when it was made).
@@ -983,13 +1188,19 @@ fn drive_quest_bot(
                         }
                     }
                 }
-                if d <= MELEE_YD + 1.0 {
+                // In melee, the bar; at 8-25 yd too, where a warrior's Charge reaches (the melee
+                // abilities are out of range there and stay unpressed).
+                if d <= MELEE_YD + 1.0 || (8.0..25.0).contains(&d) {
                     lua.fight = true;
                 }
                 // Right-click to attack whenever auto-attack is off (a fresh target, or one that
                 // hit us first), once it is close enough to be on screen in front.
-                let close = dist2(here, [t.at[0], t.at[1]]) <= 20.0;
-                if !attacking && close && now - bot.last_click > 1.5 {
+                // Out to 30 yd: a target selected before it closes in is what a warrior's Charge
+                // (8-25 yd) needs.
+                let close = dist2(here, [t.at[0], t.at[1]]) <= 30.0;
+                // The first click of each fight goal always: auto-attack may be on, but on another
+                // target (switching to an attacker).
+                if (!attacking || bot.clicks == 0) && close && now - bot.last_click > 1.5 {
                     request_click(
                         &mut bot,
                         &mut click,
@@ -1088,7 +1299,37 @@ fn drive_quest_bot(
         Goal::Fight { .. } | Goal::Idle => {}
     }
 
-    let next = choose(&bot, &seen, &log, here, level, free);
+    // Found at a level: train from the next one (the first visit is at 4, where a warrior's
+    // first new abilities come).
+    if bot.trained == 0 && level > 0 {
+        bot.trained = level.max(3);
+    }
+    let want_train = level > bot.trained && money > 0 && !bot.plan.trainers.is_empty();
+    let next = if want_train && !matches!(bot.goal, Goal::Fight { .. }) {
+        let trainers: Vec<(Kind, u32)> = bot
+            .plan
+            .trainers
+            .iter()
+            .map(|&e| (Kind::Creature, e))
+            .collect();
+        match goal_for_entries(
+            &bot,
+            &seen,
+            here,
+            &trainers,
+            |s| !s.dead,
+            "trainer",
+            "train",
+        ) {
+            Some(g) => {
+                lua.code.push("BenillaBot.wantTrain = true".into());
+                g
+            }
+            None => choose(&bot, &seen, &log, here, level, free),
+        }
+    } else {
+        choose(&bot, &seen, &log, here, level, free)
+    };
     // Bags full and no vendor to reach: make room.
     if free == 0
         && !matches!(next, Goal::Use { ref why, .. } | Goal::Walk { ref why, .. } if why.starts_with("sell"))
@@ -1553,6 +1794,20 @@ fn step_movement(
                         return false;
                     }
                 }
+                // A jump first, as a player hops a slope's lip or a rock edge, once per 3 s; only
+                // if that does not free us, the other ways.
+                if now - bot.jumped > 3.0 {
+                    bot.jumped = now;
+                    binds.apply_device_input(vec![BindingInput::Fire(
+                        benilla_ui::script::FiredInput::Jump,
+                    )]);
+                    info!(
+                        "PROBE_QUEST: stuck at ({:.1}, {:.1}); jumping",
+                        here[0], here[1]
+                    );
+                    bot.moved_from = None;
+                    return false;
+                }
                 // On a route: the waypoint we cannot reach (an NPC may stand on it) is skipped.
                 if let Some(route) = bot.route.as_mut() {
                     if route.len() > 2 {
@@ -1786,11 +2041,13 @@ impl Plugin for ProbeQuestPlugin {
             }
         };
         info!(
-            "PROBE_QUEST: plan {path}: {} quests, {} named entries, {} spawn sets",
+            "PROBE_QUEST: plan {path}: {} quests, {} named entries, {} spawn sets, {} items",
             plan.quests.len(),
             plan.names.len(),
-            plan.spawns.len()
+            plan.spawns.len(),
+            plan.items.len()
         );
+        let items_lua = plan.items_lua();
         app.insert_resource(QuestBot {
             plan,
             at: env_f32("WOW_PROBE_QUEST_AT").unwrap_or(10.0),
@@ -1816,6 +2073,8 @@ impl Plugin for ProbeQuestPlugin {
             stuck_on: HashMap::new(),
             left_target: None,
             done: Vec::new(),
+            jumped: -10.0,
+            trained: 0,
             walking: false,
             level: 0,
             kills: 0,
@@ -1826,12 +2085,14 @@ impl Plugin for ProbeQuestPlugin {
             last_summary: 0.0,
         })
         .insert_resource(BotLua {
+            items: items_lua,
             hp_pool: env_f32("WOW_PROBE_QUEST_HP").unwrap_or(5000.0) as u32,
             set_up: false,
             pending: false,
             fight: false,
             destroy: false,
             chat: Vec::new(),
+            code: Vec::new(),
             readings: None,
         })
         .init_resource::<BotClick>()
@@ -1918,6 +2179,15 @@ E\t0\t1\nE\t1\t2\nE\t2\t3\n",
         );
         assert_eq!(back.len(), 13, "twelve steps back, then the goal");
         assert_eq!(back.last(), Some(&[50.0, 50.0]));
+    }
+
+    #[test]
+    fn gear_parses_and_becomes_a_lua_table() {
+        let p = Plan::parse("I\t4923\t16\t9.1\t25\t0\t1\nI\t4924\t16\t9.3\t25\t0\t0\n");
+        assert_eq!(p.items[&4923], (16, 9.1, 25, 0, true));
+        assert!(!p.items[&4924].4, "a club the class cannot use");
+        let lua = p.items_lua();
+        assert!(lua.contains("I[4923] = {16, 9.1, 25, 0, true}"), "{lua}");
     }
 
     #[test]
