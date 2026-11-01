@@ -7,6 +7,26 @@ use bevy::prelude::*;
 use crate::thread_qos;
 
 /// `DefaultPlugins` with benilla's engine tuning applied, around the caller's primary window.
+/// The log level: info off iOS. On iOS, warnings: Bevy logs there through `tracing-oslog`, which
+/// makes an `os_activity` and a unified-log entry for every span entered, and the interface enters
+/// several `info_span!`s every frame (`ui_script: tick`, `resolve`, `measure`, `extract`): ~165
+/// log lines a second on the iPad Air 2, and about half its malloc growth over a 25-minute quest
+/// soak (9.5 -> 3.4 MB a minute with them off). `RUST_LOG` still overrides it.
+#[cfg(not(target_os = "ios"))]
+const LOG_LEVEL: bevy::log::Level = bevy::log::Level::INFO;
+#[cfg(target_os = "ios")]
+const LOG_LEVEL: bevy::log::Level = bevy::log::Level::WARN;
+
+/// Per-target directives over [`LOG_LEVEL`]. On iOS, info stays on for what a session is read by:
+/// the memory governor, the `WOW_IOS_PERF` meter, login progress and the probes.
+#[cfg(not(target_os = "ios"))]
+const LOG_FILTER: &str = "wgpu=error,naga=warn";
+#[cfg(target_os = "ios")]
+const LOG_FILTER: &str = "wgpu=error,naga=warn,benilla_world::memory_governor=info,\
+benilla_world::ios_boot=info,\
+benilla_app::glue_session::login=info,benilla_app::run_mode=info,benilla_app::probe_route=info,\
+benilla_app::probe_chat=info,benilla_app::probe_crowd=info,benilla_app::probe_quest=info";
+
 pub fn tuned_default_plugins(primary_window: Window) -> PluginGroupBuilder {
     // iOS: the whole screen. Bevy's default 1280x720 pt window overruns the iPad Air 2's 1024x768.
     #[cfg(target_os = "ios")]
@@ -27,7 +47,8 @@ pub fn tuned_default_plugins(primary_window: Window) -> PluginGroupBuilder {
         // machine. Every shader is embedded (`embedded://<crate>/shaders/…`), so no root is read.
         // Quiet wgpu/naga; the ring keeps the last stderr lines for the crash report (`log_ring`).
         .set(bevy::log::LogPlugin {
-            filter: "wgpu=error,naga=warn".into(),
+            level: LOG_LEVEL,
+            filter: LOG_FILTER.into(),
             custom_layer: |_| Some(Box::new(crate::log_ring::LogRing)),
             ..default()
         })
