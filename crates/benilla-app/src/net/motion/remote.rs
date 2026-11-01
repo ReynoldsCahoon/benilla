@@ -371,7 +371,7 @@ pub(in crate::net) fn extrapolate_remote_units(
             &mut RemoteMotion,
             Option<&UnitSpeeds>,
             Option<&mut crate::creature_anim::BodyTwist>,
-            Has<super::FacingStep>,
+            Option<&super::FacingStep>,
             Has<crate::transport::TransportRider>,
             // Trace-only: joins a `rem` line to its `rly` lines.
             Option<&crate::net::Guid>,
@@ -496,9 +496,9 @@ pub(in crate::net) fn extrapolate_remote_units(
             0.0
         };
         if step.abs() > super::facing::TURN_LATCH_BAND {
-            commands.entity(e).insert(super::FacingStep(step));
-        } else if latched {
-            commands.entity(e).remove::<super::FacingStep>();
+            commands.entity(e).insert(super::FacingStep(Some(step)));
+        } else if latched.is_some_and(|f| f.0.is_some()) {
+            commands.entity(e).insert(super::FacingStep(None));
         }
         rm.wow_pos = pos;
         rm.orientation = orientation;

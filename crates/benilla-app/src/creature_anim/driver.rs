@@ -578,8 +578,11 @@ pub(super) fn drive_animations(
         // A stationary unit easing its yaw reads as turning (`0x607ed0`), so it shuffles, and each
         // return to Stand re-rolls the fidget. Gated like `0x5fce30`: no combat or cast. A positive
         // step is counterclockwise, turning left.
-        if let Some(step) = facing_step.filter(|_| !moving && !engaged && cast_hold.is_none()) {
-            mv.flags |= if step.0 > 0.0 {
+        if let Some(step) = facing_step
+            .and_then(|f| f.0)
+            .filter(|_| !moving && !engaged && cast_hold.is_none())
+        {
+            mv.flags |= if step > 0.0 {
                 move_flags::TURN_LEFT
             } else {
                 move_flags::TURN_RIGHT

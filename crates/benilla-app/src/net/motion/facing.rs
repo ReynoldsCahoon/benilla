@@ -79,9 +79,12 @@ pub(in crate::net) fn smoothed(kind: Option<EntityKind>, active_mover: bool) -> 
 }
 
 /// The signed yaw the facing pump applied this frame (positive turns left), the client's
-/// `0x607ed0` shuffle latch input; removed the frame the body stops moving.
+/// `0x607ed0` shuffle latch input; `None` from the frame the body stops turning. Once on a body it
+/// stays: taking it off and putting it back moved the body between archetypes at every turn, and
+/// the ECS keeps every archetype it makes (wow-optimize FINDINGS, "What the ECS bookkeeping grows
+/// from").
 #[derive(Component)]
-pub(crate) struct FacingStep(pub(crate) f32);
+pub(crate) struct FacingStep(pub(crate) Option<f32>);
 
 /// Which goal-chain row won, for the `face` trace.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -219,7 +222,7 @@ pub(crate) fn drive_display_facing(
     mut transforms: Query<&mut Transform>,
     mut facings: Query<&mut DisplayFacing>,
     // A remote player's latch belongs to the remote facing interp; sweeping it here would fight it.
-    latched: Query<Entity, (With<FacingStep>, Without<RemoteMotion>)>,
+    latched: Query<(Entity, &FacingStep), Without<RemoteMotion>>,
     // A unit that starts moving drops its state, so the next seed reads the pose it stops at.
     ungoverned: Query<Entity, (With<DisplayFacing>, Or<(With<Spline>, With<RemoteMotion>)>)>,
 ) {
@@ -300,14 +303,14 @@ pub(crate) fn drive_display_facing(
         // written to `+0xc94`), not the gap left; folded because a pump may cross the wrap.
         let step = crate::creature_anim::wrap_pi(new - cur);
         if step.abs() > TURN_LATCH_BAND {
-            commands.entity(e).insert(FacingStep(step));
+            commands.entity(e).insert(FacingStep(Some(step)));
             stepping.insert(e);
         }
         trace_face(e, source, goal, cur, new);
     }
-    for e in &latched {
-        if !stepping.contains(&e) {
-            commands.entity(e).remove::<FacingStep>();
+    for (e, step) in &latched {
+        if step.0.is_some() && !stepping.contains(&e) {
+            commands.entity(e).insert(FacingStep(None));
         }
     }
     for e in &ungoverned {
@@ -514,7 +517,12 @@ mod tests {
             ))
             .id();
         let yaw = |app: &App| yaw_of(app.world().entity(npc).get::<Transform>().unwrap().rotation);
-        let step = |app: &App| app.world().entity(npc).get::<FacingStep>().map(|f| f.0);
+        let step = |app: &App| {
+            app.world()
+                .entity(npc)
+                .get::<FacingStep>()
+                .and_then(|f| f.0)
+        };
 
         app.update(); // the seeding frame
         app.world_mut()
@@ -555,8 +563,16 @@ mod tests {
             "the latch outlives the old ~3° stand-in — that gap IS the missing half of the shuffle"
         );
         assert!(
-            !app.world().entity(npc).contains::<FacingStep>(),
+            app.world()
+                .entity(npc)
+                .get::<FacingStep>()
+                .and_then(|f| f.0)
+                .is_none(),
             "and drops once the body stops moving"
+        );
+        assert!(
+            app.world().entity(npc).contains::<FacingStep>(),
+            "as a value: the component stays, so the body keeps its archetype"
         );
     }
 
