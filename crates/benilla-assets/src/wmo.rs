@@ -466,6 +466,8 @@ impl AssetLoader for WmoModelLoader {
             let mut gidx: Vec<u32> = Vec::new();
             accumulate_wmo_group_collision(&gbytes, &mut gpos, &mut gidx);
             if let Some(tris) = group_collision_tris.get_mut(gi as usize) {
+                // Exact: grown a push at a time, a city's lists held up to twice their faces.
+                tris.reserve_exact(gidx.len() / 3);
                 for t in gidx.as_chunks::<3>().0 {
                     if let (Some(&a), Some(&b), Some(&c)) = (
                         gpos.get(t[0] as usize),
@@ -490,6 +492,7 @@ impl AssetLoader for WmoModelLoader {
             let (mut dpos, mut didx): (Vec<[f32; 3]>, Vec<u32>) = (Vec::new(), Vec::new());
             accumulate_wmo_group_camera_only_collision(&gbytes, &mut dpos, &mut didx);
             if let Some(tris) = group_camera_only_tris.get_mut(gi as usize) {
+                tris.reserve_exact(didx.len() / 3);
                 for t in didx.as_chunks::<3>().0 {
                     if let (Some(&a), Some(&b), Some(&c)) = (
                         dpos.get(t[0] as usize),
