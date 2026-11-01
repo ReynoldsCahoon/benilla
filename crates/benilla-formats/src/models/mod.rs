@@ -43,8 +43,11 @@ fn remap_submesh(
     emissive: bool,
 ) -> (RenderSubmesh, Vec<u32>) {
     let mut map: HashMap<u32, u32> = HashMap::new();
-    let (mut positions, mut normals, mut uvs, mut indices, mut vertex_colors) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    // Sized, then trimmed: grown a push at a time these held up to twice the mesh, which a city
+    // WMO loaded whole (Stormwind, ~50 MB of geometry) carried for its whole stay.
+    let mut indices = Vec::with_capacity(global_indices.size_hint().0);
+    let (mut positions, mut normals, mut uvs, mut vertex_colors) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut globals: Vec<u32> = Vec::new();
     for g in global_indices {
         let local = *map.entry(g).or_insert_with(|| {
@@ -58,6 +61,12 @@ fn remap_submesh(
         });
         indices.push(local);
     }
+    indices.shrink_to_fit();
+    positions.shrink_to_fit();
+    normals.shrink_to_fit();
+    uvs.shrink_to_fit();
+    vertex_colors.shrink_to_fit();
+    globals.shrink_to_fit();
     (
         RenderSubmesh {
             positions,
