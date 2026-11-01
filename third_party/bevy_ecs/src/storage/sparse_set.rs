@@ -18,9 +18,14 @@ pub(crate) struct SparseArray<I, V = I> {
 
 /// A space-optimized version of [`SparseArray`] that cannot be changed
 /// after construction.
+///
+/// benilla: its present entries as `(index, value)` pairs sorted by index, found by binary search,
+/// not a dense array as long as the highest index (`BENILLA.md`). Its two users key it by
+/// `ComponentId`, one per archetype and one per table: dense, each cost 8 bytes per component type
+/// the app registers, twice per archetype.
 #[derive(Debug)]
 pub(crate) struct ImmutableSparseArray<I, V = I> {
-    values: Box<[Option<V>]>,
+    entries: Box<[(u32, V)]>,
     marker: PhantomData<I>,
 }
 
@@ -63,7 +68,33 @@ macro_rules! impl_sparse_array {
 }
 
 impl_sparse_array!(SparseArray);
-impl_sparse_array!(ImmutableSparseArray);
+
+impl<I: SparseSetIndex, V> ImmutableSparseArray<I, V> {
+    #[inline]
+    fn find(&self, index: I) -> Option<usize> {
+        let index = index.sparse_set_index();
+        self.entries
+            .binary_search_by(|(key, _)| (*key as usize).cmp(&index))
+            .ok()
+    }
+
+    /// Returns `true` if the collection contains a value for the specified `index`.
+    #[inline]
+    pub fn contains(&self, index: I) -> bool {
+        self.find(index).is_some()
+    }
+
+    /// Returns a reference to the value at `index`.
+    ///
+    /// Returns `None` if `index` does not have a value.
+    #[inline]
+    pub fn get(&self, index: I) -> Option<&V> {
+        self.find(index).map(|at| {
+            // SAFETY: `find` returns a position in `entries`.
+            unsafe { &self.entries.get_unchecked(at).1 }
+        })
+    }
+}
 
 impl<I: SparseSetIndex, V> SparseArray<I, V> {
     /// Inserts `value` at `index` in the array.
@@ -107,8 +138,18 @@ impl<I: SparseSetIndex, V> SparseArray<I, V> {
 
     /// Converts the [`SparseArray`] into an immutable variant.
     pub(crate) fn into_immutable(self) -> ImmutableSparseArray<I, V> {
+        // In index order, so the pairs come out sorted.
+        let entries = self
+            .values
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                let index = u32::try_from(index).expect("sparse index past u32");
+                value.map(|value| (index, value))
+            })
+            .collect();
         ImmutableSparseArray {
-            values: self.values.into_boxed_slice(),
+            entries,
             marker: PhantomData,
         }
     }
@@ -819,6 +860,25 @@ mod tests {
 
         *set.get_mut(e1).unwrap() = Foo(11);
         assert_eq!(set.get(e1), Some(&Foo(11)));
+    }
+
+    #[test]
+    fn an_immutable_sparse_set_finds_what_was_inserted_and_keeps_only_its_entries() {
+        let mut set = SparseSet::<usize, Foo>::default();
+        for index in [4000, 3, 17, 0, 2500] {
+            set.insert(index, Foo(index));
+        }
+        let set = set.into_immutable();
+        for index in [4000, 3, 17, 0, 2500] {
+            assert!(set.contains(index));
+            assert_eq!(set.get(index), Some(&Foo(index)));
+        }
+        for index in [1, 2, 16, 18, 2499, 3999, 4001, 1 << 20] {
+            assert!(!set.contains(index));
+            assert_eq!(set.get(index), None);
+        }
+        assert_eq!(set.len(), 5);
+        assert_eq!(set.sparse.entries.len(), 5);
     }
 
     #[test]
