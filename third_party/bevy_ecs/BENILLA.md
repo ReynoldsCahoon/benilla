@@ -41,5 +41,23 @@ Measured (Mac, the quest bot 600 s, heap sampler at 570 s, stock vs patched buil
 `Archetypes` and sparse sets together 66.3 MB over 1837 archetypes (36 KB each) vs 29.3 MB over
 1953 (15 KB each).
 
+## The patch — tables give back capacity they no longer use
+
+A `Table`'s columns grow to the most entities it ever held and never shrink: `Table::reserve`
+reallocates up, nothing reallocates down. A table that held a city's units keeps their columns
+after they despawn. On the iPad Air 2's teleport soak (a `.tele` every 30 s across both
+continents) tables reached 76 / 96 MB at ten minutes, against 28-35 MB after 30 minutes of
+questing, and the footprint's floor rose ~20 MB per hop until a load went over the kill.
+
+`Table::shrink` (`src/storage/table/mod.rs`) drops a table that is at most a quarter full to twice
+its live rows (`realloc_columns`, under the same abort-on-unwind guard as growth), and an empty one
+to no allocation at all (`Column::drop` with length 0, `entities` replaced by an empty `Vec`; the
+next insert takes `reserve`'s capacity-0 path, as for a new table). `Tables::shrink` runs it on
+every table, and `World::shrink_tables` (`src/world/mod.rs`) exposes it; nothing calls it inside
+Bevy: benilla calls it every 2 s (`benilla-world`'s `table_trim`).
+Test: `storage::table::tests::a_shrunk_table_keeps_its_rows_and_an_emptied_one_frees_and_refills`.
+Measured (Mac, 20 teleports 20 s apart, heap sampler at 465 s, one build, the call off vs on):
+`bevy_ecs::storage::table` 90.1 MB vs 10.2 MB; total sampled heap 624.6 vs 550.7 MB.
+
 Check: `diff -r <registry>/bevy_ecs-0.18.1 third_party/bevy_ecs` shows only those lines and this
 file.

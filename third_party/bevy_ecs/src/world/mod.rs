@@ -147,6 +147,14 @@ impl Drop for World {
 }
 
 impl World {
+    /// Benilla: hands back the table capacity no entity uses any more ([`Table::shrink`]); stock
+    /// tables never shrink. Cheap enough to call every few seconds (a length check per table).
+    ///
+    /// [`Table::shrink`]: crate::storage::Table
+    pub fn shrink_tables(&mut self) {
+        self.storages.tables.shrink();
+    }
+
     /// This performs initialization that _must_ happen for every [`World`] immediately upon creation (such as claiming specific component ids).
     /// This _must_ be run as part of constructing a [`World`], before it is returned to the caller.
     #[inline]

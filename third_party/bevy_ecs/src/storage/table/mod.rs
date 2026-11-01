@@ -538,6 +538,42 @@ impl Table {
         }
     }
 
+    /// Benilla: gives back the column capacity a table no longer uses. Once at most a quarter of
+    /// its rows are in use, the table drops to twice its live rows, and to no allocation at all
+    /// when empty (the next insert allocates as for a new table). Stock tables only grow: a table
+    /// that held a city's units keeps their columns after the units leave, which on a teleport-
+    /// heavy session became the largest ECS cost (wow-optimize FINDINGS).
+    pub(crate) fn shrink(&mut self) {
+        let len = self.entity_count() as usize;
+        let cap = self.capacity();
+        if cap == 0 || len > cap / 4 {
+            return;
+        }
+        if len == 0 {
+            // Same unwind rule as the (re)allocations: a half-freed table must not be dropped.
+            let _guard = AbortOnPanic;
+            for col in self.columns.values_mut() {
+                // SAFETY: `cap` is the columns' capacity and `len` (0) their length; the column is
+                // reused only through `alloc_columns`, which `reserve` takes once the capacity is 0.
+                unsafe { col.drop(cap, 0) };
+            }
+            core::mem::forget(_guard);
+            self.entities = Vec::new();
+            return;
+        }
+        self.entities.shrink_to(len * 2);
+        let new_capacity = self.entities.capacity();
+        if new_capacity < cap {
+            // SAFETY: `cap` is the columns' capacity, and `len <= new_capacity < cap`, both > 0.
+            unsafe {
+                self.realloc_columns(
+                    NonZeroUsize::new_unchecked(cap),
+                    NonZeroUsize::new_unchecked(new_capacity),
+                );
+            }
+        }
+    }
+
     /// Allocate memory for the columns in the [`Table`]
     ///
     /// # Panics
@@ -829,6 +865,13 @@ impl Tables {
         }
     }
 
+    /// Benilla: [`Table::shrink`] on every table.
+    pub(crate) fn shrink(&mut self) {
+        for table in &mut self.tables {
+            table.shrink();
+        }
+    }
+
     pub(crate) fn check_change_ticks(&mut self, check: CheckChangeTicks) {
         for table in &mut self.tables {
             table.check_change_ticks(check);
@@ -925,5 +968,67 @@ mod tests {
 
         assert_eq!(table.entity_capacity(), 256);
         assert_eq!(table.entity_count(), 200);
+    }
+
+    #[test]
+    fn a_shrunk_table_keeps_its_rows_and_an_emptied_one_frees_and_refills() {
+        let mut components = Components::default();
+        let mut componentids = ComponentIds::default();
+        // SAFETY: They are both new.
+        let mut registrator =
+            unsafe { ComponentsRegistrator::new(&mut components, &mut componentids) };
+        let component_id = registrator.register_component::<W<alloc::string::String>>();
+        let mut table = TableBuilder::with_capacity(0, 1)
+            .add_column(components.get_info(component_id).unwrap())
+            .build();
+        let fill = |table: &mut crate::storage::Table, range: core::ops::Range<u32>| {
+            for index in range {
+                let entity = Entity::from_index(EntityIndex::from_raw_u32(index).unwrap());
+                // SAFETY: we allocate and immediately set data afterwards
+                unsafe {
+                    let row = table.allocate(entity);
+                    OwningPtr::make(W(alloc::format!("{index}")), |value_ptr| {
+                        table.get_column_mut(component_id).unwrap().initialize(
+                            row,
+                            value_ptr,
+                            Tick::new(0),
+                            MaybeLocation::caller(),
+                        );
+                    });
+                }
+            }
+        };
+        let read = |table: &crate::storage::Table, row: u32| {
+            // SAFETY: the row is in bounds and the column holds `W<String>`.
+            unsafe {
+                table
+                    .get_column(component_id)
+                    .unwrap()
+                    .get_data_unchecked(TableRow::new(row.try_into().unwrap()))
+                    .deref::<W<alloc::string::String>>()
+                    .0
+                    .clone()
+            }
+        };
+        fill(&mut table, 0..200);
+        table.shrink();
+        assert_eq!(table.entity_capacity(), 256, "a full table keeps its capacity");
+        while table.entity_count() > 3 {
+            let last = table.entity_count() - 1;
+            // SAFETY: `last` is in bounds.
+            unsafe { table.swap_remove_unchecked(TableRow::new(last.try_into().unwrap())) };
+        }
+        table.shrink();
+        assert!(table.entity_capacity() < 256);
+        assert!(table.entity_capacity() >= 3);
+        assert_eq!((read(&table, 0), read(&table, 2)), ("0".into(), "2".into()));
+        while table.entity_count() > 0 {
+            // SAFETY: row 0 is in bounds.
+            unsafe { table.swap_remove_unchecked(TableRow::new(0u32.try_into().unwrap())) };
+        }
+        table.shrink();
+        assert_eq!(table.entity_capacity(), 0, "an empty table holds no allocation");
+        fill(&mut table, 0..5);
+        assert_eq!(read(&table, 4), "4", "and refills like a new table");
     }
 }
