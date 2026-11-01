@@ -608,7 +608,20 @@ function BenillaBot.Button(i)
   local b = getglobal(prefix .. i)
   return b, b and ActionButton_GetPagedID(b)
 end
+-- Tab (the TARGETNEARESTENEMY binding's TargetNearestEnemy) until the target is the kind of mob
+-- the bot is after, as a player tabs to a mob ahead before closing in.
+function BenillaBot.Tab(want)
+  for i = 1, 5 do
+    if UnitExists("target") and UnitName("target") == want and not UnitIsDead("target") then
+      return true
+    end
+    TargetNearestEnemy()
+  end
+  return UnitExists("target") and UnitName("target") == want
+end
 function BenillaBot.Fight()
+  -- Tab only before a fight: in combat it would hop to another enemy.
+  if BenillaBot.want and not UnitAffectingCombat("player") then BenillaBot.Tab(BenillaBot.want) end
   if not UnitExists("target") or UnitIsDead("target") or not UnitCanAttack("player", "target") then
     return ""
   end
@@ -939,6 +952,7 @@ struct Seen {
     attacking_me: bool,
     npc_flags: u32,
     status: Option<u32>,
+    level: u32,
 }
 
 fn env_f32(name: &str) -> Option<f32> {
@@ -1008,6 +1022,11 @@ fn look(
                 attacking_me: creature && f.unit_target() == Some(me) && !f.unit_is_dead(),
                 npc_flags: if creature { f.unit_npc_flags() } else { 0 },
                 status: quest_giver.and_then(|q| q.status(guid.0)),
+                level: if creature {
+                    f.unit_level().unwrap_or(0)
+                } else {
+                    0
+                },
             })
         })
         .collect()
@@ -1188,9 +1207,17 @@ fn drive_quest_bot(
                         }
                     }
                 }
-                // In melee, the bar; at 8-25 yd too, where a warrior's Charge reaches (the melee
-                // abilities are out of range there and stay unpressed).
-                if d <= MELEE_YD + 1.0 || (8.0..25.0).contains(&d) {
+                // Within 25 yd: Tab to it and the bar, so a warrior's Charge (8-25 yd) fires on
+                // the run (the melee abilities are out of range there and stay unpressed).
+                if d <= 25.0 {
+                    // Out of combat, Tab to it first (Charge needs a target and no combat); in
+                    // combat, keep the target.
+                    let want = if combat {
+                        "nil".to_string()
+                    } else {
+                        format!("{:?}", name_of(&bot.plan, t))
+                    };
+                    lua.code.push(format!("BenillaBot.want = {want}"));
                     lua.fight = true;
                 }
                 // Right-click to attack whenever auto-attack is off (a fresh target, or one that
@@ -1243,6 +1270,35 @@ fn drive_quest_bot(
         return;
     }
 
+    // On the way somewhere (not fighting, not in combat): a hostile creature close ahead is taken
+    // on first, as a player tabs to it and charges rather than letting it aggro from behind.
+    if !combat && matches!(bot.goal, Goal::Walk { .. } | Goal::Use { .. }) {
+        let facing = player.facing();
+        if let Some(m) = nearest(&seen, here, |s| {
+            let d = dist2(here, [s.at[0], s.at[1]]);
+            let off = (yaw_toward(here, [s.at[0], s.at[1]]) - facing + std::f32::consts::PI)
+                .rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            s.kind == Kind::Creature
+                && !s.dead
+                && s.npc_flags == 0
+                && !s.tapped_by_other
+                && d <= 20.0
+                && off.abs() < 60f32.to_radians()
+                && s.level <= level + 2
+                && !bot.aside.contains_key(&s.guid)
+                && afoot(&bot, (s.guid as i64, 0), here, [s.at[0], s.at[1]], now)
+        }) {
+            let why = format!("in the way: {}", name_of(&bot.plan, m));
+            let goal = Goal::Fight {
+                entity: m.entity,
+                guid: m.guid,
+                why,
+            };
+            set_goal(&mut bot, goal, now, &mut binds);
+            return;
+        }
+    }
     // A goal in progress: click when there, else keep walking (movement above).
     match bot.goal.clone() {
         Goal::Use {
