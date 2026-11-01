@@ -511,6 +511,14 @@ pub(super) fn play_kit_ext(
         return Ok(false);
     }
 
+    // No audio device (`WOW_NOSOUND=1`, CI, a lost device): nothing can be heard, so nothing is
+    // read or decoded, as the emitter pool and zone beds already skip. Decoding anyway filled the
+    // cache with every kit met (~12 MB over a 25-minute iPad quest) for a play that is dropped
+    // below. The gates above still run, so the depleting pick advances as it would with a device.
+    if out.mixer.is_none() {
+        return Ok(false);
+    }
+
     // Decode (cached).
     let data = kits.sfx(assets, &path)?;
 
