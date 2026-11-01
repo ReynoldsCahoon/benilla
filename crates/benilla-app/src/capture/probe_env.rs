@@ -185,6 +185,27 @@ pub(crate) const PROBE_VARS: &[ProbeVar] = &[
         wall_clock: false,
     },
     ProbeVar {
+        name: "WOW_PROBE_QUEST",
+        purpose: "<plan file> — a bot that plays the character through a starting zone's quests (the plan from wow-optimize's questplan.py)",
+        // Its start, fight and stuck clocks run on `ProbeClock`.
+        wall_clock: true,
+    },
+    ProbeVar {
+        name: "WOW_PROBE_QUEST_AT",
+        purpose: "<secs> — when the quest bot starts after world entry (default 10)",
+        wall_clock: true,
+    },
+    ProbeVar {
+        name: "WOW_PROBE_QUEST_HP",
+        purpose: "<n> — the quest bot's health pool before it rests (default 5000)",
+        wall_clock: false,
+    },
+    ProbeVar {
+        name: "WOW_PROBE_QUEST_SECS",
+        purpose: "<secs> — exit the quest bot's run after this long (default never)",
+        wall_clock: true,
+    },
+    ProbeVar {
         name: "WOW_PROBE_CROWD",
         purpose: "\"<n>[,<n>…]\" — a synthetic player crowd around the probe, its cumulative size at each step (memory tests)",
         wall_clock: true,

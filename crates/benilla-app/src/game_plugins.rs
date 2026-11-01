@@ -1809,6 +1809,8 @@ pub(crate) mod schedule_tests {
          "the drag probe: dev-only (`WOW_PROBE_DRAG`), it starts past `WOW_PROBE_DRAG_AT` with the \
           player's body in the world, and its `.drain(..)` is of the VM's own script errors, \
           raised by the gesture it just made"),
+        ("capture/probe_quest.rs", "run_bot_lua", Because::Deliberate,
+         "the quest bot's Lua half: dev-only, registered only when `WOW_PROBE_QUEST` names a plan, so this schedule never holds it; where it is registered it runs only with the interface up (`.run_if(ingame_ui_up)`), and what it takes is the bot's own asks"),
         ("death/mod.rs", "feed_death", Because::MemoLatched,
          "`feed.vm: VmMemo<DeathAnnounced>`: a fresh memo takes the first snapshot as no edge and re-announces a held offer, confirm and corpse range, and skips the edges of our create's frame, whose arrival item signals the state itself"),
         ("death/mod.rs", "signal", Because::MemoLatched,

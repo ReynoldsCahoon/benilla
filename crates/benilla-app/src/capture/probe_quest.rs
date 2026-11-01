@@ -2386,7 +2386,8 @@ impl Plugin for ProbeQuestPlugin {
             Update,
             run_bot_lua
                 .after(drive_quest_bot)
-                .in_set(crate::client_state::InWorldGated),
+                .in_set(crate::client_state::InWorldGated)
+                .run_if(crate::ui_script::ingame_ui_up),
         );
     }
 }
