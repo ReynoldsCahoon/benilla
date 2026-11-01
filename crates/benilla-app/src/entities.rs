@@ -584,21 +584,23 @@ fn sweep_display_cache<C, K: Copy + Eq + std::hash::Hash>(
 
 /// Expire composited skins by distance within a map, and by use too while the memory governor is
 /// short (a crowd stands near, so distance never frees a skin there). The display-id model caches
-/// sweep by use instead, in [`update_display_models`]; the merged body forms only under pressure.
+/// sweep by use instead, in [`update_display_models`], and the merged body forms by use with the
+/// same grace.
 fn scope_entity_art(
     mut scope: benilla_world::art_scope::ArtScope,
     mut composites: ResMut<SkinComposites>,
     mut merged: ResMut<attach::MergedFormsCache>,
+    time: Res<Time<bevy::time::Real>>,
 ) {
     scope.apply_pressed(
         &mut composites.done,
         benilla_world::art_scope::ArtSlot::Skins,
     );
-    if scope.due()
-        && benilla_world::memory_governor::tier()
-            >= benilla_world::memory_governor::MemoryTier::Tight
-    {
-        merged.drop_unheld();
+    if scope.due() {
+        merged.drop_unheld(
+            time.elapsed_secs(),
+            benilla_world::art_scope::unused_grace(),
+        );
     }
 }
 

@@ -177,24 +177,33 @@ pub(in crate::entities) struct MergedForms {
 }
 
 /// Merged forms keyed by (the first member's geometry `Arc`, the member set): one model's one
-/// silhouette, shared by every unit of that display. Cleared whole past [`MERGED_FORMS_CAP`].
+/// silhouette, shared by every unit of that display. Cleared whole past [`MERGED_FORMS_CAP`]. Each
+/// entry carries the real-clock second it was first seen unheld (`None` while a drawn part holds
+/// it), for [`Self::drop_unheld`]'s grace.
 #[derive(Resource, Default)]
-pub(crate) struct MergedFormsCache(HashMap<(usize, Vec<u32>), MergedForms>);
+pub(crate) struct MergedFormsCache(HashMap<(usize, Vec<u32>), (MergedForms, Option<f32>)>);
 
 const MERGED_FORMS_CAP: usize = 1024;
 
 impl MergedFormsCache {
-    /// Drop the groups no drawn part holds, whose meshes only this cache keeps alive: the memory
-    /// governor's sweep, since a crowd's bodies almost never share a group and a torn-down body's
-    /// forms would otherwise stay until the cap clears the cache.
-    pub(in crate::entities) fn drop_unheld(&mut self) {
+    /// Drop the groups no drawn part has held for `grace` seconds, whose meshes only this cache
+    /// keeps alive: a torn-down body's forms would otherwise stay until the cap clears the cache,
+    /// and a teleport tears down every body in view (wow-optimize FINDINGS, "Teleports keep the
+    /// tables"). `grace` is the display caches' [`benilla_world::art_scope::unused_grace`]: long
+    /// enough that a despawn and respawn reuses the forms, none while memory is short.
+    pub(in crate::entities) fn drop_unheld(&mut self, now: f32, grace: f32) {
         use benilla_world::art_scope::HeldValue;
         let before = self.0.len();
-        self.0.retain(|_, f| {
-            f.static_mesh.held_elsewhere()
+        self.0.retain(|_, (f, unheld_since)| {
+            let held = f.static_mesh.held_elsewhere()
                 || f.skinned_mesh
                     .as_ref()
-                    .is_some_and(HeldValue::held_elsewhere)
+                    .is_some_and(HeldValue::held_elsewhere);
+            if held {
+                *unheld_since = None;
+                return true;
+            }
+            now - *unheld_since.get_or_insert(now) < grace
         });
         if self.0.len() < before {
             debug!(
@@ -222,7 +231,7 @@ impl MergedFormsCache {
             };
         }
         let key = (Arc::as_ptr(&first.geometry) as usize, group.members.clone());
-        if let Some(f) = self.0.get(&key) {
+        if let Some((f, _)) = self.0.get(&key) {
             return f.clone();
         }
         if self.0.len() >= MERGED_FORMS_CAP {
@@ -248,7 +257,7 @@ impl MergedFormsCache {
             skinned_mesh: skinned,
             aabb,
         };
-        self.0.insert(key, forms.clone());
+        self.0.insert(key, (forms.clone(), None));
         forms
     }
 }
@@ -312,6 +321,45 @@ pub(in crate::entities) fn guard_groups(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unheld group stays through the grace (a despawn and respawn reuses it) and drops after;
+    /// a held one never does, and holding it again restarts its clock. Grace 0 (memory short)
+    /// drops at the first sweep, as the governor's sweep did.
+    #[test]
+    fn unheld_merged_forms_drop_after_the_grace_and_held_ones_stay() {
+        let mut meshes = Assets::<Mesh>::default();
+        let mut forms = |x: f32| MergedForms {
+            geometry: Arc::new(tri(x)),
+            static_mesh: meshes.add(benilla_assets::submesh_to_static_mesh(&tri(x))),
+            skinned_mesh: None,
+            aabb: None,
+        };
+        let mut cache = MergedFormsCache::default();
+        let (held, gone) = (forms(0.0), forms(1.0));
+        let drawn = held.static_mesh.clone();
+        cache.0.insert((1, vec![0, 1]), (held, None));
+        cache.0.insert((2, vec![0, 1]), (gone, None));
+
+        cache.drop_unheld(100.0, 60.0);
+        cache.drop_unheld(159.0, 60.0);
+        assert_eq!(cache.0.len(), 2, "inside the grace both stay");
+        cache.drop_unheld(160.0, 60.0);
+        assert!(
+            cache.0.contains_key(&(1, vec![0, 1])),
+            "a drawn group stays"
+        );
+        assert!(
+            !cache.0.contains_key(&(2, vec![0, 1])),
+            "an unheld one drops"
+        );
+
+        drop(drawn);
+        cache.drop_unheld(161.0, 0.0);
+        assert!(
+            cache.0.is_empty(),
+            "with no grace an unheld group drops at once"
+        );
+    }
 
     fn tri(x: f32) -> RenderSubmesh {
         RenderSubmesh {
