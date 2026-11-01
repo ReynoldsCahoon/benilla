@@ -88,6 +88,7 @@ fn remap_submesh(
             fog_policy: FogPolicy::Scene,
             billboard: None,
             welded_billboard: false,
+            pick_skip: false,
             alpha_anim: None,
             uv_anim: None,
             uv_seq: None,

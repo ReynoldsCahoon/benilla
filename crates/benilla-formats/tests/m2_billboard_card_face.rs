@@ -109,6 +109,7 @@ fn the_shape_ignores_edge_on_correct_and_degenerate_batches() {
             seq_translations: vec![],
         }),
         welded_billboard: false,
+        pick_skip: false,
         alpha_anim: None,
         uv_anim: None,
         uv_seq: None,

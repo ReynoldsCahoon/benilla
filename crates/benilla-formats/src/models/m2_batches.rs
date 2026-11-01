@@ -601,6 +601,7 @@ pub fn parse_m2_render_submeshes(
             sub.uv_scale_seq = uv_scale_seq.clone();
             sub.rgb_anim = rgb_anim.clone();
             sub.rgb_seq = rgb_seq.clone();
+            sub.pick_skip = batch.flags & 0x08 != 0;
             out.push(sub);
         }
     }

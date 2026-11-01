@@ -354,6 +354,10 @@ pub struct RenderSubmesh {
     /// Geometry on a billboard bone the card split refused: the reference blends it per vertex, so
     /// only a skinned draw bends it.
     pub welded_billboard: bool,
+    /// M2 texture-unit flag `0x08`: the model ray (`0x7089c0`, modes 1 and 2: the mouse pick and
+    /// the doodad occluders) skips this batch (`0x70902f`). `LD_lightshaft02`'s beam carries it,
+    /// so Thazz'ril's Pick under its aura stays clickable.
+    pub pick_skip: bool,
     /// Time-varying colour-alpha and transparency-weight loops ([`mat_anim`](super::mat_anim)),
     /// multiplied into the render alpha as the reference combines them (`0x707680`).
     pub alpha_anim: Option<AlphaAnim>,
@@ -462,6 +466,7 @@ impl Default for RenderSubmesh {
             fog_policy: FogPolicy::Scene,
             billboard: None,
             welded_billboard: false,
+            pick_skip: false,
             alpha_anim: None,
             uv_anim: None,
             uv_seq: None,

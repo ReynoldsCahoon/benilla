@@ -314,6 +314,10 @@ fn ray_submesh(
     dir: Vec3,
     inflate: bool,
 ) -> Option<RayHit> {
+    // A texture unit with flag `0x08` is never tested (`0x70902f`), in either pass.
+    if geo.pick_skip {
+        return None;
+    }
     if inflate && geo.normals.len() != geo.positions.len() {
         return None; // no authored normals, no halo
     }
@@ -612,6 +616,28 @@ mod tests {
         assert!(hit.point.abs_diff_eq(Vec3::new(10.0, 1.0, 0.0), 1e-4));
         assert!(hit.normal.abs_diff_eq(Vec3::Y, 1e-4) || hit.normal.abs_diff_eq(-Vec3::Y, 1e-4));
         assert!(ray_submesh(&mesh.0, &gt, Vec3::new(20.0, 6.0, 0.0), Vec3::NEG_Y, false).is_none());
+    }
+
+    /// A texture unit with flag `0x08` (`0x70902f`) is never hit, in either pass: a light shaft
+    /// over a quest object (Thazz'ril's Pick's aura) must not swallow the cursor.
+    #[test]
+    fn a_flag_8_texture_unit_is_never_hit() {
+        let geo = RenderSubmesh {
+            pick_skip: true,
+            normals: vec![[0.0, -1.0, 0.0]; 3],
+            ..wow_tri()
+        };
+        let gt = GlobalTransform::IDENTITY;
+        for inflate in [false, true] {
+            assert!(
+                ray_submesh(&geo, &gt, Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y, inflate).is_none()
+            );
+        }
+        let shown = RenderSubmesh {
+            pick_skip: false,
+            ..geo
+        };
+        assert!(ray_submesh(&shown, &gt, Vec3::new(0.0, 5.0, 0.0), Vec3::NEG_Y, false).is_some());
     }
 
     /// [`wow_tri`] with every normal model-local Bevy `+X` (WoW `(0, −1, 0)`): the inflated pass

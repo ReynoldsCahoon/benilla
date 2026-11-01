@@ -762,6 +762,7 @@ fn warm_quad(colors: bool, skinned: bool) -> RenderSubmesh {
         rgb_seq: None,
         wmo_batch: None,
         section: None,
+        pick_skip: false,
     }
 }
 
