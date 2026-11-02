@@ -125,6 +125,10 @@ pub fn wmo_group_footprint_tris(group_bytes: &[u8]) -> Option<FootprintTris> {
         mopy_flags.push(flags);
         mopy_material.push(group.material_info.get(ti).map_or(0xFF, |m| m.material_id));
     }
+    // Trimmed: grown a face at a time, a city's interiors held up to twice their faces.
+    indices.shrink_to_fit();
+    mopy_flags.shrink_to_fit();
+    mopy_material.shrink_to_fit();
     Some(FootprintTris {
         positions: group
             .vertex_positions
