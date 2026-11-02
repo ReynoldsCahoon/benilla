@@ -6,9 +6,12 @@
 
 use bevy::ecs::change_detection::Tick;
 use bevy::ecs::query::FilteredAccessSet;
+use bevy::ecs::resource::Resource;
 use bevy::ecs::system::{SystemMeta, SystemParam, SystemParamItem, SystemParamValidationError};
 use bevy::ecs::world::unsafe_world_cell::UnsafeWorldCell;
 use bevy::ecs::world::{DeferredWorld, World};
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 /// Gather the access of `P`, one member of a set, alone, check it against what the system holds
 /// outside the set, as `ParamSet` does, and add it to `gathered`. Members may conflict with one
@@ -32,20 +35,102 @@ pub(crate) fn gather<P: SystemParam>(
     gathered.extend(alone);
 }
 
+/// Where a set keeps its member states ([`SetKind`]): `Flag<false>` in each holding system,
+/// `Flag<true>` (a `shared` set) as one copy per world that every holder lends in turn. The call
+/// host's appliers are held by every system that runs Lua, and each copy of their states holds
+/// hundreds of queries, each with its own access bitsets and its own list of the archetypes it
+/// matches, grown by every new archetype. Their members keep nothing of a holder's own (no
+/// `Commands`, no message cursors; their `Local`s are memos keyed on what they read), so one copy
+/// answers every holder alike. Holders never run at once (the set writes, so Bevy orders them
+/// apart), and a lend while another is out panics.
+pub(crate) struct Flag<const SHARED: bool>;
+
+/// How a set keeps and lends its member states ([`Flag`]).
+pub(crate) trait SetKind {
+    type States<T: Send + Sync + 'static>: Send + Sync + 'static;
+    type Lend<'s, T: Send + Sync + 'static>: DerefMut<Target = T>;
+    type Peek<'s, T: Send + Sync + 'static>: Deref<Target = T>;
+    /// The states for a new holder, built by `make` where none are kept yet.
+    fn init<T: Send + Sync + 'static>(
+        world: &mut World,
+        make: impl FnOnce(&mut World) -> T,
+    ) -> Self::States<T>;
+    /// The states, lent to this holder alone while the lend lives.
+    fn lend<T: Send + Sync + 'static>(states: &mut Self::States<T>) -> Self::Lend<'_, T>;
+    /// The states, read.
+    fn peek<T: Send + Sync + 'static>(states: &Self::States<T>) -> Self::Peek<'_, T>;
+}
+
+impl SetKind for Flag<false> {
+    type States<T: Send + Sync + 'static> = T;
+    type Lend<'s, T: Send + Sync + 'static> = &'s mut T;
+    type Peek<'s, T: Send + Sync + 'static> = &'s T;
+    fn init<T: Send + Sync + 'static>(world: &mut World, make: impl FnOnce(&mut World) -> T) -> T {
+        make(world)
+    }
+    fn lend<T: Send + Sync + 'static>(states: &mut T) -> &mut T {
+        states
+    }
+    fn peek<T: Send + Sync + 'static>(states: &T) -> &T {
+        states
+    }
+}
+
+/// The one copy of a shared set's states in a world.
+#[derive(Resource)]
+struct SharedStates<T: Send + 'static>(Arc<Mutex<T>>);
+
+impl SetKind for Flag<true> {
+    type States<T: Send + Sync + 'static> = Arc<Mutex<T>>;
+    type Lend<'s, T: Send + Sync + 'static> = MutexGuard<'s, T>;
+    type Peek<'s, T: Send + Sync + 'static> = MutexGuard<'s, T>;
+    fn init<T: Send + Sync + 'static>(
+        world: &mut World,
+        make: impl FnOnce(&mut World) -> T,
+    ) -> Arc<Mutex<T>> {
+        if let Some(copy) = world.get_resource::<SharedStates<T>>() {
+            return copy.0.clone();
+        }
+        let copy = Arc::new(Mutex::new(make(world)));
+        world.insert_resource(SharedStates(copy.clone()));
+        copy
+    }
+    fn lend<T: Send + Sync + 'static>(states: &mut Arc<Mutex<T>>) -> MutexGuard<'_, T> {
+        lock(states)
+    }
+    fn peek<T: Send + Sync + 'static>(states: &Arc<Mutex<T>>) -> MutexGuard<'_, T> {
+        lock(states)
+    }
+}
+
+/// A shared set's copy, which no other holder has out: two at once would be one system's
+/// states lent twice.
+fn lock<T>(copy: &Mutex<T>) -> MutexGuard<'_, T> {
+    match copy.try_lock() {
+        Ok(states) => states,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => {
+            panic!("a shared set's states lent to two holders at once")
+        }
+    }
+}
+
 /// A set of named members that may conflict with one another, lent one at a time through a
 /// method of the member's name, each member's access gathered once ([`gather`]). Each member's
 /// type is written with `'static` lifetimes; its method lends it for the borrow of the set. A
-/// member may carry one `cfg` after its docs.
+/// member may carry one `cfg` after its docs. After the state's name, `watched` marks a set the
+/// census watches, and `; shared` (after any `watched`) one whose holders share one copy of its
+/// member states ([`Flag`]).
 macro_rules! disjoint_set {
     (
         $(#[$meta:meta])*
-        $vis:vis struct $name:ident, $state:ident $(, $watched:ident)? {
+        $vis:vis struct $name:ident, $state:ident $(, $watched:ident)? $(; $shared:ident)? {
             $($(#[doc = $doc:literal])* $(#[cfg($cfg:meta)])? $field:ident: $ty:ty,)*
         }
     ) => {
         $(#[$meta])*
         $vis struct $name<'w, 's> {
-            states: &'s mut $state,
+            states: <crate::script_calls::disjoint::Flag<{ $state::SHARED }> as crate::script_calls::disjoint::SetKind>::Lend<'s, $state>,
             meta: bevy::ecs::system::SystemMeta,
             world: bevy::ecs::world::unsafe_world_cell::UnsafeWorldCell<'w>,
             change_tick: bevy::ecs::change_detection::Tick,
@@ -59,20 +144,25 @@ macro_rules! disjoint_set {
             $($(#[cfg($cfg)])? $field: <$ty as bevy::ecs::system::SystemParam>::State,)*
         }
 
+        impl $state {
+            /// Whether every holder lends one copy of these states ([`crate::script_calls::disjoint::Flag`]).
+            const SHARED: bool = false $(|| { let _ = stringify!($shared); true })?;
+        }
+
         // SAFETY: the set registers every member's access, each checked against what the system
         // holds outside the set ([`crate::script_calls::disjoint::gather`]), and lends one member
         // at a time, through `&mut self`.
         unsafe impl bevy::ecs::system::SystemParam for $name<'_, '_> {
-            type State = $state;
+            type State = <crate::script_calls::disjoint::Flag<{ $state::SHARED }> as crate::script_calls::disjoint::SetKind>::States<$state>;
             type Item<'w, 's> = $name<'w, 's>;
 
             fn init_state(world: &mut bevy::ecs::world::World) -> Self::State {
-                $state {
+                <crate::script_calls::disjoint::Flag<{ $state::SHARED }> as crate::script_calls::disjoint::SetKind>::init(world, |world| $state {
                     $(
                         $(#[cfg($cfg)])?
                         $field: <$ty as bevy::ecs::system::SystemParam>::init_state(world),
                     )*
-                }
+                })
             }
 
             fn init_access(
@@ -81,6 +171,7 @@ macro_rules! disjoint_set {
                 access: &mut bevy::ecs::query::FilteredAccessSet,
                 world: &mut bevy::ecs::world::World,
             ) {
+                let state = &*<crate::script_calls::disjoint::Flag<{ $state::SHARED }> as crate::script_calls::disjoint::SetKind>::peek(state);
                 let mut gathered = bevy::ecs::query::FilteredAccessSet::new();
                 $(
                     $(#[cfg($cfg)])?
@@ -101,6 +192,7 @@ macro_rules! disjoint_set {
                 meta: &bevy::ecs::system::SystemMeta,
                 world: &mut bevy::ecs::world::World,
             ) {
+                let state = &mut *<crate::script_calls::disjoint::Flag<{ $state::SHARED }> as crate::script_calls::disjoint::SetKind>::lend(state);
                 $(
                     $(#[cfg($cfg)])?
                     <$ty as bevy::ecs::system::SystemParam>::apply(&mut state.$field, meta, world);
@@ -112,6 +204,7 @@ macro_rules! disjoint_set {
                 meta: &bevy::ecs::system::SystemMeta,
                 mut world: bevy::ecs::world::DeferredWorld,
             ) {
+                let state = &mut *<crate::script_calls::disjoint::Flag<{ $state::SHARED }> as crate::script_calls::disjoint::SetKind>::lend(state);
                 $($(#[cfg($cfg)])? <$ty as bevy::ecs::system::SystemParam>::queue(
                     &mut state.$field,
                     meta,
@@ -124,6 +217,7 @@ macro_rules! disjoint_set {
                 meta: &bevy::ecs::system::SystemMeta,
                 world: bevy::ecs::world::unsafe_world_cell::UnsafeWorldCell,
             ) -> Result<(), bevy::ecs::system::SystemParamValidationError> {
+                let state = &mut *<crate::script_calls::disjoint::Flag<{ $state::SHARED }> as crate::script_calls::disjoint::SetKind>::lend(state);
                 // SAFETY: upheld by the caller, for every member's access as for the set's.
                 unsafe {
                     $($(#[cfg($cfg)])? <$ty as bevy::ecs::system::SystemParam>::validate_param(
@@ -142,7 +236,7 @@ macro_rules! disjoint_set {
                 change_tick: bevy::ecs::change_detection::Tick,
             ) -> Self::Item<'w, 's> {
                 $name {
-                    states: state,
+                    states: <crate::script_calls::disjoint::Flag<{ $state::SHARED }> as crate::script_calls::disjoint::SetKind>::lend(state),
                     meta: meta.clone(),
                     world,
                     change_tick,
@@ -406,5 +500,55 @@ mod tests {
             |_outside: ResMut<Cell>, _pair: Pair<Res<'static, Cell>, Res<'static, Cell>>| {},
         );
         app.update();
+    }
+
+    #[derive(bevy::ecs::system::SystemParam)]
+    struct Count<'s> {
+        n: Local<'s, u32>,
+    }
+
+    super::disjoint_set! {
+        struct OwnSet, OwnSetState {
+            count: Count<'static>,
+        }
+    }
+
+    super::disjoint_set! {
+        struct SharedSet, SharedSetState; shared {
+            count: Count<'static>,
+        }
+    }
+
+    fn own_bump(mut set: OwnSet) -> u32 {
+        let mut count = set.count();
+        *count.n += 1;
+        *count.n
+    }
+
+    fn shared_bump(mut set: SharedSet) -> u32 {
+        let mut count = set.count();
+        *count.n += 1;
+        *count.n
+    }
+
+    /// What two systems of `bump` read, run in turn twice.
+    fn reads<M>(bump: impl IntoSystem<(), u32, M> + Copy) -> Vec<u32> {
+        let mut world = World::new();
+        let mut a = IntoSystem::into_system(bump);
+        let mut b = IntoSystem::into_system(bump);
+        a.initialize(&mut world);
+        b.initialize(&mut world);
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            seen.push(a.run((), &mut world).unwrap());
+            seen.push(b.run((), &mut world).unwrap());
+        }
+        seen
+    }
+
+    #[test]
+    fn a_shared_sets_holders_lend_one_copy_and_an_own_sets_each_their_own() {
+        assert_eq!(reads(own_bump), [1, 1, 2, 2]);
+        assert_eq!(reads(shared_bump), [1, 2, 3, 4]);
     }
 }

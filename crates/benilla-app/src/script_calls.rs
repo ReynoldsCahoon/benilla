@@ -52,7 +52,7 @@ macro_rules! emote_in_order {
 disjoint::disjoint_set! {
     /// The appliers, one per owner of the state a call touches, each lent alone: they share state
     /// with one another (the net channel, the cast ladder), never with what holds the host.
-    pub(crate) struct Appliers, AppliersState, watched {
+    pub(crate) struct Appliers, AppliersState, watched; shared {
         /// The selection.
         select: crate::target::ScriptSelect<'static, 'static>,
         /// The targeting cursor.
