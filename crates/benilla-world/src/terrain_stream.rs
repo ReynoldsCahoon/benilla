@@ -259,6 +259,8 @@ struct Placement {
     owner: (i32, i32),
     /// A WMO's far-box gate; `None` for an M2 and a box-less WMO, which load at once.
     gate: Option<WmoGate>,
+    /// A spawned WMO's per-group render state ([`spawn::groups`]); `None` until it spawns.
+    wmo_groups: Option<spawn::groups::WmoGroups>,
 }
 
 impl Placement {
@@ -274,7 +276,15 @@ impl Placement {
     fn up(&self, center: [f32; 3], far: f32) -> bool {
         match (&self.model, &self.gate) {
             (ModelHandle::WmoParked, Some(g)) => !meets_far_box(&g.bounds, center, far),
-            _ => self.spawned && self.doodads.iter().all(|d| d.spawned),
+            // Spawned, with its props and every group in the far box.
+            _ => {
+                self.spawned
+                    && self.doodads.iter().all(|d| d.spawned)
+                    && self
+                        .wmo_groups
+                        .as_ref()
+                        .is_none_or(|g| g.in_range_spawned(center, far))
+            }
         }
     }
 }
@@ -592,7 +602,6 @@ impl Plugin for TerrainPlugin {
                     furnish_tile_cells,
                     spawn_loaded_placements,
                     camera_collider::stage_camera_colliders,
-                    walk_collider::stage_walk_colliders,
                     flush_hull_welds,
                     flush_static_merge,
                     sync_interior_volumes,
@@ -601,6 +610,22 @@ impl Plugin for TerrainPlugin {
                     .chain()
                     .in_set(WorldStage::Stream)
                     // No world, and no chain, until a character is in one.
+                    .run_if(crate::schedule::world_is_live),
+            )
+            // The per-group stages, ordered in the chain without barriers of their own: the group
+            // spawner inserts on entity ids its placement already holds, and a walking group the
+            // spawner queued this frame starts building next frame, as a far one does.
+            .add_systems(
+                Update,
+                (
+                    spawn::groups::spawn_wmo_groups
+                        .after_ignore_deferred(spawn_loaded_placements)
+                        .before_ignore_deferred(camera_collider::stage_camera_colliders),
+                    walk_collider::stage_walk_colliders
+                        .after_ignore_deferred(camera_collider::stage_camera_colliders)
+                        .before_ignore_deferred(flush_hull_welds),
+                )
+                    .in_set(WorldStage::Stream)
                     .run_if(crate::schedule::world_is_live),
             )
             // `WOW_BLOB_VIS=1`: the blob-visibility dump.
@@ -1336,6 +1361,7 @@ fn gate_wmo_placements(
         }
         p.doodads.clear();
         p.portal_instance = None;
+        p.wmo_groups = None;
         p.spawned = false;
         p.model = ModelHandle::WmoParked;
     }
@@ -1371,6 +1397,7 @@ fn register_doodad(
             refs: 1,
             owner: tile,
             gate: None,
+            wmo_groups: None,
         },
     );
     placements.pending_spawns += 1;
@@ -1412,6 +1439,7 @@ fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &Wmo
             refs: 1,
             owner: (0, 0), // unread for WMOs: their prop hulls weld per placement
             gate,
+            wmo_groups: None,
         },
     );
     placements.pending_spawns += usize::from(!parked);
@@ -1860,6 +1888,7 @@ mod straddler_tests {
             refs: 1,
             owner,
             gate: None,
+            wmo_groups: None,
         }
     }
 

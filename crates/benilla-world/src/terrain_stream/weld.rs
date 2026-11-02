@@ -205,6 +205,7 @@ mod tests {
             refs: 1,
             owner: (0, 0),
             gate: None,
+            wmo_groups: None,
         }
     }
 

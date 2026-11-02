@@ -249,6 +249,16 @@ pub struct GroupCollision {
     pub bounds: ([f32; 3], [f32; 3]),
 }
 
+impl WmoModel {
+    /// The range of [`Self::submeshes`] that group `group` draws: the loader appends each group's
+    /// batches in group order, so [`Self::submesh_group`] ascends.
+    pub fn group_submeshes(&self, group: u16) -> std::ops::Range<usize> {
+        let start = self.submesh_group.partition_point(|&g| g < group);
+        let end = self.submesh_group.partition_point(|&g| g <= group);
+        start..end
+    }
+}
+
 impl GroupCollision {
     /// `None` when the group has no faces.
     pub fn new(mesh: CollisionMesh) -> Option<Self> {

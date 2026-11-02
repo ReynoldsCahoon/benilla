@@ -598,6 +598,27 @@ impl StaticGx {
         self.declined[if no_instance { 4 } else { 3 }] += 1;
     }
 
+    /// Drop one WMO group's items from its building's region and mark the region for re-bake: the
+    /// group left the far box and its entities went (`terrain_stream::spawn::groups`).
+    pub fn release_wmo_group(&mut self, instance: Entity, group: u16) {
+        let frame = self.frame;
+        let Some(region) = self.wmos.get_mut(&instance) else {
+            return;
+        };
+        let before = region.items.len();
+        region
+            .items
+            .retain(|i| i.wmo.as_ref().is_none_or(|w| w.group != group));
+        if region.items.len() != before {
+            region.rebuild_pick_bounds();
+            if !region.dirty {
+                region.dirty_since = frame;
+            }
+            region.dirty = true;
+            region.last_change = frame;
+        }
+    }
+
     /// Drop a dead owner tile's cell items and mark their cells for re-bake; a diverted batch has
     /// no entity, so nothing else releases it. Regions follow their instance entity instead: a
     /// straddler handoff keeps a placement alive under a new owner tile.

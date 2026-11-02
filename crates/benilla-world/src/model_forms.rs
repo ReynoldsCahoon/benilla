@@ -31,6 +31,9 @@ const VERT_BUDGET: usize = 16_384;
 pub enum ModelKey {
     M2(AssetId<M2Model>),
     Wmo(AssetId<WmoModel>),
+    /// One WMO group's batches ([`WmoModel::group_submeshes`]), built and released with the group
+    /// (`terrain_stream::spawn::groups`), as the reference loads and frees a group's buffers.
+    WmoGroup(AssetId<WmoModel>, u16),
 }
 
 impl From<&Handle<M2Model>> for ModelKey {
@@ -150,8 +153,18 @@ impl ModelForms {
         build_entry(e, kinds, submeshes, meshes, usize::MAX, &mut 0);
     }
 
-    /// Drop one model's entry (its asset left the store).
+    /// Drop one model's entry (its asset left the store), a WMO's group entries with it.
     fn forget(&mut self, key: ModelKey) {
+        self.entries.remove(&key);
+        if let ModelKey::Wmo(id) = key {
+            self.entries
+                .retain(|k, _| !matches!(k, ModelKey::WmoGroup(g, _) if *g == id));
+        }
+    }
+
+    /// Drop one entry's forms now, its meshes with them once no entity holds them: a WMO group
+    /// that left the far box.
+    pub(crate) fn release(&mut self, key: ModelKey) {
         self.entries.remove(&key);
     }
 
@@ -262,6 +275,10 @@ pub(crate) fn furnish_model_forms(
             },
             ModelKey::Wmo(id) => match wmos.get(id) {
                 Some(m) => &m.submeshes,
+                None => continue,
+            },
+            ModelKey::WmoGroup(id, g) => match wmos.get(id) {
+                Some(m) => &m.submeshes[m.group_submeshes(g)],
                 None => continue,
             },
         };
