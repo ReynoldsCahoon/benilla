@@ -86,7 +86,7 @@ fn retire_failed_placements(placements: &mut Placements, asset_server: &AssetSer
                 *pending_spawns -= 1;
             }
         }
-        for d in p.doodads.iter_mut().filter(|d| !d.spawned) {
+        for d in p.doodads.iter_mut().filter(|d| d.wanted && !d.spawned) {
             if let Some(path) = failed(d.handle.id().untyped()) {
                 warn!("WMO prop model {path} failed to load: nothing spawned");
                 d.spawned = true;
@@ -370,7 +370,7 @@ pub(super) fn spawn_loaded_placements(
             p.spawned = true;
             p.entities = entities;
             // The model landed; a WMO's just-resolved props join the pending count.
-            *pending_spawns += p.doodads.iter().filter(|d| !d.spawned).count();
+            *pending_spawns += p.doodads.iter().filter(|d| d.wanted && !d.spawned).count();
             *pending_spawns -= 1;
             activity.placements_spawned += 1;
             spawned_n += 1;
@@ -383,7 +383,7 @@ pub(super) fn spawn_loaded_placements(
         // 2. Each WMO doodad prop as its M2 lands; its entities join `p.entities`.
         let portal_instance = p.portal_instance;
         for d in &mut p.doodads {
-            if d.spawned {
+            if d.spawned || !d.wanted {
                 continue;
             }
             let Some(m) = m2s.get(&d.handle) else {
@@ -648,11 +648,22 @@ fn resolve_wmo_doodads(
                 },
                 _ => PropLight::Exterior,
             };
+            // Every group whose MODR names the prop, inverted at asset load. A named prop loads
+            // when one of its groups spawns ([`groups::spawn_wmo_groups`]); one no group names
+            // has no group to wait for and loads now.
+            let groups: Arc<[u16]> = wmo.doodad_groups.get(di).cloned().unwrap_or_default();
+            let url = m2_url(&d.model);
+            let wanted = groups.is_empty();
             out.push(WmoDoodadInst {
-                handle: asset_server.load(m2_url(&d.model)),
+                handle: if wanted {
+                    asset_server.load(url.clone())
+                } else {
+                    Handle::default()
+                },
+                url,
+                wanted,
                 transform: wmo_world.mul_transform(local),
-                // Every group whose MODR names the prop, inverted at asset load.
-                groups: wmo.doodad_groups.get(di).cloned().unwrap_or_default(),
+                groups,
                 light,
                 spawned: false,
             });
@@ -788,9 +799,38 @@ mod retire_tests {
         }
     }
 
+    /// A prop no group names loads with its placement; one a group names waits for the group,
+    /// holding no load, and counts toward nothing pending until then.
+    #[test]
+    fn a_prop_a_group_names_waits_for_its_group() {
+        let app = app();
+        let doodad = |name: &str| benilla_formats::WmoDoodad {
+            model: name.into(),
+            position: [0.0; 3],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+            color: [0; 4],
+        };
+        let wmo = WmoModel {
+            doodads: vec![doodad("a.m2"), doodad("b.m2")],
+            doodad_sets: vec![benilla_formats::WmoDoodadSet { start: 0, count: 2 }],
+            doodad_groups: vec![Arc::from([]), Arc::from([3u16])],
+            ..Default::default()
+        };
+        let server = app.world().resource::<AssetServer>();
+        let props = resolve_wmo_doodads(&wmo, 0, Transform::IDENTITY, server);
+        assert!(props[0].wanted && props[0].handle != Handle::default());
+        assert!(!props[1].wanted && props[1].handle == Handle::default());
+        let mut p = placement(ModelHandle::M2(Handle::default()), props);
+        p.spawned = true;
+        assert_eq!(p.pending(), 1, "only the groupless prop is pending");
+    }
+
     fn prop(handle: Handle<M2Model>) -> WmoDoodadInst {
         WmoDoodadInst {
             handle,
+            url: String::new(),
+            wanted: true,
             transform: Transform::IDENTITY,
             groups: Arc::from([]),
             light: PropLight::Exterior,

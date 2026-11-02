@@ -7,7 +7,13 @@ use bevy::prelude::*;
 
 /// One WMO doodad prop at its world transform, spawned once its M2 loads.
 pub(crate) struct WmoDoodadInst {
+    /// The model, loading once the prop is wanted; the default (never loaded) handle until then.
     pub(crate) handle: Handle<M2Model>,
+    /// The M2 path's `mpq://` URL, for the load when one of [`Self::groups`] spawns.
+    pub(crate) url: String,
+    /// One of its groups has spawned (the reference creates a group's doodads with the group,
+    /// `CreateGroupDoodads`, terrain/mapupdate#map-object-update), or no group names it.
+    pub(crate) wanted: bool,
     pub(crate) transform: Transform,
     /// The groups whose MODR names this prop, its portal-cull key: drawn while any is visible.
     /// Empty for a MODD no group names: never instantiated by the reference, drawn here with no

@@ -179,7 +179,7 @@ pub(in crate::terrain_stream) fn spawn_wmo_groups(
     let Placements {
         by_id,
         materials: mat_cache,
-        ..
+        pending_spawns,
     } = placements.into_inner();
     for (&uid, p) in by_id.iter_mut() {
         let (ModelHandle::Wmo(h), Some(groups)) = (&p.model, p.wmo_groups.as_mut()) else {
@@ -380,6 +380,15 @@ pub(in crate::terrain_stream) fn spawn_wmo_groups(
             let st = &mut groups.state[g];
             st.ents = ents;
             st.spawned = true;
+            // The props this group names load with it, as the reference creates a group's
+            // doodads once the group is loaded; the spawner takes them as their models land.
+            for d in p.doodads.iter_mut() {
+                if !d.wanted && d.groups.contains(&gi) {
+                    d.wanted = true;
+                    d.handle = asset_server.load(d.url.clone());
+                    *pending_spawns += 1;
+                }
+            }
         }
     }
     // Arrivals move into their model; a group no placement wanted this frame leaves it.

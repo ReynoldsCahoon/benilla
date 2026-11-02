@@ -268,7 +268,12 @@ impl Placement {
     /// and loading (a parked WMO waits on nothing), and each unspawned prop.
     fn pending(&self) -> usize {
         let model = !self.spawned && !matches!(self.model, ModelHandle::WmoParked);
-        usize::from(model) + self.doodads.iter().filter(|d| !d.spawned).count()
+        usize::from(model)
+            + self
+                .doodads
+                .iter()
+                .filter(|d| d.wanted && !d.spawned)
+                .count()
     }
 
     /// Up for the loading bar: spawned with its props, or parked out of the far box, which loads
@@ -279,7 +284,7 @@ impl Placement {
             // Spawned, with its props and every group in the far box.
             _ => {
                 self.spawned
-                    && self.doodads.iter().all(|d| d.spawned)
+                    && self.doodads.iter().all(|d| d.spawned || !d.wanted)
                     && self
                         .wmo_groups
                         .as_ref()
@@ -1274,7 +1279,7 @@ fn spawn_streamed_tiles(
                 let full = placements
                     .by_id
                     .get(&GLOBAL_WMO_UID)
-                    .is_some_and(|p| p.spawned && p.doodads.iter().all(|d| d.spawned));
+                    .is_some_and(|p| p.spawned && p.doodads.iter().all(|d| d.spawned || !d.wanted));
                 p.total += 1;
                 p.ready += usize::from(full);
                 p.scene_ready &= full;
