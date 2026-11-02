@@ -26,5 +26,14 @@ the `NO_COMPARISON_SAMPLERS_SUPPORT` shader def, pushed on `target_os = "ios"` i
 `bevy_render/src/render_resource/pipeline_cache.rs`, both return 1.0, unshadowed. benilla spawns no
 Bevy light, so no shadow map is ever read and nothing drawn changes.
 
+## The patch — a view's cluster buffers are kept
+
+`prepare_clusters` (`bevy_pbr/src/cluster.rs`) built a new `ViewClusterBindings` for every view
+every frame, so both of its GPU buffers (the clusterable-object index lists and the cluster offsets
+and counts) were created anew each frame and freed a frame later: ~300 buffers a second on the
+Mac, each at least a 16 KB page on the A8X. The fork reuses the view's component when it has one
+(`clear()` now also resets the two counters), so the buffers are rewritten in place and grow only
+when a storage list outgrows them. Platform-independent.
+
 Check: `diff -r <registry>/bevy_pbr-0.18.1 third_party/bevy_pbr` shows only those lines, the shadow-sampling
-lines above, and this file.
+lines above, the cluster lines, and this file.

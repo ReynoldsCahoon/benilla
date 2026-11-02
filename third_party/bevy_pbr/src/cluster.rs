@@ -292,16 +292,27 @@ pub fn prepare_clusters(
     render_queue: Res<RenderQueue>,
     mesh_pipeline: Res<MeshPipeline>,
     global_clusterable_object_meta: Res<GlobalClusterableObjectMeta>,
-    views: Query<(Entity, &ExtractedClusterableObjects)>,
+    mut views: Query<(
+        Entity,
+        &ExtractedClusterableObjects,
+        Option<&mut ViewClusterBindings>,
+    )>,
 ) {
     let render_device = render_device.into_inner();
     let supports_storage_buffers = matches!(
         mesh_pipeline.clustered_forward_buffer_binding_type,
         BufferBindingType::Storage { .. }
     );
-    for (entity, extracted_clusters) in &views {
-        let mut view_clusters_bindings =
-            ViewClusterBindings::new(mesh_pipeline.clustered_forward_buffer_binding_type);
+    for (entity, extracted_clusters, existing) in &mut views {
+        // benilla: a view keeps its bindings from frame to frame, so its two GPU buffers are
+        // rewritten in place; upstream made both anew for every view every frame.
+        let mut fresh = None;
+        let view_clusters_bindings = match existing {
+            Some(bindings) => bindings.into_inner(),
+            None => fresh.insert(ViewClusterBindings::new(
+                mesh_pipeline.clustered_forward_buffer_binding_type,
+            )),
+        };
         view_clusters_bindings.clear();
 
         for record in &extracted_clusters.data {
@@ -331,7 +342,9 @@ pub fn prepare_clusters(
 
         view_clusters_bindings.write_buffers(render_device, &render_queue);
 
-        commands.entity(entity).insert(view_clusters_bindings);
+        if let Some(bindings) = fresh {
+            commands.entity(entity).insert(bindings);
+        }
     }
 }
 
@@ -349,6 +362,8 @@ impl ViewClusterBindings {
     }
 
     pub fn clear(&mut self) {
+        self.n_indices = 0;
+        self.n_offsets = 0;
         match &mut self.buffers {
             ViewClusterBuffers::Uniform {
                 clusterable_object_index_lists,
