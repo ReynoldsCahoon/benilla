@@ -74,5 +74,17 @@ Measured (Mac, 20 teleports 20 s apart, heap sampler, the same route before and 
 `bevy_ecs::archetype::Edges` 12.9 MB at 160 s and 18.1 MB at 465 s over ~2650 archetypes (~6.8 KB
 each) before; under the sampler's 64 KiB resolution after.
 
+## The patch — a message queue gives back a burst's capacity
+
+`Messages::update` (`src/message/messages.rs`) swaps a queue's two buffers once a frame and clears
+the older, keeping its capacity, so every queue held its largest frame ever, twice. The heaviest
+case is `RemovedComponentMessages`, one queue per component type ever removed: a teleport that
+despawns thousands of entities leaves each of their component types' queues sized for that frame.
+After the clear, the buffer about to be refilled now shrinks to twice the last frame's count (at
+least 32 entries) whenever it holds more than four times that, so steady traffic never reallocates.
+
+Measured (Mac, 20 teleports 20 s apart, heap sampler at 465 s): `RemovedComponentMessages` 9.1 MB
+before, under the sampler's 64 KiB resolution after.
+
 Check: `diff -r <registry>/bevy_ecs-0.18.1 third_party/bevy_ecs` shows only those lines and this
 file.

@@ -193,6 +193,12 @@ impl<M: Message> Messages<M> {
     pub fn update(&mut self) {
         core::mem::swap(&mut self.messages_a, &mut self.messages_b);
         self.messages_b.clear();
+        // benilla: the buffer about to be refilled gives back a burst's capacity once the last
+        // frame needed under a quarter of it (`BENILLA.md`); upstream kept every peak for good.
+        let keep = self.messages_a.messages.len().max(16) * 2;
+        if self.messages_b.messages.capacity() > keep * 2 {
+            self.messages_b.messages.shrink_to(keep);
+        }
         self.messages_b.start_message_count = self.message_count;
         debug_assert_eq!(
             self.messages_a.start_message_count + self.messages_a.len(),
