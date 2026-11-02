@@ -84,6 +84,11 @@ impl WmoGroups {
         }
     }
 
+    /// How many groups have spawned: the residency key's share of this placement.
+    pub(in crate::terrain_stream) fn spawned_count(&self) -> usize {
+        self.state.iter().filter(|s| s.spawned).count()
+    }
+
     /// Every group whose box meets the far box has spawned with its walking collider ready to stand
     /// on (`walk_built`): the loading bar's and the settle release's test. The reference loads a
     /// group's collision with the group (`0x6a4a00` gathers only loaded groups), so a body is never

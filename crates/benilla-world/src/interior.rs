@@ -33,7 +33,9 @@ const RESAMPLE_DIST_SQ: f32 = 1e-4;
 /// must re-light it. Rebuilt each frame by [`crate::terrain_stream`].
 #[derive(Resource, Default)]
 pub struct WmoResidency {
-    resident: HashSet<AssetId<WmoModel>>,
+    /// Each resident building and how many of its groups have spawned: a group carries its own
+    /// faces, so one arriving in a resident building changes what a ray can hit there.
+    resident: HashSet<(AssetId<WmoModel>, usize)>,
     generation: u32,
 }
 
@@ -44,8 +46,8 @@ impl WmoResidency {
     }
 
     /// Bumps the generation only on a real change, so the per-frame rebuild keeps anchors settled.
-    pub(crate) fn update(&mut self, next: impl IntoIterator<Item = AssetId<WmoModel>>) {
-        let next_ids: HashSet<AssetId<WmoModel>> = next.into_iter().collect();
+    pub(crate) fn update(&mut self, next: impl IntoIterator<Item = (AssetId<WmoModel>, usize)>) {
+        let next_ids: HashSet<(AssetId<WmoModel>, usize)> = next.into_iter().collect();
         if next_ids != self.resident {
             self.resident = next_ids;
             self.generation = self.generation.wrapping_add(1);
@@ -846,6 +848,20 @@ fn seat_probe_slot(commands: &mut Commands, anchor: Entity, new: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A group spawning in a resident building is a residency change: its faces are new to the
+    /// rays, so a unit standing still re-claims its room. An unchanged frame keeps the generation.
+    #[test]
+    fn a_group_spawning_in_a_resident_building_bumps_the_generation() {
+        let mut r = WmoResidency::default();
+        let id = AssetId::<WmoModel>::default();
+        r.update([(id, 0)]);
+        let g = r.generation();
+        r.update([(id, 0)]);
+        assert_eq!(r.generation(), g, "nothing changed");
+        r.update([(id, 1)]);
+        assert_ne!(r.generation(), g, "a group spawned");
+    }
 
     fn classifier_world() -> World {
         let mut world = World::new();

@@ -1620,17 +1620,20 @@ fn rescatter_clutter(
 }
 
 /// Mirror the spawned WMO placements into [`WmoResidency`] each frame, so the interior classifier
-/// re-tests when a building streams in or out; rebuilt whole, as few WMOs are resident.
+/// and the unit room claims re-test when a building streams in or out, or one of its groups
+/// spawns or frees (each group brings its own faces); rebuilt whole, as few WMOs are resident.
 fn sync_interior_volumes(placements: Res<Placements>, mut vols: ResMut<WmoResidency>) {
-    vols.update(
-        placements
-            .by_id
-            .values()
-            .filter_map(|p| match (&p.model, p.spawned) {
-                (ModelHandle::Wmo(h), true) => Some(h.id()),
-                _ => None,
-            }),
-    );
+    vols.update(placements.by_id.values().filter_map(|p| {
+        match (&p.model, p.spawned) {
+            (ModelHandle::Wmo(h), true) => Some((
+                h.id(),
+                p.wmo_groups
+                    .as_ref()
+                    .map_or(0, spawn::groups::WmoGroups::spawned_count),
+            )),
+            _ => None,
+        }
+    }));
 }
 
 /// Hand the dead tile's surviving M2 placements to a still-loaded referrer and queue a respawn:
