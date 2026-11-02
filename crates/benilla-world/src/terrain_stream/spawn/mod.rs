@@ -80,6 +80,7 @@ fn retire_failed_placements(placements: &mut Placements, asset_server: &AssetSer
             let id = match &p.model {
                 ModelHandle::M2(h) => h.id().untyped(),
                 ModelHandle::Wmo(h) => h.id().untyped(),
+                ModelHandle::WmoParked => continue, // nothing loading
             };
             if let Some(path) = failed(id) {
                 warn!("placement model {path} failed to load: nothing spawned");
@@ -292,6 +293,8 @@ pub(super) fn spawn_loaded_placements(
                     }
                     ents
                 }
+                // Out of the far box: nothing to spawn until the gate loads it.
+                ModelHandle::WmoParked => continue,
                 ModelHandle::Wmo(h) => {
                     let Some(m) = wmos.get(h) else {
                         continue;
@@ -947,6 +950,7 @@ mod retire_tests {
             portal_instance: None,
             refs: 1,
             owner: (0, 0),
+            gate: None,
         }
     }
 

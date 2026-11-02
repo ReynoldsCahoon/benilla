@@ -256,6 +256,26 @@ struct Placement {
     /// The tile owning an M2 doodad's hull weld and merged blobs, first the registering tile;
     /// WMOs never read it.
     owner: (i32, i32),
+    /// A WMO's far-box gate; `None` for an M2 and a box-less WMO, which load at once.
+    gate: Option<WmoGate>,
+}
+
+impl Placement {
+    /// What this placement adds to [`Placements::pending_spawns`]: its model while unspawned
+    /// and loading (a parked WMO waits on nothing), and each unspawned prop.
+    fn pending(&self) -> usize {
+        let model = !self.spawned && !matches!(self.model, ModelHandle::WmoParked);
+        usize::from(model) + self.doodads.iter().filter(|d| !d.spawned).count()
+    }
+
+    /// Up for the loading bar: spawned with its props, or parked out of the far box, which loads
+    /// nothing. Parked inside it, it is about to load, so not up.
+    fn up(&self, center: [f32; 3], far: f32) -> bool {
+        match (&self.model, &self.gate) {
+            (ModelHandle::WmoParked, Some(g)) => !meets_far_box(&g.bounds, center, far),
+            _ => self.spawned && self.doodads.iter().all(|d| d.spawned),
+        }
+    }
 }
 
 /// How much of the world wanted around the view focus is there, read by the loading bar and by
@@ -460,6 +480,38 @@ pub const SPAWN_XY: (f32, f32) = (-8949.95, -132.49);
 enum ModelHandle {
     M2(Handle<M2Model>),
     Wmo(Handle<WmoModel>),
+    /// A WMO out of the far box ([`WmoGate`]): nothing loaded, nothing spawned, nothing pending.
+    WmoParked,
+}
+
+/// How long a WMO stays loaded once its box has left the far box: the reference's group timer,
+/// set to 30.0 each frame the group meets the far box (`0x698865`) and freed once it runs out
+/// (`0x6b3a14`, terrain/portals).
+const WMO_FAR_TIMER_SECS: f32 = 30.0;
+
+/// A WMO placement loaded only while its MODF box meets the far box.
+///
+/// Deviation (the user's call, 2026-11-01; wow-optimize FINDINGS "The landing spike"): the
+/// reference loads each placement's root at once and only its group files when a group's box
+/// meets the far box (`0x698720`, terrain/mapupdate#map-object-update), freeing a group 30 s after
+/// it leaves. A root alone draws, lights and collides nothing, so here the whole model waits on
+/// the placement's box instead, and is freed on the same timer. Groups inside a box that meets
+/// still all load at once; per-group loading is the next step. Landing in Northshire no longer
+/// loads Stormwind (~750 yd off at a 177-yd far clip), which killed the iPad Air 2.
+struct WmoGate {
+    /// The MWMO path, for the load when the box comes in.
+    model: String,
+    /// The placed box in WoW world coords ([`benilla_formats::modf_world_bounds`]).
+    bounds: ([f32; 3], [f32; 3]),
+    /// Seconds the box has been outside the far box while loaded.
+    out_secs: f32,
+}
+
+/// Whether a box meets the far box: half-size `far` around `center` on every axis, closed (a
+/// touching face meets), as the reference's `0x698720` tests (`far.min <= box.max`, `0x699330`
+/// `far.max >= box.min`).
+fn meets_far_box(bounds: &([f32; 3], [f32; 3]), center: [f32; 3], far: f32) -> bool {
+    (0..3).all(|a| center[a] - far <= bounds.1[a] && center[a] + far >= bounds.0[a])
 }
 
 /// What the streamer did this frame, bumped by the `WorldStage::Stream` chain and zeroed by its
@@ -534,6 +586,7 @@ impl Plugin for TerrainPlugin {
                     stream_terrain,
                     await_reads_and_attach,
                     spawn_streamed_tiles,
+                    gate_wmo_placements,
                     attach_inner_colliders,
                     furnish_tile_cells,
                     spawn_loaded_placements,
@@ -703,6 +756,8 @@ fn stream_terrain(
                     unique_id: GLOBAL_WMO_UID,
                     doodad_set: g.doodad_set,
                     name_set: g.name_set,
+                    // The one building of a WMO-only map loads whole, at once.
+                    bounds: None,
                 },
             );
             state.global_wmo = true;
@@ -983,8 +1038,15 @@ fn spawn_streamed_tiles(
     mut load_progress: Option<ResMut<WorldLoadProgress>>,
     // `None` only under `WOW_STATIC_GX=0`.
     mut staticgx: Option<ResMut<crate::static_gx::StaticGx>>,
+    // The far box a parked WMO is judged against ([`Placement::up`]).
+    far_box: (
+        Query<&Transform, With<WorldCamera>>,
+        Res<crate::view::ViewDistance>,
+    ),
 ) {
     let (mut materials, mut meshes, wdts, mut activity) = asset_stores;
+    let focus_wow = focus.resolve(far_box.0.single().ok().map(|c| c.translation));
+    let far = far_box.1.far();
     let Some(shared_light) = shared_light else {
         return;
     };
@@ -1165,7 +1227,7 @@ fn spawn_streamed_tiles(
                         Some(t) if tile_done(t, &asset_server) => {
                             for uid in &t.placements {
                                 if let Some(pl) = placements.by_id.get(uid) {
-                                    let up = pl.spawned && pl.doodads.iter().all(|d| d.spawned);
+                                    let up = pl.up(focus_wow, far);
                                     p.total += 1;
                                     p.ready += usize::from(up);
                                     near_pending += usize::from(!up);
@@ -1217,6 +1279,66 @@ fn tile_drop_disabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("WOW_NO_TILE_DROP").is_some())
 }
 
+/// Loads a parked WMO whose box meets the far box and parks a loaded one whose box has stayed
+/// outside it for [`WMO_FAR_TIMER_SECS`] ([`WmoGate`]). Every frame, as the reference's map object
+/// update is (`0x698720`), between the tile registrations and the spawner.
+fn gate_wmo_placements(
+    mut commands: Commands,
+    placements: ResMut<Placements>,
+    asset_server: Res<AssetServer>,
+    focus: Res<ViewFocus>,
+    camera: Query<&Transform, With<WorldCamera>>,
+    view: Res<crate::view::ViewDistance>,
+    // Housekeeping on the real clock, as the art sweeps are: a paused or slowed world still frees.
+    time: Res<Time<bevy::time::Real>>,
+) {
+    let center = focus.resolve(camera.single().ok().map(|c| c.translation));
+    let (far, dt) = (view.far(), time.delta_secs());
+    let Placements {
+        by_id,
+        pending_spawns,
+        ..
+    } = placements.into_inner();
+    for p in by_id.values_mut() {
+        let Some(gate) = p.gate.as_mut() else {
+            continue;
+        };
+        if meets_far_box(&gate.bounds, center, far) {
+            gate.out_secs = 0.0;
+            if matches!(p.model, ModelHandle::WmoParked) {
+                debug!(
+                    "wmo-gate: load {} (box {:?}..{:?} meets the far box {far} around {:?})",
+                    gate.model, gate.bounds.0, gate.bounds.1, center
+                );
+                p.model = ModelHandle::Wmo(asset_server.load(wmo_url(&gate.model)));
+                p.spawned = false;
+                *pending_spawns += 1;
+            }
+            continue;
+        }
+        if matches!(p.model, ModelHandle::WmoParked) {
+            continue;
+        }
+        gate.out_secs += dt;
+        if gate.out_secs < WMO_FAR_TIMER_SECS {
+            continue;
+        }
+        // Freed: its entities, props and instance go; the handle drop lets the asset unload.
+        debug!(
+            "wmo-gate: free {} ({WMO_FAR_TIMER_SECS} s outside)",
+            gate.model
+        );
+        *pending_spawns -= p.pending();
+        for e in p.entities.drain(..) {
+            commands.entity(e).try_despawn();
+        }
+        p.doodads.clear();
+        p.portal_instance = None;
+        p.spawned = false;
+        p.model = ModelHandle::WmoParked;
+    }
+}
+
 /// Register one M2 doodad placement, or bump its refcount if already known.
 fn register_doodad(
     placements: &mut Placements,
@@ -1246,6 +1368,7 @@ fn register_doodad(
             portal_instance: None,
             refs: 1,
             owner: tile,
+            gate: None,
         },
     );
     placements.pending_spawns += 1;
@@ -1257,11 +1380,22 @@ fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &Wmo
         p.refs += 1;
         return;
     }
-    let handle: Handle<WmoModel> = asset_server.load(wmo_url(&w.model));
+    // A placement with a box waits for the far box ([`gate_wmo_placements`]); one without loads.
+    let gate = w.bounds.map(|bounds| WmoGate {
+        model: w.model.clone(),
+        bounds,
+        out_secs: 0.0,
+    });
+    let model = if gate.is_some() {
+        ModelHandle::WmoParked
+    } else {
+        ModelHandle::Wmo(asset_server.load(wmo_url(&w.model)))
+    };
+    let parked = matches!(model, ModelHandle::WmoParked);
     placements.by_id.insert(
         w.unique_id,
         Placement {
-            model: ModelHandle::Wmo(handle),
+            model,
             transform: Transform {
                 translation: wow_to_bevy(w.position),
                 rotation: placement_rotation(w.rotation),
@@ -1275,9 +1409,10 @@ fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &Wmo
             portal_instance: None,
             refs: 1,
             owner: (0, 0), // unread for WMOs: their prop hulls weld per placement
+            gate,
         },
     );
-    placements.pending_spawns += 1;
+    placements.pending_spawns += usize::from(!parked);
 }
 
 /// Drop every streamed tile and the placements they reference, on a cross-map teleport or on
@@ -1552,8 +1687,7 @@ fn release_placement(
     if drop_it {
         if let Some(p) = placements.by_id.remove(&uid) {
             // Its unspawned model and props leave the pending count with it.
-            placements.pending_spawns -=
-                usize::from(!p.spawned) + p.doodads.iter().filter(|d| !d.spawned).count();
+            placements.pending_spawns -= p.pending();
             activity.placements_dropped += 1;
             activity.placement_entities_dropped += p.entities.len() as u32;
             for e in p.entities {
@@ -1723,6 +1857,7 @@ mod straddler_tests {
             portal_instance: None,
             refs: 1,
             owner,
+            gate: None,
         }
     }
 
@@ -2056,6 +2191,115 @@ mod inner_hold_tests {
             !outer.furnished && outer.next_cell == 0,
             "the outer ring waits: the frame's cap went on the inner tile (got {})",
             outer.next_cell
+        );
+    }
+}
+
+#[cfg(test)]
+mod wmo_gate_tests {
+    use super::*;
+    use bevy::time::TimeUpdateStrategy;
+    use std::time::Duration;
+
+    /// A city-sized box 600..1400 yd east of the origin, 0..200 up.
+    const CITY: ([f32; 3], [f32; 3]) = ([600.0, -400.0, 0.0], [1400.0, 400.0, 200.0]);
+
+    fn app(at: [f32; 3]) -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_asset::<M2Model>().init_asset::<WmoModel>();
+        app.init_resource::<Placements>()
+            .init_resource::<crate::view::ViewDistance>()
+            .insert_resource(ViewFocus::body(at, true))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(1)))
+            .add_systems(Update, gate_wmo_placements);
+        let server = app.world().resource::<AssetServer>().clone();
+        register_wmo(
+            &mut app.world_mut().resource_mut::<Placements>(),
+            &server,
+            &WmoInstance {
+                model: "World\\wmo\\city.wmo".into(),
+                position: [1000.0, 0.0, 0.0],
+                rotation: [0.0; 3],
+                unique_id: 7,
+                doodad_set: 0,
+                name_set: 0,
+                bounds: Some(CITY),
+            },
+        );
+        app
+    }
+
+    fn parked(app: &App) -> bool {
+        matches!(
+            app.world().resource::<Placements>().by_id[&7].model,
+            ModelHandle::WmoParked
+        )
+    }
+
+    fn pending(app: &App) -> usize {
+        app.world().resource::<Placements>().pending_spawns
+    }
+
+    /// A placement's box far from the focus is never loaded and never holds the loading bar.
+    #[test]
+    fn a_wmo_beyond_the_far_box_stays_parked_and_counts_as_up() {
+        let mut app = app([0.0, 0.0, 50.0]); // 600 yd from the box, far clip 177..777 default
+        let far = app.world().resource::<crate::view::ViewDistance>().far();
+        assert!(far < 600.0, "the default far clip reaches the box: {far}");
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(parked(&app));
+        assert_eq!(pending(&app), 0);
+        let pl = app.world().resource::<Placements>();
+        assert!(pl.by_id[&7].up([0.0, 0.0, 50.0], far));
+    }
+
+    /// The focus comes within the far clip of the box: the model loads and counts as pending;
+    /// it leaves: the model stays the timer's 30 s, then is freed with its entities.
+    #[test]
+    fn a_wmo_loads_in_the_far_box_and_frees_thirty_seconds_after_leaving() {
+        let mut app = app([0.0, 0.0, 50.0]);
+        app.update();
+        let spawned = app.world_mut().spawn_empty().id();
+        app.insert_resource(ViewFocus::body([500.0, 0.0, 50.0], true)); // 100 yd off
+        app.update();
+        assert!(!parked(&app));
+        assert_eq!(pending(&app), 1, "loading: the spawner waits on it");
+        {
+            // As the spawner would leave it.
+            let mut pl = app.world_mut().resource_mut::<Placements>();
+            let p = pl.by_id.get_mut(&7).unwrap();
+            p.spawned = true;
+            p.entities.push(spawned);
+            pl.pending_spawns -= 1;
+        }
+        app.insert_resource(ViewFocus::body([0.0, 0.0, 50.0], true));
+        for _ in 0..29 {
+            app.update();
+        }
+        assert!(!parked(&app), "inside the timer it stays");
+        assert!(app.world().get_entity(spawned).is_ok());
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(parked(&app), "past the timer it is freed");
+        assert!(
+            app.world().get_entity(spawned).is_err(),
+            "its entities with it"
+        );
+        assert_eq!(pending(&app), 0);
+    }
+
+    /// Closed boxes: a far box touching the placement's face meets it.
+    #[test]
+    fn a_touching_far_box_meets() {
+        assert!(meets_far_box(&CITY, [400.0, 0.0, 0.0], 200.0));
+        assert!(!meets_far_box(&CITY, [399.0, 0.0, 0.0], 200.0));
+        assert!(
+            !meets_far_box(&CITY, [1000.0, 0.0, 500.0], 200.0),
+            "z counts"
         );
     }
 }
