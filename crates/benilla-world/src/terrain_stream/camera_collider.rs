@@ -6,11 +6,9 @@
 //! so a group's trimesh is built when the focus comes within [`ATTACH_REACH`] of its box and
 //! dropped past [`DETACH_REACH`].
 
-use std::sync::Arc;
-
 use avian3d::prelude::{Collider, CollisionLayers, RigidBody};
 use benilla_assets::coords::wow_to_bevy;
-use benilla_assets::GroupCollision;
+use benilla_assets::CameraFaces;
 use bevy::prelude::*;
 
 use super::collider::{build_collider_task, placement_collider_data, PendingCollider};
@@ -27,8 +25,7 @@ const DETACH_REACH: f32 = 100.0;
 /// One WMO group's camera collider in its placement, owned by the placement's tile.
 #[derive(Component)]
 pub(super) struct CameraGroupCollider {
-    groups: Arc<[GroupCollision]>,
-    index: usize,
+    faces: CameraFaces,
     transform: Transform,
     /// The group's box in Bevy world space: its local box's corners through the placement.
     min: Vec3,
@@ -36,8 +33,8 @@ pub(super) struct CameraGroupCollider {
 }
 
 impl CameraGroupCollider {
-    pub(super) fn new(groups: Arc<[GroupCollision]>, index: usize, transform: Transform) -> Self {
-        let (lo, hi) = groups[index].bounds;
+    pub(super) fn new(faces: CameraFaces, transform: Transform) -> Self {
+        let (lo, hi) = faces.bounds;
         let (mut min, mut max) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
         for corner in 0..8 {
             let pick = |axis: usize| {
@@ -52,8 +49,7 @@ impl CameraGroupCollider {
             max = max.max(world);
         }
         Self {
-            groups,
-            index,
+            faces,
             transform,
             min,
             max,
@@ -83,8 +79,8 @@ pub(super) fn stage_camera_colliders(
     for (entity, group, pending, built) in &groups {
         let distance = group.distance_to(at);
         if !pending && !built && distance <= ATTACH_REACH {
-            let mesh = &group.groups[group.index].mesh;
-            if let Some((verts, tris)) = placement_collider_data(Some(mesh), &group.transform) {
+            let mesh = group.faces.mesh();
+            if let Some((verts, tris)) = placement_collider_data(Some(&mesh), &group.transform) {
                 commands.entity(entity).insert(PendingCollider::new(
                     build_collider_task(verts, tris),
                     Some(camera_layers()),
@@ -103,14 +99,16 @@ pub(super) fn stage_camera_colliders(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use benilla_formats::CollisionMesh;
+    use benilla_assets::GroupTris;
 
-    /// One group: a 2 yd quad at WoW `(x, 0..2, 0..2)`, two triangles.
-    fn quad_at(x: f32) -> GroupCollision {
-        GroupCollision::new(CollisionMesh {
-            positions: vec![[x, 0.0, 0.0], [x, 2.0, 0.0], [x, 2.0, 2.0], [x, 0.0, 2.0]],
-            indices: vec![0, 1, 2, 0, 2, 3],
-        })
+    /// One group: a 2 yd quad at WoW `(x, 0..2, 0..2)`, two walking faces the camera stops at.
+    fn quad_at(x: f32) -> CameraFaces {
+        let (a, b, c, d) = ([x, 0.0, 0.0], [x, 2.0, 0.0], [x, 2.0, 2.0], [x, 0.0, 2.0]);
+        CameraFaces::new(
+            GroupTris::from(vec![[a, b, c], [a, c, d]]),
+            vec![false, false].into(),
+            GroupTris::default(),
+        )
         .expect("two faces")
     }
 
@@ -132,19 +130,17 @@ mod tests {
 
     #[test]
     fn a_group_within_reach_builds_and_one_beyond_does_not() {
-        let groups: Arc<[GroupCollision]> = Arc::from(vec![quad_at(10.0), quad_at(500.0)]);
         let mut app = app_at([0.0, 0.0, 0.0]);
         let near = app
             .world_mut()
-            .spawn(CameraGroupCollider::new(
-                groups.clone(),
-                0,
-                Transform::IDENTITY,
-            ))
+            .spawn(CameraGroupCollider::new(quad_at(10.0), Transform::IDENTITY))
             .id();
         let far = app
             .world_mut()
-            .spawn(CameraGroupCollider::new(groups, 1, Transform::IDENTITY))
+            .spawn(CameraGroupCollider::new(
+                quad_at(500.0),
+                Transform::IDENTITY,
+            ))
             .id();
         app.update();
         assert_eq!(
@@ -161,12 +157,11 @@ mod tests {
 
     #[test]
     fn a_built_group_drops_past_the_detach_reach_and_holds_inside_it() {
-        let groups: Arc<[GroupCollision]> = Arc::from(vec![quad_at(0.0)]);
         let mut app = app_at([0.0, 0.0, 0.0]);
         let e = app
             .world_mut()
             .spawn((
-                CameraGroupCollider::new(groups, 0, Transform::IDENTITY),
+                CameraGroupCollider::new(quad_at(0.0), Transform::IDENTITY),
                 Collider::sphere(1.0),
                 RigidBody::Static,
                 camera_layers(),
@@ -194,9 +189,8 @@ mod tests {
 
     #[test]
     fn the_box_follows_the_placement() {
-        let groups: Arc<[GroupCollision]> = Arc::from(vec![quad_at(0.0)]);
         // WoW +x is Bevy −z: a placement 300 yd along Bevy −z carries the quad there.
-        let moved = CameraGroupCollider::new(groups, 0, Transform::from_xyz(0.0, 0.0, -300.0));
+        let moved = CameraGroupCollider::new(quad_at(0.0), Transform::from_xyz(0.0, 0.0, -300.0));
         assert!(moved.distance_to(wow_to_bevy([300.0, 1.0, 1.0])) < 0.01);
         assert!(moved.distance_to(wow_to_bevy([0.0, 1.0, 1.0])) > 290.0);
     }

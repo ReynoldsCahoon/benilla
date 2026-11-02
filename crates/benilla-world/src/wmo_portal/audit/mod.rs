@@ -262,7 +262,7 @@ fn load_subject(internal: &str, site: Option<&Site>) -> Subject {
         group_collision_bounds,
         collision_bounds,
         collision: None,
-        collision_camera: Default::default(),
+        group_camera: Vec::new(),
         doodads: Vec::new(),
         doodad_sets: Vec::new(),
         lights: Vec::new(),
@@ -914,4 +914,62 @@ fn deeprun_tram_undersea_claims_its_own_mfog() {
         "end {} should be the record's 236.1 yd",
         target.end
     );
+}
+
+/// The camera faces rebuilt from the walking faces the camera does not pass plus the camera-only
+/// faces ([`benilla_assets::CameraFaces`]) are the camera gather's faces, triangle for triangle,
+/// in every group of the two capitals.
+#[test]
+fn camera_faces_are_the_walking_faces_it_stops_at_plus_the_camera_only_faces() {
+    let data = benilla_formats::wow_data_or_skip!();
+    let chain = open_chain(&data).expect("open MPQ chain");
+    let key = |t: [[f32; 3]; 3]| t.map(|v| v.map(f32::to_bits));
+    let faces = |pos: &[[f32; 3]], idx: &[u32]| -> Vec<[[u32; 3]; 3]> {
+        idx.as_chunks::<3>()
+            .0
+            .iter()
+            .map(|c| key([pos[c[0] as usize], pos[c[1] as usize], pos[c[2] as usize]]))
+            .collect()
+    };
+    let mut checked = 0;
+    for root in [
+        "World\\wmo\\Azeroth\\Buildings\\Stormwind\\Stormwind.wmo",
+        "World\\wmo\\Kalimdor\\Ogrimmar\\Ogrimmar.wmo",
+    ] {
+        let stem = root.strip_suffix(".wmo").unwrap();
+        let n = parse_wmo_root(&chain.read(root).expect("root"))
+            .unwrap()
+            .group_count();
+        for gi in 0..n {
+            let Ok(g) = chain.read(&format!("{stem}_{gi:03}.wmo")) else {
+                continue;
+            };
+            let (mut cp, mut ci) = (Vec::new(), Vec::new());
+            accumulate_wmo_group_camera_collision(&g, &mut cp, &mut ci);
+            let (mut wp, mut wi, mut pass) = (Vec::new(), Vec::new(), Vec::new());
+            benilla_formats::accumulate_wmo_group_collision_flagged(
+                &g, &mut wp, &mut wi, &mut pass,
+            );
+            let (mut op, mut oi) = (Vec::new(), Vec::new());
+            benilla_formats::accumulate_wmo_group_camera_only_collision(&g, &mut op, &mut oi);
+            assert_eq!(
+                pass.len() * 3,
+                wi.len(),
+                "{root} group {gi}: one bit a face"
+            );
+            let mut want = faces(&cp, &ci);
+            let mut got: Vec<_> = faces(&wp, &wi)
+                .into_iter()
+                .zip(&pass)
+                .filter(|(_, p)| !**p)
+                .map(|(t, _)| t)
+                .chain(faces(&op, &oi))
+                .collect();
+            want.sort_unstable();
+            got.sort_unstable();
+            assert_eq!(got, want, "{root} group {gi}");
+            checked += 1;
+        }
+    }
+    assert!(checked > 100, "only {checked} groups read");
 }

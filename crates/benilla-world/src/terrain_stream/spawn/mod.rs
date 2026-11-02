@@ -512,14 +512,10 @@ pub(super) fn spawn_loaded_placements(
                     }
                     // The camera faces per group, built only near the focus
                     // ([`super::camera_collider`]).
-                    for index in 0..m.collision_camera.len() {
+                    for faces in m.group_camera.iter().flatten() {
                         ents.push(
                             commands
-                                .spawn(CameraGroupCollider::new(
-                                    m.collision_camera.clone(),
-                                    index,
-                                    p.transform,
-                                ))
+                                .spawn(CameraGroupCollider::new(faces.clone(), p.transform))
                                 .id(),
                         );
                     }

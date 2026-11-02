@@ -278,12 +278,12 @@ pub use models::normalize_weights;
 pub use models::ERROR_CUBE;
 pub use models::{
     accumulate_wmo_group_camera_collision, accumulate_wmo_group_camera_only_collision,
-    accumulate_wmo_group_collision, hand_grip_finger_poses, load_m2_animation_summary,
-    load_m2_bone_spins, load_m2_bounds, load_m2_collision_hull, load_m2_mesh, load_m2_mesh_skinned,
-    load_object_model, load_wmo, load_wmo_collision_tris, m2_bone_spins, m2_file_name,
-    m2_owner_reach, m2_ribbon_emitter_count, m2_sequence_visible_textures,
-    m2_texture_transform_count, non_separable_billboard_bones, owner_last_rung,
-    owner_last_rung_bucket, parse_m2_animation_lookup, parse_m2_animation_summary,
+    accumulate_wmo_group_collision, accumulate_wmo_group_collision_flagged, hand_grip_finger_poses,
+    load_m2_animation_summary, load_m2_bone_spins, load_m2_bounds, load_m2_collision_hull,
+    load_m2_mesh, load_m2_mesh_skinned, load_object_model, load_wmo, load_wmo_collision_tris,
+    m2_bone_spins, m2_file_name, m2_owner_reach, m2_ribbon_emitter_count,
+    m2_sequence_visible_textures, m2_texture_transform_count, non_separable_billboard_bones,
+    owner_last_rung, owner_last_rung_bucket, parse_m2_animation_lookup, parse_m2_animation_summary,
     parse_m2_animations, parse_m2_attachments, parse_m2_bounds, parse_m2_camera,
     parse_m2_cch_marker, parse_m2_collision_hull, parse_m2_event_markers,
     parse_m2_global_sequence_bones, parse_m2_lights, parse_m2_pane_cameras,

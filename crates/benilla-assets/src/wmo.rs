@@ -7,11 +7,11 @@ use crate::column_grid::ColumnGrid;
 use std::sync::Arc;
 
 use benilla_formats::{
-    accumulate_wmo_group_camera_collision, accumulate_wmo_group_camera_only_collision,
-    accumulate_wmo_group_collision, parse_wmo_lights, parse_wmo_root, wmo_group_doodad_refs,
-    wmo_group_footprint_tris, wmo_group_header, wmo_group_light_refs, wmo_group_liquid_mesh,
-    wmo_group_submeshes, CollisionMesh, FootprintTris, LiquidMesh, WmoDoodad, WmoDoodadSet, WmoFog,
-    WmoGroupInfo, WmoLight, WmoPortalInfo, WmoPortalRef,
+    accumulate_wmo_group_camera_only_collision, accumulate_wmo_group_collision_flagged,
+    parse_wmo_lights, parse_wmo_root, wmo_group_doodad_refs, wmo_group_footprint_tris,
+    wmo_group_header, wmo_group_light_refs, wmo_group_liquid_mesh, wmo_group_submeshes,
+    CollisionMesh, FootprintTris, LiquidMesh, WmoDoodad, WmoDoodadSet, WmoFog, WmoGroupInfo,
+    WmoLight, WmoPortalInfo, WmoPortalRef,
 };
 use bevy::asset::io::Reader;
 use bevy::asset::{Asset, AssetLoader, LoadContext};
@@ -87,6 +87,11 @@ impl GroupTris {
 
     pub fn len(&self) -> usize {
         self.count as usize
+    }
+
+    /// The index of the group's first face in the shared mesh, for per-face data kept beside it.
+    pub fn first_face(&self) -> usize {
+        self.start as usize / 3
     }
 
     pub fn is_empty(&self) -> bool {
@@ -175,6 +180,68 @@ impl FromIterator<[[f32; 3]; 3]> for GroupTris {
     }
 }
 
+/// One WMO group's camera faces (every face but `NOCAMCOLLIDE`), held as the walking faces the
+/// camera does not pass plus the camera-only faces, which together are exactly that set
+/// ([`benilla_formats::accumulate_wmo_group_collision_flagged`]). A separate copy of a city's
+/// camera faces, ~4× its walking faces, was part of the landing spike that killed the iPad Air 2
+/// (wow-optimize FINDINGS, "The landing spike"); the camera collider builds from this on demand.
+#[derive(Clone, Debug)]
+pub struct CameraFaces {
+    walk: GroupTris,
+    /// Per walking face of the model's collision mesh: the camera passes it (`NOCAMCOLLIDE`).
+    passes: Arc<[bool]>,
+    only: GroupTris,
+    /// `(min, max)` over the camera faces, WMO-local.
+    pub bounds: ([f32; 3], [f32; 3]),
+}
+
+impl CameraFaces {
+    /// `None` when the group has no camera face.
+    pub fn new(walk: GroupTris, passes: Arc<[bool]>, only: GroupTris) -> Option<Self> {
+        let mut faces = Self {
+            walk,
+            passes,
+            only,
+            bounds: ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]),
+        };
+        let mut any = false;
+        let mut bounds = faces.bounds;
+        for t in faces.iter() {
+            any = true;
+            for v in t {
+                for (a, c) in v.into_iter().enumerate() {
+                    bounds.0[a] = bounds.0[a].min(c);
+                    bounds.1[a] = bounds.1[a].max(c);
+                }
+            }
+        }
+        faces.bounds = bounds;
+        any.then_some(faces)
+    }
+
+    /// The camera faces: the walking faces the camera does not pass, then the camera-only faces.
+    pub fn iter(&self) -> impl Iterator<Item = [[f32; 3]; 3]> + '_ {
+        let first = self.walk.first_face();
+        self.walk
+            .iter()
+            .enumerate()
+            .filter(move |(i, _)| !self.passes.get(first + i).copied().unwrap_or(false))
+            .map(|(_, t)| t)
+            .chain(self.only.iter())
+    }
+
+    /// The camera faces as one mesh, three vertices a face, for the collider build.
+    pub fn mesh(&self) -> CollisionMesh {
+        let mut out = CollisionMesh::default();
+        for t in self.iter() {
+            let base = out.positions.len() as u32;
+            out.positions.extend_from_slice(&t);
+            out.indices.extend([base, base + 1, base + 2]);
+        }
+        out
+    }
+}
+
 /// One WMO group's collision faces in WMO-local coords, with their AABB.
 pub struct GroupCollision {
     pub mesh: CollisionMesh,
@@ -239,9 +306,10 @@ pub struct WmoModel {
     /// Walking collision across all groups in WMO-local coords, DETAIL faces excluded; shared with
     /// [`Self::group_collision_tris`], which slice it.
     pub collision: Option<Arc<CollisionMesh>>,
-    /// Camera collision, per group with faces: DETAIL kept, NOCAMCOLLIDE dropped. Per group so a
-    /// placement builds only the groups within the boom's reach (`terrain_stream::camera_collider`).
-    pub collision_camera: Arc<[GroupCollision]>,
+    /// Camera collision per group: DETAIL kept, NOCAMCOLLIDE dropped; `None` for a group without
+    /// camera faces. Per group so a placement builds only the groups within the boom's reach
+    /// (`terrain_stream::camera_collider`); held as views of the walking and camera-only faces.
+    pub group_camera: Vec<Option<CameraFaces>>,
     /// The root's MODD doodads in WMO model space, spawned by doodad set.
     pub doodads: Vec<WmoDoodad>,
     /// The MODS ranges into [`Self::doodads`]: set 0 always, plus the one a placement picks.
@@ -593,7 +661,8 @@ impl AssetLoader for WmoModelLoader {
         let mut cam_only = CollisionMesh::default();
         let mut col_pos: Vec<[f32; 3]> = Vec::new();
         let mut col_idx: Vec<u32> = Vec::new();
-        let mut collision_camera: Vec<GroupCollision> = Vec::new();
+        // Per walking face: the camera passes it (NOCAMCOLLIDE), for the camera faces.
+        let mut walk_passes: Vec<bool> = Vec::new();
         let mut group_doodad_refs: Vec<Vec<u16>> = vec![Vec::new(); root.group_count() as usize];
         let mut group_light_refs: Vec<Vec<u16>> = vec![Vec::new(); root.group_count() as usize];
         let mut group_liquids: Vec<Option<LiquidMesh>> =
@@ -618,24 +687,20 @@ impl AssetLoader for WmoModelLoader {
             // One walking gather feeds both the per-group faces and the flat collider.
             let mut gpos: Vec<[f32; 3]> = Vec::new();
             let mut gidx: Vec<u32> = Vec::new();
-            accumulate_wmo_group_collision(&gbytes, &mut gpos, &mut gidx);
+            let mut gpass: Vec<bool> = Vec::new();
+            accumulate_wmo_group_collision_flagged(&gbytes, &mut gpos, &mut gidx, &mut gpass);
             // Whole faces whose corners all exist, so the group's slice of the flat mesh reads
             // as the per-group list did.
             keep_whole_faces(&gpos, &mut gidx);
             if let Some(n) = walk_faces.get_mut(gi as usize) {
                 *n = (gidx.len() / 3) as u32;
             }
+            // The gather keeps whole faces only, so the bits stay one a face.
+            gpass.truncate(gidx.len() / 3);
+            walk_passes.extend_from_slice(&gpass);
             let base = col_pos.len() as u32;
             col_pos.extend_from_slice(&gpos);
             col_idx.extend(gidx.iter().map(|i| i + base));
-            let (mut cam_pos, mut cam_idx): (Vec<[f32; 3]>, Vec<u32>) = (Vec::new(), Vec::new());
-            accumulate_wmo_group_camera_collision(&gbytes, &mut cam_pos, &mut cam_idx);
-            if let Some(group) = GroupCollision::new(CollisionMesh {
-                positions: cam_pos,
-                indices: cam_idx,
-            }) {
-                collision_camera.push(group);
-            }
             let (mut dpos, mut didx): (Vec<[f32; 3]>, Vec<u32>) = (Vec::new(), Vec::new());
             accumulate_wmo_group_camera_only_collision(&gbytes, &mut dpos, &mut didx);
             keep_whole_faces(&dpos, &mut didx);
@@ -723,6 +788,12 @@ impl AssetLoader for WmoModelLoader {
         cam_only.positions.shrink_to_fit();
         cam_only.indices.shrink_to_fit();
         let group_camera_only_tris = GroupTris::slices(&Arc::new(cam_only), &cam_only_faces);
+        let walk_passes: Arc<[bool]> = walk_passes.into();
+        let group_camera = group_collision_tris
+            .iter()
+            .zip(&group_camera_only_tris)
+            .map(|(walk, only)| CameraFaces::new(walk.clone(), walk_passes.clone(), only.clone()))
+            .collect();
         resolve_shared_liquid_cells(&mut group_liquids);
         let portals = root.portals();
         let (group_collision_bounds, collision_bounds) =
@@ -746,7 +817,7 @@ impl AssetLoader for WmoModelLoader {
             group_collision_grids,
             collision_bounds,
             collision,
-            collision_camera: collision_camera.into(),
+            group_camera,
             doodads: root.doodads().to_vec(),
             doodad_sets: root.doodad_sets().to_vec(),
             lights: parse_wmo_lights(&bytes),
@@ -1075,6 +1146,32 @@ mod group_tris_tests {
         );
         let own = GroupTris::from(vec![[p(5.0), p(6.0), p(7.0)]]);
         assert_eq!((own.len(), own.tri(0)), (1, [p(5.0), p(6.0), p(7.0)]));
+    }
+
+    /// A group's camera faces are its walking faces whose bit says the camera stops, found by the
+    /// group's own offset in the shared mesh, then its camera-only faces; the box covers them.
+    #[test]
+    fn camera_faces_skip_the_walking_faces_the_camera_passes() {
+        let p = |x: f32| [x, 0.0, 0.0];
+        let mesh = Arc::new(CollisionMesh {
+            positions: (0..9).map(|i| p(i as f32)).collect(),
+            indices: vec![0, 1, 2, 3, 4, 5, 6, 7, 8],
+        });
+        // group 0: face 0; group 1: faces 1 and 2, the camera passing face 1.
+        let walk = GroupTris::slices(&mesh, &[1, 2]);
+        let passes: Arc<[bool]> = vec![true, true, false].into();
+        let only = GroupTris::from(vec![[p(20.0), p(21.0), p(22.0)]]);
+        assert!(
+            CameraFaces::new(walk[0].clone(), passes.clone(), GroupTris::default()).is_none(),
+            "group 0's one face is passed: no camera face"
+        );
+        let faces = CameraFaces::new(walk[1].clone(), passes, only).unwrap();
+        assert_eq!(
+            faces.iter().collect::<Vec<_>>(),
+            [[p(6.0), p(7.0), p(8.0)], [p(20.0), p(21.0), p(22.0)]]
+        );
+        assert_eq!((faces.bounds.0[0], faces.bounds.1[0]), (6.0, 22.0));
+        assert_eq!(faces.mesh().indices.len(), 6);
     }
 
     /// A face with a corner past the vertices, and a trailing partial face, drop; the rest keep

@@ -113,7 +113,27 @@ pub fn accumulate_wmo_group_collision(
     positions: &mut Vec<[f32; 3]>,
     indices: &mut Vec<u32>,
 ) {
-    accumulate_wmo_group_faces(group_bytes, MOPY_DETAIL, 0, positions, indices);
+    accumulate_wmo_group_faces(group_bytes, MOPY_DETAIL, 0, positions, indices, None);
+}
+
+/// [`accumulate_wmo_group_collision`], also appending each kept face's camera bit: true for a
+/// `NOCAMCOLLIDE` face, which the camera passes through. The walking faces without that bit plus
+/// the camera-only faces are exactly the camera faces ([`accumulate_wmo_group_camera_collision`]),
+/// so a model can hold the walking and camera-only sets alone.
+pub fn accumulate_wmo_group_collision_flagged(
+    group_bytes: &[u8],
+    positions: &mut Vec<[f32; 3]>,
+    indices: &mut Vec<u32>,
+    camera_passes: &mut Vec<bool>,
+) {
+    accumulate_wmo_group_faces(
+        group_bytes,
+        MOPY_DETAIL,
+        0,
+        positions,
+        indices,
+        Some(camera_passes),
+    );
 }
 
 /// Append one WMO group file's camera and line-of-sight triangles: every face but `NOCAMCOLLIDE`,
@@ -123,7 +143,7 @@ pub fn accumulate_wmo_group_camera_collision(
     positions: &mut Vec<[f32; 3]>,
     indices: &mut Vec<u32>,
 ) {
-    accumulate_wmo_group_faces(group_bytes, MOPY_NOCAMCOLLIDE, 0, positions, indices);
+    accumulate_wmo_group_faces(group_bytes, MOPY_NOCAMCOLLIDE, 0, positions, indices, None);
 }
 
 /// Append one WMO group file's camera-only triangles (`DETAIL` set, `NOCAMCOLLIDE` clear): the
@@ -139,6 +159,7 @@ pub fn accumulate_wmo_group_camera_only_collision(
         MOPY_DETAIL,
         positions,
         indices,
+        None,
     );
 }
 
@@ -150,6 +171,7 @@ fn accumulate_wmo_group_faces(
     require_mask: u8,
     positions: &mut Vec<[f32; 3]>,
     indices: &mut Vec<u32>,
+    mut camera_passes: Option<&mut Vec<bool>>,
 ) {
     let Ok(ParsedWmo::Group(group)) = parse_wmo(&mut Cursor::new(group_bytes)) else {
         return;
@@ -162,6 +184,20 @@ fn accumulate_wmo_group_faces(
         };
         if mopy.flags & skip_mask != 0 || mopy.flags & require_mask != require_mask {
             continue;
+        }
+        // A face with a corner past the vertices is skipped whole, so every kept face is three
+        // indices and its camera bit stays in step (a damaged file; none in 1.12's data).
+        let whole = (0..3).all(|k| {
+            group
+                .vertex_indices
+                .get(t * 3 + k)
+                .is_some_and(|&v| (v as usize) < group.vertex_positions.len())
+        });
+        if !whole {
+            continue;
+        }
+        if let Some(out) = camera_passes.as_deref_mut() {
+            out.push(mopy.flags & MOPY_NOCAMCOLLIDE != 0);
         }
         for k in 0..3 {
             let Some(&vidx) = group.vertex_indices.get(t * 3 + k) else {

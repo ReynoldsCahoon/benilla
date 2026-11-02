@@ -740,7 +740,7 @@ mod tests {
             group_collision_grids: Vec::new(),
             collision_bounds: None,
             collision: None,
-            collision_camera: Default::default(),
+            group_camera: Vec::new(),
             doodads: Vec::new(),
             doodad_sets: Vec::new(),
             lights: Vec::new(),
