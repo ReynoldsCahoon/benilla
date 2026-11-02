@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_assets::materials::WowModelMaterial;
-use benilla_assets::WmoModel;
+use benilla_assets::{WmoGroupGeom, WmoModel};
 use bevy::prelude::*;
 use bevy::time::Real;
 
@@ -20,6 +20,7 @@ use super::super::{
 };
 use super::{emitter_fade, placement_priority, spawn_model_entities, tag_world_object};
 use super::{FormSlices, ShadeSel, SpawnedModel};
+use crate::collision::{GroundDecalSurface, PickOccluder};
 use crate::interact::WorldObject;
 use crate::lighting::SharedLightBuffer;
 use crate::liquid::{spawn_wmo_liquids, LiquidAssets, WmoPool};
@@ -42,6 +43,8 @@ struct GroupSpawn {
 
 /// A spawned WMO placement's per-group render state.
 pub(in crate::terrain_stream) struct WmoGroups {
+    /// The root's `mpq://` path less `.wmo`: group `g`'s file is `<stem>_<g:03>.wmo`.
+    stem: Option<String>,
     object: Arc<WorldObject>,
     has_portals: bool,
     /// Each group's MOGI box through the placement, in WoW world coords.
@@ -54,6 +57,7 @@ pub(in crate::terrain_stream) struct WmoGroups {
 impl WmoGroups {
     pub(in crate::terrain_stream) fn new(
         m: &WmoModel,
+        stem: Option<String>,
         transform: &Transform,
         object: Arc<WorldObject>,
         has_portals: bool,
@@ -67,6 +71,7 @@ impl WmoGroups {
             .map(|g| Arc::from([g].as_slice()))
             .collect();
         Self {
+            stem,
             object,
             has_portals,
             boxes,
@@ -104,6 +109,22 @@ fn world_box(lo: [f32; 3], hi: [f32; 3], transform: &Transform) -> ([f32; 3], [f
     (min, max)
 }
 
+/// One model group's load, shared by every placement of the model: the reference's group lives in
+/// its model (`CMapObj`), loaded while any of its placements wants it.
+struct GroupLoad {
+    handle: Option<Handle<WmoGroupGeom>>,
+    installed: bool,
+    /// The frame a placement last wanted it (in the far box, or spawned inside its timer).
+    wanted: u64,
+}
+
+/// The model groups loading or installed, by model and group.
+#[derive(Resource, Default)]
+pub(in crate::terrain_stream) struct WmoGroupLoads {
+    loads: std::collections::HashMap<(AssetId<WmoModel>, u16), GroupLoad>,
+    frame: u64,
+}
+
 /// The render tables a group spawn writes, one parameter under Bevy's limit.
 type GroupTables<'w> = (
     ResMut<'w, Assets<WowModelMaterial>>,
@@ -123,7 +144,13 @@ type GroupTables<'w> = (
 pub(in crate::terrain_stream) fn spawn_wmo_groups(
     mut commands: Commands,
     placements: ResMut<Placements>,
-    wmos: Res<Assets<WmoModel>>,
+    mut wmos: ResMut<Assets<WmoModel>>,
+    // The group loads and their arrivals, which move into the model.
+    loading: (
+        ResMut<WmoGroupLoads>,
+        ResMut<Assets<WmoGroupGeom>>,
+        Res<AssetServer>,
+    ),
     mut forms: ResMut<ModelForms>,
     tables: GroupTables,
     shared_light: Option<Res<SharedLightBuffer>>,
@@ -136,6 +163,9 @@ pub(in crate::terrain_stream) fn spawn_wmo_groups(
 ) {
     let (mut materials, mut meshes, mut uv_reg, mut tint_reg, mut anim_table, mut merge, mut gx) =
         tables;
+    let (mut loads, mut geoms, asset_server) = loading;
+    loads.frame += 1;
+    let frame = loads.frame;
     let Some(shared_light) = shared_light else {
         return;
     };
@@ -165,6 +195,24 @@ pub(in crate::terrain_stream) fn spawn_wmo_groups(
             let key = ModelKey::WmoGroup(h.id(), gi);
             let inside = meets_far_box(&groups.boxes[g], center, far);
             let st = &mut groups.state[g];
+            // Wanted in the far box, and while spawned inside its timer: its data stays loaded.
+            let installed = if inside || st.spawned {
+                let load = loads.loads.entry((h.id(), gi)).or_insert(GroupLoad {
+                    handle: None,
+                    installed: false,
+                    wanted: frame,
+                });
+                load.wanted = frame;
+                if load.handle.is_none() && !load.installed {
+                    if let Some(stem) = &groups.stem {
+                        load.handle =
+                            Some(asset_server.load::<WmoGroupGeom>(format!("{stem}_{gi:03}.wmo")));
+                    }
+                }
+                load.installed
+            } else {
+                false
+            };
             if !inside {
                 if st.spawned {
                     st.out_secs += dt;
@@ -185,7 +233,7 @@ pub(in crate::terrain_stream) fn spawn_wmo_groups(
                 continue;
             }
             st.out_secs = 0.0;
-            if st.spawned || budget == 0 {
+            if st.spawned || budget == 0 || !installed {
                 continue;
             }
             let range = m.group_submeshes(gi);
@@ -295,6 +343,38 @@ pub(in crate::terrain_stream) fn spawn_wmo_groups(
                     }
                 }
             }
+            // The walking faces build while the group's box meets the far box, the camera faces
+            // near the boom ([`super::super::walk_collider`], [`super::super::camera_collider`]).
+            if let (Some(faces), Some(Some(bounds))) = (
+                m.group_collision_tris.get(g).filter(|f| !f.is_empty()),
+                m.group_collision_bounds.get(g),
+            ) {
+                ents.push(
+                    commands
+                        .spawn((
+                            super::super::walk_collider::WalkGroupCollider::new(
+                                faces.clone(),
+                                *bounds,
+                                p.transform,
+                            ),
+                            // The walk faces take the selection ring (floors, steps).
+                            GroundDecalSurface,
+                            // Clamps the mouse pick: the walk bake is the nearest occluder set.
+                            PickOccluder,
+                        ))
+                        .id(),
+                );
+            }
+            if let Some(Some(faces)) = m.group_camera.get(g) {
+                ents.push(
+                    commands
+                        .spawn(super::super::camera_collider::CameraGroupCollider::new(
+                            faces.clone(),
+                            p.transform,
+                        ))
+                        .id(),
+                );
+            }
             tag_world_object(&mut commands, &ents, &groups.object);
             p.entities.extend_from_slice(&ents);
             let st = &mut groups.state[g];
@@ -302,6 +382,33 @@ pub(in crate::terrain_stream) fn spawn_wmo_groups(
             st.spawned = true;
         }
     }
+    // Arrivals move into their model; a group no placement wanted this frame leaves it.
+    loads.loads.retain(|&(model, gi), load| {
+        if load.wanted != frame {
+            if load.installed {
+                if let Some(m) = wmos.get_mut_untracked(model) {
+                    m.uninstall_group(gi);
+                }
+            }
+            return false;
+        }
+        if !load.installed {
+            if let Some(handle) = &load.handle {
+                if let Some(geom) = geoms.remove(handle) {
+                    if let Some(m) = wmos.get_mut_untracked(model) {
+                        m.install_group(gi, geom);
+                    }
+                    load.installed = true;
+                    load.handle = None;
+                } else if asset_server.load_state(handle).is_failed() {
+                    // An unreadable group has nothing to install: it spawns empty.
+                    load.installed = true;
+                    load.handle = None;
+                }
+            }
+        }
+        true
+    });
 }
 
 #[cfg(test)]
@@ -344,7 +451,7 @@ mod tests {
             id: 1,
             detail: String::new(),
         });
-        let mut groups = WmoGroups::new(&model, &Transform::IDENTITY, object, false);
+        let mut groups = WmoGroups::new(&model, None, &Transform::IDENTITY, object, false);
         let at = [5.0, 5.0, 5.0];
         assert!(
             !groups.in_range_spawned(at, 177.0),

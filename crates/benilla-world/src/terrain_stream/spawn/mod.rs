@@ -20,7 +20,6 @@ use benilla_formats::{world_to_tile, M2Bounds};
 use bevy::camera::primitives::Aabb;
 use bevy::prelude::*;
 
-use crate::collision::{GroundDecalSurface, PickOccluder};
 use crate::doodad_anim::wants_rig;
 use crate::interact::WorldObject;
 use crate::lighting::SharedLightBuffer;
@@ -32,7 +31,6 @@ use crate::wmo_portal::{WmoGroupVis, WmoPortalInstance};
 use benilla_assets::m2_url;
 use benilla_assets::materials::WowModelMaterial;
 
-use super::camera_collider::CameraGroupCollider;
 use super::collider::{
     build_collider_task, doodad_bodies_disabled, doodad_hulls_bare, placement_collider_data,
     PendingCollider,
@@ -342,40 +340,8 @@ pub(super) fn spawn_loaded_placements(
                         p.portal_instance = Some(instance);
                         ents.push(instance); // despawns with the placement
                     }
-                    // Two colliders per group, each on its layer: the reference gathers different
-                    // faces for the body (drops DETAIL) and the camera (drops NOCAMCOLLIDE, keeps
-                    // DETAIL). The walk faces build while the group's box meets the far box
-                    // ([`super::walk_collider`]), as the reference collides loaded groups only.
-                    for (gi, faces) in m.group_collision_tris.iter().enumerate() {
-                        let Some(Some(bounds)) = m.group_collision_bounds.get(gi) else {
-                            continue; // no faces
-                        };
-                        ents.push(
-                            commands
-                                .spawn((
-                                    super::walk_collider::WalkGroupCollider::new(
-                                        faces.clone(),
-                                        *bounds,
-                                        p.transform,
-                                    ),
-                                    // The walk faces take the selection ring (floors, steps).
-                                    GroundDecalSurface,
-                                    // Clamps the mouse pick. The reference's occluder faces are
-                                    // MOPY reject-mask 0x84; the walk bake (0x04) is the nearest.
-                                    PickOccluder,
-                                ))
-                                .id(),
-                        );
-                    }
-                    // The camera faces per group, built only near the focus
-                    // ([`super::camera_collider`]).
-                    for faces in m.group_camera.iter().flatten() {
-                        ents.push(
-                            commands
-                                .spawn(CameraGroupCollider::new(faces.clone(), p.transform))
-                                .id(),
-                        );
-                    }
+                    // The colliders spawn with each group ([`groups::spawn_wmo_groups`]): a
+                    // group's faces load with it.
                     // MOLT lights: they light nearby models and the walls over their baked MOCV.
                     spawn_wmo_lights_for(
                         &mut commands,
@@ -387,8 +353,17 @@ pub(super) fn spawn_loaded_placements(
                     );
                     tag_world_object(&mut commands, &ents, &object);
                     p.doodads = resolve_wmo_doodads(m, p.doodad_set, p.transform, &asset_server);
-                    p.wmo_groups =
-                        Some(groups::WmoGroups::new(m, &p.transform, object, has_portals));
+                    p.wmo_groups = Some(groups::WmoGroups::new(
+                        m,
+                        // The groups load beside the root: `<stem>_NNN.wmo`.
+                        asset_server.get_path(h).map(|path| {
+                            let path = path.to_string();
+                            path.strip_suffix(".wmo").unwrap_or(&path).to_string()
+                        }),
+                        &p.transform,
+                        object,
+                        has_portals,
+                    ));
                     ents
                 }
             };

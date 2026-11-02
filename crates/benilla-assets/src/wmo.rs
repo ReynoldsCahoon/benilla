@@ -641,8 +641,6 @@ impl AssetLoader for WmoModelLoader {
             .unwrap_or(&root_path)
             .to_string();
 
-        let mut submeshes = Vec::new();
-        let mut submesh_group: Vec<u16> = Vec::new();
         // Pre-sized to the group count so MOPR group indices line up when a group file is skipped;
         // boxes from the root MOGI, the rest from each MOGP header.
         let mut group_nav: Vec<WmoGroupNav> = (0..root.group_count() as usize)
@@ -665,19 +663,9 @@ impl AssetLoader for WmoModelLoader {
                 }
             })
             .collect();
-        // Per group, the faces each set took (unread groups take none), for the slices.
-        let mut walk_faces: Vec<u32> = vec![0; root.group_count() as usize];
-        let mut cam_only_faces: Vec<u32> = vec![0; root.group_count() as usize];
-        let mut cam_only = CollisionMesh::default();
-        let mut col_pos: Vec<[f32; 3]> = Vec::new();
-        let mut col_idx: Vec<u32> = Vec::new();
-        // Per walking face: the camera passes it (NOCAMCOLLIDE), for the camera faces.
-        let mut walk_passes: Vec<bool> = Vec::new();
         let mut group_doodad_refs: Vec<Vec<u16>> = vec![Vec::new(); root.group_count() as usize];
         let mut group_light_refs: Vec<Vec<u16>> = vec![Vec::new(); root.group_count() as usize];
         let mut group_liquids: Vec<Option<LiquidMesh>> =
-            (0..root.group_count()).map(|_| None).collect();
-        let mut group_footprints: Vec<Option<FootprintTris>> =
             (0..root.group_count()).map(|_| None).collect();
         for gi in 0..root.group_count() {
             let group_url = format!("mpq://{stem}_{gi:03}.wmo");
@@ -694,33 +682,6 @@ impl AssetLoader for WmoModelLoader {
                 nav.fog_indices = h.fog_indices;
                 nav.group_liquid = h.group_liquid;
             }
-            // One walking gather feeds both the per-group faces and the flat collider.
-            let mut gpos: Vec<[f32; 3]> = Vec::new();
-            let mut gidx: Vec<u32> = Vec::new();
-            let mut gpass: Vec<bool> = Vec::new();
-            accumulate_wmo_group_collision_flagged(&gbytes, &mut gpos, &mut gidx, &mut gpass);
-            // Whole faces whose corners all exist, so the group's slice of the flat mesh reads
-            // as the per-group list did.
-            keep_whole_faces(&gpos, &mut gidx);
-            if let Some(n) = walk_faces.get_mut(gi as usize) {
-                *n = (gidx.len() / 3) as u32;
-            }
-            // The gather keeps whole faces only, so the bits stay one a face.
-            gpass.truncate(gidx.len() / 3);
-            walk_passes.extend_from_slice(&gpass);
-            let base = col_pos.len() as u32;
-            col_pos.extend_from_slice(&gpos);
-            col_idx.extend(gidx.iter().map(|i| i + base));
-            let (mut dpos, mut didx): (Vec<[f32; 3]>, Vec<u32>) = (Vec::new(), Vec::new());
-            accumulate_wmo_group_camera_only_collision(&gbytes, &mut dpos, &mut didx);
-            keep_whole_faces(&dpos, &mut didx);
-            if let Some(n) = cam_only_faces.get_mut(gi as usize) {
-                *n = (didx.len() / 3) as u32;
-                let base = cam_only.positions.len() as u32;
-                cam_only.positions.extend_from_slice(&dpos);
-                cam_only.indices.extend(didx.iter().map(|i| i + base));
-            }
-            let subs = wmo_group_submeshes(&gbytes, &root).map_err(to_io)?;
             // The reference walks MODR at `0x695aa0` and MOLR at `0x695c00`.
             if let Some(slot) = group_doodad_refs.get_mut(gi as usize) {
                 *slot = wmo_group_doodad_refs(&gbytes);
@@ -728,53 +689,8 @@ impl AssetLoader for WmoModelLoader {
             if let Some(slot) = group_light_refs.get_mut(gi as usize) {
                 *slot = wmo_group_light_refs(&gbytes);
             }
-            if let Some(slot) = group_footprints.get_mut(gi as usize) {
-                *slot = wmo_group_footprint_tris(&gbytes);
-            }
             if let Some(slot) = group_liquids.get_mut(gi as usize) {
                 *slot = wmo_group_liquid_mesh(&gbytes);
-            }
-            for sub in subs {
-                // Lowercased: Bevy's loader lookup is case-sensitive, and an uppercase `.BLP` falls
-                // to type-based resolution, ambiguous with Bevy's own image loader.
-                let texture = sub.texture.as_deref().map(|t| {
-                    ctx.load::<Image>(format!(
-                        "mpq://{}",
-                        t.replace('\\', "/").to_ascii_lowercase()
-                    ))
-                });
-                submeshes.push(ModelSubmesh {
-                    texture,
-                    skin_slot: sub.skin_slot,
-                    geoset_id: 0,
-                    char_slot: None,
-                    icon_slot: false,
-                    blend: sub.blend,
-                    two_sided: sub.two_sided,
-                    interior: sub.interior,
-                    emissive: sub.emissive,
-                    sidn: sub.sidn, // MOMT SIDN (0x10): the authored night-glow colour
-                    window: sub.window, // MOMT WINDOW (0x20): the interior midpoint light
-                    additive: sub.additive,
-                    env_map: false,
-                    stage1: None, // a WMO batch is one texture stage
-                    combine: None,
-                    no_depth_write: false,
-                    no_depth_test: false,
-                    fog_policy: sub.fog_policy,
-                    billboard: None,
-                    alpha_anim: None,
-                    uv_anim: None,
-                    uv_seq: None,
-                    uv_rot_seq: None,
-                    uv_scale_seq: None,
-                    rgb_anim: None,
-                    rgb_seq: None,
-                    wmo_batch: sub.wmo_batch, // the MOBA section: an interior group's lighting
-                    ground_quad: None,
-                    geometry: std::sync::Arc::new(sub),
-                });
-                submesh_group.push(gi as u16);
             }
         }
         let doodad_owner = modr_owners(root.doodads().len(), &group_doodad_refs);
@@ -787,47 +703,29 @@ impl AssetLoader for WmoModelLoader {
             &group_light_refs,
         );
 
-        col_pos.shrink_to_fit();
-        col_idx.shrink_to_fit();
-        let walk = Arc::new(CollisionMesh {
-            positions: col_pos,
-            indices: col_idx,
-        });
-        let group_collision_tris = GroupTris::slices(&walk, &walk_faces);
-        let collision = (!walk.indices.is_empty()).then_some(walk);
-        cam_only.positions.shrink_to_fit();
-        cam_only.indices.shrink_to_fit();
-        let group_camera_only_tris = GroupTris::slices(&Arc::new(cam_only), &cam_only_faces);
-        let walk_passes: Arc<[bool]> = walk_passes.into();
-        let group_camera = group_collision_tris
-            .iter()
-            .zip(&group_camera_only_tris)
-            .map(|(walk, only)| CameraFaces::new(walk.clone(), walk_passes.clone(), only.clone()))
-            .collect();
         resolve_shared_liquid_cells(&mut group_liquids);
         let portals = root.portals();
-        let (group_collision_bounds, collision_bounds) =
-            collision_tri_bounds(&group_collision_tris);
-        let group_footprint_bounds = footprint_tri_bounds(&group_footprints);
-        let group_collision_grids = collision_tri_grids(&group_collision_tris);
-        let group_footprint_grids = footprint_tri_grids(&group_footprints);
+        // A group's geometry loads with the group ([`WmoGroupGeom`], [`WmoModel::install_group`]):
+        // until then the per-group entries are empty, as the reference's queries skip a group
+        // that is not loaded (`0x6a4a00`).
+        let n = root.group_count() as usize;
         Ok(WmoModel {
             wmo_id: benilla_formats::wmo_root_id(&bytes),
-            submeshes,
-            submesh_group,
+            submeshes: Vec::new(),
+            submesh_group: Vec::new(),
             portal_vertices: portals.vertices.clone(),
             portal_infos: portals.infos.clone(),
             portal_refs: portals.refs.clone(),
             group_nav,
             fogs: root.fogs().to_vec(),
             skybox: root.skybox().map(str::to_owned),
-            group_collision_tris,
-            group_camera_only_tris,
-            group_collision_bounds,
-            group_collision_grids,
-            collision_bounds,
-            collision,
-            group_camera,
+            group_collision_tris: vec![GroupTris::default(); n],
+            group_camera_only_tris: vec![GroupTris::default(); n],
+            group_collision_bounds: vec![None; n],
+            group_collision_grids: vec![None; n],
+            collision_bounds: None,
+            collision: None,
+            group_camera: vec![None; n],
             doodads: root.doodads().to_vec(),
             doodad_sets: root.doodad_sets().to_vec(),
             lights: parse_wmo_lights(&bytes),
@@ -835,11 +733,11 @@ impl AssetLoader for WmoModelLoader {
             doodad_base,
             doodad_owner,
             doodad_groups,
-            group_footprints,
+            group_footprints: vec![None; n],
             material_ground_type: root.material_ground_types(),
             material_diff_color: root.material_diff_colors(),
-            group_footprint_bounds,
-            group_footprint_grids,
+            group_footprint_bounds: vec![None; n],
+            group_footprint_grids: vec![None; n],
             group_light_refs,
             group_liquids,
             convex_volume: root.convex_volume().to_vec(),
@@ -849,6 +747,247 @@ impl AssetLoader for WmoModelLoader {
     fn extensions(&self) -> &[&str] {
         &["wmo"]
     }
+}
+
+/// One WMO group's CPU data, loaded when the group is wanted and moved into its model
+/// ([`WmoModel::install_group`]); the asset itself is dropped after the move. The reference reads
+/// a group file when the group's box first meets the far box (`CMapObj::LoadGroup`, terrain/
+/// mapupdate#map-object-update) and frees it on its timer. Every group of a city at once, as the
+/// root loader held them, killed the iPad Air 2 landing in Stormwind (wow-optimize FINDINGS, "The
+/// landing spike").
+#[derive(Asset, TypePath, Default)]
+pub struct WmoGroupGeom {
+    pub submeshes: Vec<ModelSubmesh>,
+    pub walk: GroupTris,
+    pub camera_only: GroupTris,
+    pub camera: Option<CameraFaces>,
+    pub walk_bounds: Option<([f32; 3], [f32; 3])>,
+    pub walk_grid: Option<ColumnGrid>,
+    pub footprint: Option<FootprintTris>,
+    pub footprint_bounds: Option<([f32; 3], [f32; 3])>,
+    pub footprint_grid: Option<ColumnGrid>,
+}
+
+impl WmoGroupGeom {
+    /// Builds the group's data from its file; `None` for an unreadable file, `ctx` taking the
+    /// batches' texture loads.
+    fn from_file(
+        gbytes: &[u8],
+        root: &benilla_formats::WmoRoot,
+        ctx: &mut LoadContext<'_>,
+    ) -> std::io::Result<Self> {
+        let (mut wpos, mut widx, mut passes) = (Vec::new(), Vec::new(), Vec::new());
+        accumulate_wmo_group_collision_flagged(gbytes, &mut wpos, &mut widx, &mut passes);
+        keep_whole_faces(&wpos, &mut widx);
+        passes.truncate(widx.len() / 3);
+        let walk_faces = (widx.len() / 3) as u32;
+        let walk = GroupTris::slices(
+            &Arc::new(CollisionMesh {
+                positions: wpos,
+                indices: widx,
+            }),
+            &[walk_faces],
+        )
+        .remove(0);
+        let (mut opos, mut oidx) = (Vec::new(), Vec::new());
+        accumulate_wmo_group_camera_only_collision(gbytes, &mut opos, &mut oidx);
+        keep_whole_faces(&opos, &mut oidx);
+        let only_faces = (oidx.len() / 3) as u32;
+        let camera_only = GroupTris::slices(
+            &Arc::new(CollisionMesh {
+                positions: opos,
+                indices: oidx,
+            }),
+            &[only_faces],
+        )
+        .remove(0);
+        let camera = CameraFaces::new(walk.clone(), passes.into(), camera_only.clone());
+        let walk_set = [walk];
+        let (walk_bounds, _) = collision_tri_bounds(&walk_set);
+        let walk_grid = collision_tri_grids(&walk_set).remove(0);
+        let [walk] = walk_set;
+        let footprint = [wmo_group_footprint_tris(gbytes)];
+        let footprint_bounds = footprint_tri_bounds(&footprint).remove(0);
+        let footprint_grid = footprint_tri_grids(&footprint).remove(0);
+        let [footprint] = footprint;
+        Ok(Self {
+            submeshes: group_model_submeshes(gbytes, root, ctx)?,
+            walk,
+            camera_only,
+            camera,
+            walk_bounds: walk_bounds.into_iter().next().flatten(),
+            walk_grid,
+            footprint,
+            footprint_bounds,
+            footprint_grid,
+        })
+    }
+}
+
+/// Loads one WMO group file (`<root stem>_NNN.wmo`) as a [`WmoGroupGeom`]; picked over
+/// [`WmoModelLoader`] by the requested asset type.
+#[derive(Default, TypePath)]
+pub struct WmoGroupLoader;
+
+impl AssetLoader for WmoGroupLoader {
+    type Asset = WmoGroupGeom;
+    type Settings = ();
+    type Error = std::io::Error;
+
+    async fn load(
+        &self,
+        reader: &mut dyn Reader,
+        _settings: &(),
+        ctx: &mut LoadContext<'_>,
+    ) -> Result<WmoGroupGeom, Self::Error> {
+        let mut gbytes = Vec::new();
+        reader.read_to_end(&mut gbytes).await?;
+        // The root holds the materials the batches read: `<stem>_NNN.wmo` names `<stem>.wmo`.
+        let path = ctx.path().path().to_string_lossy().to_ascii_lowercase();
+        let stem = path
+            .strip_suffix(".wmo")
+            .and_then(|p| p.rsplit_once('_'))
+            .map(|(stem, _)| stem.to_string())
+            .ok_or_else(|| std::io::Error::other(format!("not a group file: {path}")))?;
+        let root_bytes = ctx
+            .read_asset_bytes(format!("mpq://{stem}.wmo"))
+            .await
+            .map_err(std::io::Error::other)?;
+        let root =
+            parse_wmo_root(&root_bytes).map_err(|e| std::io::Error::other(format!("{e:#}")))?;
+        WmoGroupGeom::from_file(&gbytes, &root, ctx)
+    }
+
+    fn extensions(&self) -> &[&str] {
+        &["wmo"]
+    }
+}
+
+impl WmoModel {
+    /// Moves a loaded group's data into the model: its batches into [`Self::submeshes`] at the
+    /// group's place in group order, its faces, grids and footprint into the per-group entries.
+    pub fn install_group(&mut self, group: u16, geom: WmoGroupGeom) {
+        let g = group as usize;
+        if g >= self.group_nav.len() {
+            return;
+        }
+        self.uninstall_group(group);
+        let at = self.submesh_group.partition_point(|&x| x < group);
+        let n = geom.submeshes.len();
+        self.submeshes.splice(at..at, geom.submeshes);
+        self.submesh_group
+            .splice(at..at, std::iter::repeat_n(group, n));
+        self.group_collision_tris[g] = geom.walk;
+        self.group_camera_only_tris[g] = geom.camera_only;
+        self.group_camera[g] = geom.camera;
+        self.group_collision_bounds[g] = geom.walk_bounds;
+        self.group_collision_grids[g] = geom.walk_grid;
+        self.group_footprints[g] = geom.footprint;
+        self.group_footprint_bounds[g] = geom.footprint_bounds;
+        self.group_footprint_grids[g] = geom.footprint_grid;
+        self.refresh_collision_bounds();
+    }
+
+    /// Empties a group's entries again: its batches leave [`Self::submeshes`].
+    pub fn uninstall_group(&mut self, group: u16) {
+        let g = group as usize;
+        if g >= self.group_nav.len() {
+            return;
+        }
+        let range = self.group_submeshes(group);
+        self.submeshes.drain(range.clone());
+        self.submesh_group.drain(range);
+        self.group_collision_tris[g] = GroupTris::default();
+        self.group_camera_only_tris[g] = GroupTris::default();
+        self.group_camera[g] = None;
+        self.group_collision_bounds[g] = None;
+        self.group_collision_grids[g] = None;
+        self.group_footprints[g] = None;
+        self.group_footprint_bounds[g] = None;
+        self.group_footprint_grids[g] = None;
+        self.refresh_collision_bounds();
+    }
+
+    /// Whether a group's data is installed.
+    pub fn group_installed(&self, group: u16) -> bool {
+        self.group_collision_bounds
+            .get(group as usize)
+            .is_some_and(Option::is_some)
+            || !self.group_submeshes(group).is_empty()
+            || self
+                .group_footprints
+                .get(group as usize)
+                .is_some_and(Option::is_some)
+    }
+
+    fn refresh_collision_bounds(&mut self) {
+        self.collision_bounds = self.group_collision_bounds.iter().flatten().fold(
+            None::<([f32; 3], [f32; 3])>,
+            |acc, (lo, hi)| match acc {
+                None => Some((*lo, *hi)),
+                Some((mut a, mut b)) => {
+                    for k in 0..3 {
+                        a[k] = a[k].min(lo[k]);
+                        b[k] = b[k].max(hi[k]);
+                    }
+                    Some((a, b))
+                }
+            },
+        );
+    }
+}
+
+/// One group file's render batches as model submeshes, their textures requested through `ctx`.
+fn group_model_submeshes(
+    gbytes: &[u8],
+    root: &benilla_formats::WmoRoot,
+    ctx: &mut LoadContext<'_>,
+) -> std::io::Result<Vec<ModelSubmesh>> {
+    let subs =
+        wmo_group_submeshes(gbytes, root).map_err(|e| std::io::Error::other(format!("{e:#}")))?;
+    let mut out = Vec::with_capacity(subs.len());
+    for sub in subs {
+        // Lowercased: Bevy's loader lookup is case-sensitive, and an uppercase `.BLP` falls
+        // to type-based resolution, ambiguous with Bevy's own image loader.
+        let texture = sub.texture.as_deref().map(|t| {
+            ctx.load::<Image>(format!(
+                "mpq://{}",
+                t.replace('\\', "/").to_ascii_lowercase()
+            ))
+        });
+        out.push(ModelSubmesh {
+            texture,
+            skin_slot: sub.skin_slot,
+            geoset_id: 0,
+            char_slot: None,
+            icon_slot: false,
+            blend: sub.blend,
+            two_sided: sub.two_sided,
+            interior: sub.interior,
+            emissive: sub.emissive,
+            sidn: sub.sidn,     // MOMT SIDN (0x10): the authored night-glow colour
+            window: sub.window, // MOMT WINDOW (0x20): the interior midpoint light
+            additive: sub.additive,
+            env_map: false,
+            stage1: None, // a WMO batch is one texture stage
+            combine: None,
+            no_depth_write: false,
+            no_depth_test: false,
+            fog_policy: sub.fog_policy,
+            billboard: None,
+            alpha_anim: None,
+            uv_anim: None,
+            uv_seq: None,
+            uv_rot_seq: None,
+            uv_scale_seq: None,
+            rgb_anim: None,
+            rgb_seq: None,
+            wmo_batch: sub.wmo_batch, // the MOBA section: an interior group's lighting
+            ground_quad: None,
+            geometry: std::sync::Arc::new(sub),
+        });
+    }
+    Ok(out)
 }
 
 /// The MLIQ shared-cell gate: a cell flagged `0x80` ([`LiquidMesh::shared`]) is authored in two
@@ -1182,6 +1321,50 @@ mod group_tris_tests {
         );
         assert_eq!((faces.bounds.0[0], faces.bounds.1[0]), (6.0, 22.0));
         assert_eq!(faces.mesh().indices.len(), 6);
+    }
+
+    /// Installing a group fills its entries and the model's box; uninstalling one empties only its
+    /// own (batch order across groups: `tests::loads_a_wmo_model_through_the_pipeline`).
+    #[test]
+    fn groups_install_and_uninstall_alone() {
+        let nav = WmoGroupNav {
+            flags: 0,
+            bbox_min: [0.0; 3],
+            bbox_max: [1.0; 3],
+            ref_start: 0,
+            ref_count: 0,
+            area_table_id: 0,
+            fog_indices: [0; 4],
+            group_liquid: benilla_formats::NO_GROUP_LIQUID,
+        };
+        let n = 3;
+        let mut m = WmoModel {
+            group_nav: vec![nav; n],
+            group_collision_tris: vec![GroupTris::default(); n],
+            group_camera_only_tris: vec![GroupTris::default(); n],
+            group_camera: vec![None; n],
+            group_collision_bounds: vec![None; n],
+            group_collision_grids: vec![None; n],
+            group_footprints: vec![None; n],
+            group_footprint_bounds: vec![None; n],
+            group_footprint_grids: vec![None; n],
+            ..Default::default()
+        };
+        let batches = |_: usize| WmoGroupGeom {
+            walk: GroupTris::from(vec![[[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]]),
+            walk_bounds: Some(([0.0; 3], [1.0, 1.0, 0.0])),
+            ..Default::default()
+        };
+        m.install_group(2, batches(1));
+        m.install_group(0, batches(2));
+        assert!(m.group_installed(0) && !m.group_installed(1) && m.group_installed(2));
+        m.uninstall_group(0);
+        assert!(!m.group_installed(0) && m.group_installed(2));
+        assert!(m.group_collision_tris[0].is_empty() && m.group_collision_bounds[0].is_none());
+        assert!(
+            m.collision_bounds.is_some(),
+            "group 2 still bounds the model"
+        );
     }
 
     /// A face with a corner past the vertices, and a trailing partial face, drop; the rest keep

@@ -581,6 +581,7 @@ impl Plugin for TerrainPlugin {
             .init_resource::<TerrainResidency>()
             .init_resource::<StreamActivity>()
             .init_resource::<Placements>()
+            .init_resource::<spawn::groups::WmoGroupLoads>()
             .init_resource::<HullWelds>()
             .init_resource::<StaticMerge>()
             .init_resource::<crate::model_forms::ModelForms>()

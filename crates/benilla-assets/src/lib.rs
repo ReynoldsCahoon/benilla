@@ -59,7 +59,7 @@ pub use benilla_formats::{WmoPortalInfo, WmoPortalRef};
 pub use wmo::{
     cap96, collision_tri_bounds, collision_tri_grids, floor168, footprint_tri_bounds,
     footprint_tri_grids, CameraFaces, DoodadBase, GroupCollision, GroupTris, GroupTrisIter,
-    WmoGroupNav, WmoModel, WmoModelLoader,
+    WmoGroupGeom, WmoGroupLoader, WmoGroupNav, WmoModel, WmoModelLoader,
 };
 
 /// The asset-source id for MPQ-backed assets: load paths look like `mpq://World/Azeroth/foo.adt`.
@@ -289,6 +289,8 @@ pub fn register_asset_loaders(app: &mut App) {
     app.register_asset_loader(BlpImageLoader);
     app.register_asset_loader(M2ModelLoader);
     app.register_asset_loader(WmoModelLoader);
+    app.init_asset::<WmoGroupGeom>();
+    app.register_asset_loader(WmoGroupLoader);
     app.register_asset_loader(AdtLoader);
     app.register_asset_loader(WdtIndexLoader);
     // The materials' WGSL, compiled in; it too needs `AssetPlugin` first.
@@ -613,25 +615,65 @@ mod tests {
         app.init_asset::<Mesh>();
         register_asset_loaders(&mut app);
 
-        // The Goldshire Inn: a root and its group files.
-        let handle: Handle<WmoModel> = app
-            .world()
-            .resource::<AssetServer>()
-            .load("mpq://World/wmo/Azeroth/Buildings/GoldshireInn/GoldshireInn.wmo");
-
-        let mut info = None;
+        // The Goldshire Inn: a root and its group files. The root carries no group geometry; each
+        // group loads as its own `WmoGroupGeom` and installs into the model.
+        let path = "mpq://World/wmo/Azeroth/Buildings/GoldshireInn/GoldshireInn.wmo";
+        let handle: Handle<WmoModel> = app.world().resource::<AssetServer>().load(path);
+        let mut groups = None;
         for _ in 0..600 {
             app.update();
             if let Some(m) = app.world().resource::<Assets<WmoModel>>().get(&handle) {
-                let geometries: Vec<_> = m.submeshes.iter().map(|s| s.geometry.clone()).collect();
-                let textured = m.submeshes.iter().filter(|s| s.texture.is_some()).count();
-                info = Some((geometries, textured));
+                assert!(m.submeshes.is_empty(), "the root alone carries no batches");
+                groups = Some(m.group_nav.len());
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        let (geometries, textured) =
-            info.expect("the Goldshire Inn WMO should load via mpq:// + WmoModelLoader");
+        let groups = groups.expect("the Goldshire Inn WMO should load via mpq:// + WmoModelLoader");
+        let stem = path.strip_suffix(".wmo").unwrap();
+        let group_handles: Vec<Handle<WmoGroupGeom>> = (0..groups)
+            .map(|g| {
+                app.world()
+                    .resource::<AssetServer>()
+                    .load(format!("{stem}_{g:03}.wmo"))
+            })
+            .collect();
+        for _ in 0..600 {
+            app.update();
+            let geoms = app.world().resource::<Assets<WmoGroupGeom>>();
+            if group_handles.iter().all(|h| geoms.get(h).is_some()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // Last group first: each install takes its place in group order whatever the arrival.
+        for (g, h) in group_handles.iter().enumerate().rev() {
+            let geom = app
+                .world_mut()
+                .resource_mut::<Assets<WmoGroupGeom>>()
+                .remove(h)
+                .expect("every group loads via WmoGroupLoader");
+            let mut models = app.world_mut().resource_mut::<Assets<WmoModel>>();
+            models
+                .get_mut_untracked(&handle)
+                .unwrap()
+                .install_group(g as u16, geom);
+        }
+        let m = app
+            .world()
+            .resource::<Assets<WmoModel>>()
+            .get(&handle)
+            .unwrap();
+        assert!(
+            m.submesh_group.windows(2).all(|w| w[0] <= w[1]),
+            "installed batches stay in group order"
+        );
+        assert!(
+            m.group_collision_tris.iter().any(|t| !t.is_empty()),
+            "walking faces installed"
+        );
+        let geometries: Vec<_> = m.submeshes.iter().map(|s| s.geometry.clone()).collect();
+        let textured = m.submeshes.iter().filter(|s| s.texture.is_some()).count();
         assert!(
             !geometries.is_empty(),
             "the inn has render batches across its groups"
