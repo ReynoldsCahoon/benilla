@@ -26,7 +26,7 @@ use crate::{
     event::Event,
     observer::Observers,
     query::DebugCheckedUnwrap,
-    storage::{ImmutableSparseSet, SparseArray, SparseSet, TableId, TableRow},
+    storage::{ImmutableSparseSet, SparseSet, TableId, TableRow},
 };
 use alloc::{boxed::Box, vec::Vec};
 use bevy_platform::collections::{hash_map::Entry, HashMap};
@@ -204,9 +204,46 @@ impl BundleComponentStatus for SpawnBundleStatus {
 /// [`World`]: crate::world::World
 #[derive(Default)]
 pub struct Edges {
-    insert_bundle: SparseArray<BundleId, ArchetypeAfterBundleInsert>,
-    remove_bundle: SparseArray<BundleId, Option<ArchetypeId>>,
-    take_bundle: SparseArray<BundleId, Option<ArchetypeId>>,
+    insert_bundle: EdgeMap<ArchetypeAfterBundleInsert>,
+    remove_bundle: EdgeMap<Option<ArchetypeId>>,
+    take_bundle: EdgeMap<Option<ArchetypeId>>,
+}
+
+/// benilla: an archetype's edges for the bundles it has seen, as `(BundleId, value)` pairs sorted
+/// by id and found by binary search (`BENILLA.md`). Upstream each was a `SparseArray`, a dense
+/// array as long as the highest `BundleId` the archetype ever met, so one late bundle cost an entry
+/// for every bundle the app had registered before it, per archetype.
+struct EdgeMap<V> {
+    entries: Vec<(BundleId, V)>,
+}
+
+impl<V> Default for EdgeMap<V> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl<V> EdgeMap<V> {
+    #[inline]
+    fn find(&self, bundle_id: BundleId) -> Result<usize, usize> {
+        self.entries
+            .binary_search_by(|(id, _)| id.index().cmp(&bundle_id.index()))
+    }
+
+    #[inline]
+    fn get(&self, bundle_id: BundleId) -> Option<&V> {
+        self.find(bundle_id).ok().map(|at| &self.entries[at].1)
+    }
+
+    #[inline]
+    fn insert(&mut self, bundle_id: BundleId, value: V) {
+        match self.find(bundle_id) {
+            Ok(at) => self.entries[at].1 = value,
+            Err(at) => self.entries.insert(at, (bundle_id, value)),
+        }
+    }
 }
 
 impl Edges {

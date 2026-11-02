@@ -59,5 +59,20 @@ Test: `storage::table::tests::a_shrunk_table_keeps_its_rows_and_an_emptied_one_f
 Measured (Mac, 20 teleports 20 s apart, heap sampler at 465 s, one build, the call off vs on):
 `bevy_ecs::storage::table` 90.1 MB vs 10.2 MB; total sampled heap 624.6 vs 550.7 MB.
 
+## The patch — an archetype's edges keep only the bundles it has seen
+
+Every `Archetype` caches its transitions in `Edges` (`src/archetype.rs`): the archetype an insert,
+remove or take of a bundle leads to. Upstream each of the three caches is a `SparseArray` keyed by
+`BundleId`, a dense array as long as the highest bundle id the archetype ever met; benilla registers
+a bundle id for every distinct insert and remove, so an archetype that meets a late one holds an
+entry (64 bytes for an insert) for every bundle registered before it. Each cache is now an
+`EdgeMap`: the `(BundleId, value)` pairs it holds, sorted by id and found by binary search. New
+edges are rare (the first time an entity of that archetype takes that path); lookups stay a
+search over the few bundles one archetype has met.
+
+Measured (Mac, 20 teleports 20 s apart, heap sampler, the same route before and after):
+`bevy_ecs::archetype::Edges` 12.9 MB at 160 s and 18.1 MB at 465 s over ~2650 archetypes (~6.8 KB
+each) before; under the sampler's 64 KiB resolution after.
+
 Check: `diff -r <registry>/bevy_ecs-0.18.1 third_party/bevy_ecs` shows only those lines and this
 file.
