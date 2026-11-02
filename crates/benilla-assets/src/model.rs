@@ -489,6 +489,9 @@ pub(crate) fn build_animation_clip(
         }
         pose.push(bone);
     }
+    // Inserted in bone order a bone at a time: trimmed, or a city's clips kept up to twice their
+    // bones for the model's life (wow-optimize FINDINGS, "The landing spike").
+    pose.bones.shrink_to_fit();
     // Bevy takes a clip's duration from its curves: the latest end, else (no curve) the clock
     // would never leave 0.
     clip.set_duration(end.unwrap_or(anim.duration.max(1e-3)));
