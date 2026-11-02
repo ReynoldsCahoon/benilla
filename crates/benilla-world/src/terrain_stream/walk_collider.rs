@@ -67,6 +67,13 @@ impl WalkGroupCollider {
         }
     }
 
+    /// Whether a body may be released over this group ([`super::Placement::up`]): its collider
+    /// has attached (`built`), or its faces lie outside the far box around `at`, where
+    /// [`stage_walk_colliders`] builds nothing.
+    pub(super) fn stands(&self, built: bool, at: [f32; 3], far: f32) -> bool {
+        built || self.past_far_box(at, far) > 0.0
+    }
+
     /// How far outside the far box around `at` the group's box lies: the largest per-axis gap
     /// beyond `far` (0 or less when the boxes meet, the reference's closed test).
     fn past_far_box(&self, at: [f32; 3], far: f32) -> f32 {

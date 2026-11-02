@@ -37,6 +37,8 @@ const GROUPS_PER_FRAME: usize = 24;
 struct GroupSpawn {
     ents: Vec<Entity>,
     spawned: bool,
+    /// The group's walking collider, when it has faces to walk on.
+    walk: Option<Entity>,
     /// Seconds the group's box has been outside the far box while spawned.
     out_secs: f32,
 }
@@ -82,12 +84,21 @@ impl WmoGroups {
         }
     }
 
-    /// Every group whose box meets the far box has spawned: the loading bar's test.
-    pub(in crate::terrain_stream) fn in_range_spawned(&self, center: [f32; 3], far: f32) -> bool {
-        self.boxes
-            .iter()
-            .zip(&self.state)
-            .all(|(b, s)| s.spawned || !meets_far_box(b, center, far))
+    /// Every group whose box meets the far box has spawned with its walking collider ready to stand
+    /// on (`walk_built`): the loading bar's and the settle release's test. The reference loads a
+    /// group's collision with the group (`0x6a4a00` gathers only loaded groups), so a body is never
+    /// released over a group that draws but cannot be stood on; the walking collider builds a
+    /// frame and an off-thread trimesh after the group spawns, and a release in that gap dropped
+    /// the body through a building's floor and the terrain hole under it.
+    pub(in crate::terrain_stream) fn in_range_spawned(
+        &self,
+        center: [f32; 3],
+        far: f32,
+        walk_built: &dyn Fn(Entity) -> bool,
+    ) -> bool {
+        self.boxes.iter().zip(&self.state).all(|(b, s)| {
+            !meets_far_box(b, center, far) || (s.spawned && s.walk.is_none_or(walk_built))
+        })
     }
 }
 
@@ -223,6 +234,7 @@ pub(in crate::terrain_stream) fn spawn_wmo_groups(
                         }
                         p.entities.retain(|e| !gone.contains(e));
                         st.spawned = false;
+                        st.walk = None;
                         st.out_secs = 0.0;
                         if let (Some(gx), Some(i)) = (gx.as_deref_mut(), instance) {
                             gx.release_wmo_group(i, gi);
@@ -345,25 +357,26 @@ pub(in crate::terrain_stream) fn spawn_wmo_groups(
             }
             // The walking faces build while the group's box meets the far box, the camera faces
             // near the boom ([`super::super::walk_collider`], [`super::super::camera_collider`]).
+            let mut walk = None;
             if let (Some(faces), Some(Some(bounds))) = (
                 m.group_collision_tris.get(g).filter(|f| !f.is_empty()),
                 m.group_collision_bounds.get(g),
             ) {
-                ents.push(
-                    commands
-                        .spawn((
-                            super::super::walk_collider::WalkGroupCollider::new(
-                                faces.clone(),
-                                *bounds,
-                                p.transform,
-                            ),
-                            // The walk faces take the selection ring (floors, steps).
-                            GroundDecalSurface,
-                            // Clamps the mouse pick: the walk bake is the nearest occluder set.
-                            PickOccluder,
-                        ))
-                        .id(),
-                );
+                let id = commands
+                    .spawn((
+                        super::super::walk_collider::WalkGroupCollider::new(
+                            faces.clone(),
+                            *bounds,
+                            p.transform,
+                        ),
+                        // The walk faces take the selection ring (floors, steps).
+                        GroundDecalSurface,
+                        // Clamps the mouse pick: the walk bake is the nearest occluder set.
+                        PickOccluder,
+                    ))
+                    .id();
+                ents.push(id);
+                walk = Some(id);
             }
             if let Some(Some(faces)) = m.group_camera.get(g) {
                 ents.push(
@@ -380,6 +393,7 @@ pub(in crate::terrain_stream) fn spawn_wmo_groups(
             let st = &mut groups.state[g];
             st.ents = ents;
             st.spawned = true;
+            st.walk = walk;
             // The props this group names load with it, as the reference creates a group's
             // doodads once the group is loaded; the spawner takes them as their models land.
             for d in p.doodads.iter_mut() {
@@ -463,13 +477,20 @@ mod tests {
         let mut groups = WmoGroups::new(&model, None, &Transform::IDENTITY, object, false);
         let at = [5.0, 5.0, 5.0];
         assert!(
-            !groups.in_range_spawned(at, 177.0),
+            !groups.in_range_spawned(at, 177.0, &|_| true),
             "the near group is not up yet"
         );
         groups.state[0].spawned = true;
         assert!(
-            groups.in_range_spawned(at, 177.0),
+            groups.in_range_spawned(at, 177.0, &|_| true),
             "the far group does not hold it"
         );
+        // A near group that has walking faces is up only once they have attached.
+        groups.state[0].walk = Some(Entity::from_raw_u32(9).unwrap());
+        assert!(
+            !groups.in_range_spawned(at, 177.0, &|_| false),
+            "a near group whose walking collider is still building holds it"
+        );
+        assert!(groups.in_range_spawned(at, 177.0, &|e| e == Entity::from_raw_u32(9).unwrap()));
     }
 }

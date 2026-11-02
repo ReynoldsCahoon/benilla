@@ -277,8 +277,9 @@ impl Placement {
     }
 
     /// Up for the loading bar: spawned with its props, or parked out of the far box, which loads
-    /// nothing. Parked inside it, it is about to load, so not up.
-    fn up(&self, center: [f32; 3], far: f32) -> bool {
+    /// nothing. Parked inside it, it is about to load, so not up. `walk_built` answers whether a
+    /// group's walking collider may be stood on ([`spawn::groups::WmoGroups::in_range_spawned`]).
+    fn up(&self, center: [f32; 3], far: f32, walk_built: &dyn Fn(Entity) -> bool) -> bool {
         match (&self.model, &self.gate) {
             (ModelHandle::WmoParked, Some(g)) => !meets_far_box(&g.bounds, center, far),
             // Spawned, with its props and every group in the far box.
@@ -288,7 +289,7 @@ impl Placement {
                     && self
                         .wmo_groups
                         .as_ref()
-                        .is_none_or(|g| g.in_range_spawned(center, far))
+                        .is_none_or(|g| g.in_range_spawned(center, far, walk_built))
             }
         }
     }
@@ -1071,10 +1072,15 @@ fn spawn_streamed_tiles(
     mut load_progress: Option<ResMut<WorldLoadProgress>>,
     // `None` only under `WOW_STATIC_GX=0`.
     mut staticgx: Option<ResMut<crate::static_gx::StaticGx>>,
-    // The far box a parked WMO is judged against ([`Placement::up`]).
+    // The far box a parked WMO is judged against, and the walking colliders that have attached
+    // ([`Placement::up`]).
     far_box: (
         Query<&Transform, With<WorldCamera>>,
         Res<crate::view::ViewDistance>,
+        Query<(
+            &walk_collider::WalkGroupCollider,
+            Has<avian3d::prelude::Collider>,
+        )>,
     ),
 ) {
     let (mut materials, mut meshes, wdts, mut activity) = asset_stores;
@@ -1245,6 +1251,14 @@ fn spawn_streamed_tiles(
             };
             p.total = desired.len();
             p.ready = desired.iter().filter(|c| spawned(c)).count();
+            // A WMO group's walking collider may be stood on ([`Placement::up`]); one whose spawn is
+            // still queued is still coming.
+            let walk_built = |e| {
+                far_box
+                    .2
+                    .get(e)
+                    .is_ok_and(|(group, built)| group.stands(built, focus_wow, far))
+            };
             // The focus neighbourhood's placements count too, each up once its model and its WMO
             // props have spawned; a tile not yet up holds `scene_ready` down itself.
             let mut near_pending = 0usize;
@@ -1260,7 +1274,7 @@ fn spawn_streamed_tiles(
                         Some(t) if tile_done(t, &asset_server) => {
                             for uid in &t.placements {
                                 if let Some(pl) = placements.by_id.get(uid) {
-                                    let up = pl.up(focus_wow, far);
+                                    let up = pl.up(focus_wow, far, &walk_built);
                                     p.total += 1;
                                     p.ready += usize::from(up);
                                     near_pending += usize::from(!up);
@@ -1274,12 +1288,13 @@ fn spawn_streamed_tiles(
             p.placements_pending = near_pending;
             // `focus_resident` already folds in the WDT gate and the global WMO's spawn.
             p.scene_ready = p.focus_resident && !near_tile_missing && near_pending == 0;
-            // A WMO-only map counts its one placement, props included, which keeps `total > 0`.
+            // A WMO-only map counts its one placement as any other: props, and every group in the
+            // far box with its walking collider; it keeps `total > 0`.
             if state.global_wmo {
                 let full = placements
                     .by_id
                     .get(&GLOBAL_WMO_UID)
-                    .is_some_and(|p| p.spawned && p.doodads.iter().all(|d| d.spawned || !d.wanted));
+                    .is_some_and(|p| p.up(focus_wow, far, &walk_built));
                 p.total += 1;
                 p.ready += usize::from(full);
                 p.scene_ready &= full;
@@ -2290,7 +2305,7 @@ mod wmo_gate_tests {
         assert!(parked(&app));
         assert_eq!(pending(&app), 0);
         let pl = app.world().resource::<Placements>();
-        assert!(pl.by_id[&7].up([0.0, 0.0, 50.0], far));
+        assert!(pl.by_id[&7].up([0.0, 0.0, 50.0], far, &|_| false));
     }
 
     /// The focus comes within the far clip of the box: the model loads and counts as pending;
