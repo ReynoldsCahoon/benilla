@@ -267,6 +267,21 @@ pub struct WmoInstance {
     pub doodad_set: u16,
     /// MODF name-set index, the placement's `WMOAreaTable.NameSetID`.
     pub name_set: u16,
+    /// The placed bounding box `(min, max)` in WoW world coords, from the MODF extents as the
+    /// reference's `0x695650` builds it (the axis swap negates and so swaps x and y bounds); `None`
+    /// where the source carries none (a WDT's one-object map).
+    pub bounds: Option<([f32; 3], [f32; 3])>,
+}
+
+/// The MODF extents (file axes, min then max) as a world box: `0x695650`'s min (o − max.z,
+/// o − max.x, min.y) and max (o − min.z, o − min.x, max.y), `o` the map centre.
+pub fn modf_world_bounds(extents: [[f32; 3]; 2]) -> ([f32; 3], [f32; 3]) {
+    const MAP_CENTER: f32 = 32.0 * TILE_SIZE;
+    let [lo, hi] = extents;
+    (
+        [MAP_CENTER - hi[2], MAP_CENTER - hi[0], lo[1]],
+        [MAP_CENTER - lo[2], MAP_CENTER - lo[0], hi[1]],
+    )
 }
 
 /// One ADT tile: its chunk meshes, placed doodads and buildings.
@@ -499,6 +514,7 @@ pub fn adt_to_tile_mesh(adt_bytes: &[u8]) -> Result<TileMesh> {
                 unique_id: w.unique_id,
                 doodad_set: w.doodad_set,
                 name_set: w.name_set,
+                bounds: Some(modf_world_bounds(w.extents)),
             })
         })
         .collect();
@@ -858,5 +874,29 @@ mod tests {
             hits > 12000,
             "the sample grid should land on terrain almost everywhere: {hits}"
         );
+    }
+}
+
+#[cfg(test)]
+mod modf_bounds_tests {
+    use super::*;
+
+    /// The world box holds the world position whenever the file box holds the file position: the
+    /// box and the position take the same axis swap, the box's swapped bounds staying ordered.
+    #[test]
+    fn the_world_box_holds_the_placement_it_bounds() {
+        const C: f32 = 32.0 * TILE_SIZE;
+        let file_pos = [17000.0_f32, 40.0, 16500.0];
+        let extents = [[16900.0, 10.0, 16450.0], [17100.0, 90.0, 16600.0]];
+        let world = [C - file_pos[2], C - file_pos[0], file_pos[1]];
+        let (lo, hi) = modf_world_bounds(extents);
+        for a in 0..3 {
+            assert!(
+                lo[a] <= world[a] && world[a] <= hi[a],
+                "axis {a}: {lo:?} {world:?} {hi:?}"
+            );
+            assert!(lo[a] < hi[a]);
+        }
+        assert_eq!((lo[2], hi[2]), (10.0, 90.0), "z is the file's y, unswapped");
     }
 }

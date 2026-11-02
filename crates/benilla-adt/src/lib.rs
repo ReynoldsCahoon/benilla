@@ -186,6 +186,9 @@ pub struct WmoPlacement {
     pub unique_id: u32,
     pub position: [f32; 3],
     pub rotation: [f32; 3],
+    /// The placed bounding box in the file's axes (`0x20` min, `0x2c` max), already placed: the
+    /// reference's `CMapObjDef` box (`0x695650`).
+    pub extents: [[f32; 3]; 2],
     pub flags: u16,
     pub doodad_set: u16,
     /// `WMOAreaTable.NameSetID`: which name and audio variant of the WMO this placement is
@@ -340,7 +343,18 @@ fn read_modf(data: &[u8]) -> Result<Vec<WmoPlacement>> {
                 r.f32_at(24).ok_or(Error::Truncated("MODF"))?,
                 r.f32_at(28).ok_or(Error::Truncated("MODF"))?,
             ],
-            // 0x20..0x38: the bounding box (6 f32), unread.
+            extents: [
+                [
+                    r.f32_at(32).ok_or(Error::Truncated("MODF"))?,
+                    r.f32_at(36).ok_or(Error::Truncated("MODF"))?,
+                    r.f32_at(40).ok_or(Error::Truncated("MODF"))?,
+                ],
+                [
+                    r.f32_at(44).ok_or(Error::Truncated("MODF"))?,
+                    r.f32_at(48).ok_or(Error::Truncated("MODF"))?,
+                    r.f32_at(52).ok_or(Error::Truncated("MODF"))?,
+                ],
+            ],
             flags: r.u16_at(56).ok_or(Error::Truncated("MODF"))?,
             doodad_set: r.u16_at(58).ok_or(Error::Truncated("MODF"))?,
             name_set: r.u16_at(60).ok_or(Error::Truncated("MODF"))?,
