@@ -34,6 +34,7 @@ pub mod merge;
 mod queries;
 mod residency;
 mod spawn;
+mod walk_collider;
 mod weld;
 pub(crate) mod window;
 
@@ -591,6 +592,7 @@ impl Plugin for TerrainPlugin {
                     furnish_tile_cells,
                     spawn_loaded_placements,
                     camera_collider::stage_camera_colliders,
+                    walk_collider::stage_walk_colliders,
                     flush_hull_welds,
                     flush_static_merge,
                     sync_interior_volumes,

@@ -19,7 +19,7 @@ use benilla_formats::{world_to_tile, M2Bounds};
 use bevy::camera::primitives::Aabb;
 use bevy::prelude::*;
 
-use crate::collision::{walk_layers, GroundDecalSurface, PickOccluder};
+use crate::collision::{GroundDecalSurface, PickOccluder};
 use crate::doodad_anim::wants_rig;
 use crate::interact::WorldObject;
 use crate::lighting::SharedLightBuffer;
@@ -485,18 +485,21 @@ pub(super) fn spawn_loaded_placements(
                             }
                         }
                     }
-                    // Two colliders, each on its layer: the reference gathers different faces for
-                    // the body (drops DETAIL) and the camera (drops NOCAMCOLLIDE, keeps DETAIL).
-                    if let Some((verts, tris)) =
-                        placement_collider_data(m.collision.as_deref(), &p.transform)
-                    {
+                    // Two colliders per group, each on its layer: the reference gathers different
+                    // faces for the body (drops DETAIL) and the camera (drops NOCAMCOLLIDE, keeps
+                    // DETAIL). The walk faces build while the group's box meets the far box
+                    // ([`super::walk_collider`]), as the reference collides loaded groups only.
+                    for (gi, faces) in m.group_collision_tris.iter().enumerate() {
+                        let Some(Some(bounds)) = m.group_collision_bounds.get(gi) else {
+                            continue; // no faces
+                        };
                         ents.push(
                             commands
                                 .spawn((
-                                    PendingCollider::new(
-                                        build_collider_task(verts, tris),
-                                        Some(walk_layers()),
-                                        true,
+                                    super::walk_collider::WalkGroupCollider::new(
+                                        faces.clone(),
+                                        *bounds,
+                                        p.transform,
                                     ),
                                     // The walk faces take the selection ring (floors, steps).
                                     GroundDecalSurface,

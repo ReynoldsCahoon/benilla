@@ -109,6 +109,25 @@ impl GroupTris {
     pub fn iter(&self) -> GroupTrisIter<'_> {
         self.into_iter()
     }
+
+    /// The group's faces as a mesh of their own, holding only the vertices they use, renumbered
+    /// in first-use order: what a per-group collider is built from.
+    pub fn to_mesh(&self) -> CollisionMesh {
+        let range = self.start as usize..self.start as usize + 3 * self.len();
+        let mut remap: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let mut out = CollisionMesh::default();
+        out.indices.reserve_exact(range.len());
+        for &i in &self.mesh.indices[range] {
+            let next = out.positions.len() as u32;
+            let local = *remap.entry(i).or_insert_with(|| {
+                out.positions.push(self.mesh.positions[i as usize]);
+                next
+            });
+            out.indices.push(local);
+        }
+        out.positions.shrink_to_fit();
+        out
+    }
 }
 
 /// [`GroupTris`]'s faces by value, in order.
@@ -1045,6 +1064,14 @@ mod group_tris_tests {
         assert_eq!(
             (&groups[0]).into_iter().collect::<Vec<_>>(),
             [[p(0.0), p(1.0), p(2.0)], [p(1.0), p(2.0), p(3.0)]]
+        );
+        let alone = groups[0].to_mesh();
+        assert_eq!(alone.positions, [p(0.0), p(1.0), p(2.0), p(3.0)]);
+        assert_eq!(alone.indices, [0, 1, 2, 1, 2, 3]);
+        let last = groups[2].to_mesh();
+        assert_eq!(
+            (last.positions.len(), last.indices.clone()),
+            (3, vec![0, 1, 2])
         );
         let own = GroupTris::from(vec![[p(5.0), p(6.0), p(7.0)]]);
         assert_eq!((own.len(), own.tri(0)), (1, [p(5.0), p(6.0), p(7.0)]));
