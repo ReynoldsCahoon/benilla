@@ -182,12 +182,17 @@ impl Plugin for WorldFoundation {
         if crate::static_merge::census_enabled() {
             app.add_systems(bevy::app::Update, crate::static_merge::log_merge_census);
         }
-        // `WOW_UPLOAD_BUDGET=<MB>`: cap the per-frame GPU upload of meshes and images (bevy's
-        // `RenderAssetBytesPerFrame`, unlimited by default), a measurement lever.
-        if let Some(mb) = std::env::var("WOW_UPLOAD_BUDGET")
+        // The per-frame GPU upload of meshes and images (bevy's `RenderAssetBytesPerFrame`), in
+        // MB; `WOW_UPLOAD_BUDGET=<MB>` sets it, 0 lifts it. Engine pacing, not a 1.12 behaviour:
+        // unlimited by default, 4 MB on iOS, where a frame that creates hundreds of resources at
+        // once leaves the Metal driver slab pages it never gives back, and spread over frames
+        // it reuses them.
+        let default_mb = if cfg!(target_os = "ios") { 4 } else { 0 };
+        let mb = std::env::var("WOW_UPLOAD_BUDGET")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-        {
+            .unwrap_or(default_mb);
+        if mb > 0 {
             app.insert_resource(bevy::render::render_asset::RenderAssetBytesPerFrame::new(
                 mb * 1024 * 1024,
             ));
