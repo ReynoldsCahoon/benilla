@@ -137,9 +137,13 @@ struct GxRun {
     group: Option<u16>,
 }
 
-/// A region's assembled GPU state, cached until its bake (mesh handle) changes.
+/// A region's assembled GPU state, cached until a newer bake of the region assembles.
 struct GxCellGpu {
-    mesh: AssetId<Mesh>,
+    /// The bake this state was assembled from. Holding it keeps its mesh handle, so its GPU mesh,
+    /// alive after a re-bake publishes: the node draws this bake until the new one is resident and
+    /// assembled, never skipping the region for the frames between (2026-11-10: Stormwind, one
+    /// WMO region for the whole city, went black a frame per group arrival or release).
+    draw: std::sync::Arc<GxCellDraw>,
     /// One bind group per pool class the region's items touch: (pool class, bind group).
     bind_groups: Vec<(u16, BindGroup)>,
     record_table: Buffer,
@@ -288,6 +292,8 @@ fn prepare_static_gx(
     render_queue: Res<RenderQueue>,
     asset_server: Res<AssetServer>,
     images: Res<RenderAssets<GpuImage>>,
+    meshes: Res<RenderAssets<RenderMesh>>,
+    allocator: Res<MeshAllocator>,
     views: Query<GxViewKey>,
     mut last_release: Local<Option<std::time::Instant>>,
 ) {
@@ -366,26 +372,28 @@ fn prepare_static_gx(
         return;
     }
 
-    // Drop cache entries whose region vanished or re-baked.
-    cache
-        .cells
-        .retain(|c, gpu| gx.cells.get(c).is_some_and(|d| d.mesh.id() == gpu.mesh));
-    cache
-        .wmos
-        .retain(|e, gpu| gx.wmos.get(e).is_some_and(|d| d.mesh.id() == gpu.mesh));
-    cache
-        .props
-        .retain(|e, gpu| gx.props.get(e).is_some_and(|d| d.mesh.id() == gpu.mesh));
+    // Drop cache entries whose region vanished. A re-baked region keeps its entry, the old bake
+    // drawn, until the new bake assembles below; an entry on the same mesh takes the newest `Arc`
+    // (a kill revision publishes one without re-baking).
+    refresh_cache(&mut cache.cells, &gx.cells);
+    refresh_cache(&mut cache.wmos, &gx.wmos);
+    refresh_cache(&mut cache.props, &gx.props);
+    // Whether the published bake needs assembling: no entry, or an entry on an older bake whose
+    // replacement's mesh is now resident (until then the old bake keeps drawing).
+    let due = |gpu: Option<&GxCellGpu>, draw: &GxCellDraw| {
+        gpu.is_none_or(|g| g.draw.mesh.id() != draw.mesh.id())
+            && mesh_resident(&meshes, &allocator, draw.mesh.id())
+    };
 
     for vis in &gx.visible {
         match vis {
             GxDoodadVis::Cell(cell) => {
-                if cache.cells.contains_key(cell) {
-                    continue;
-                }
                 let Some(draw) = gx.cells.get(cell) else {
                     continue;
                 };
+                if !due(cache.cells.get(cell), draw) {
+                    continue;
+                }
                 if let Some(gpu) = assemble_region(
                     draw,
                     &mut pool,
@@ -399,12 +407,12 @@ fn prepare_static_gx(
                 }
             }
             GxDoodadVis::Prop(entity, _) => {
-                if cache.props.contains_key(entity) {
-                    continue;
-                }
                 let Some(draw) = gx.props.get(entity) else {
                     continue;
                 };
+                if !due(cache.props.get(entity), draw) {
+                    continue;
+                }
                 if let Some(gpu) = assemble_region(
                     draw,
                     &mut pool,
@@ -420,12 +428,12 @@ fn prepare_static_gx(
         }
     }
     for (entity, _) in &gx.visible_wmos {
-        if cache.wmos.contains_key(entity) {
-            continue;
-        }
         let Some(draw) = gx.wmos.get(entity) else {
             continue;
         };
+        if !due(cache.wmos.get(entity), draw) {
+            continue;
+        }
         if let Some(gpu) = assemble_region(
             draw,
             &mut pool,
@@ -455,9 +463,10 @@ fn prepare_static_gx(
         let GxDoodadVis::Cell(cell) = vis else {
             continue; // prop regions carry no faders
         };
-        let (Some(gpu), Some(draw)) = (cache.cells.get_mut(cell), gx.cells.get(cell)) else {
+        let Some(gpu) = cache.cells.get_mut(cell) else {
             continue;
         };
+        let draw = gpu.draw.clone();
         if gpu.killed_applied == draw.killed_rev {
             continue;
         }
@@ -472,11 +481,11 @@ fn prepare_static_gx(
 
     // The interior-fog sync: the client's per-group `[0xca7f00]` picks a WMO group's and its
     // props' fog triple per frame; rewritten only when the verdict moves, runs untouched.
-    let sync_fog = |gpu: &mut GxCellGpu, draw: &GxCellDraw, sel: &GxSel| {
+    let sync_fog = |gpu: &mut GxCellGpu, sel: &GxSel| {
         if gpu.fog_applied == sel.fog {
             return;
         }
-        for (rec, item) in gpu.records.iter_mut().zip(&draw.draws) {
+        for (rec, item) in gpu.records.iter_mut().zip(&gpu.draw.draws) {
             let on = item
                 .group
                 .is_some_and(|g| sel.fog.get(usize::from(g)).copied().unwrap_or(false));
@@ -486,24 +495,52 @@ fn prepare_static_gx(
         gpu.fog_applied.clone_from(&sel.fog);
     };
     for (entity, sel) in &gx.visible_wmos {
-        if let (Some(gpu), Some(draw)) = (cache.wmos.get_mut(entity), gx.wmos.get(entity)) {
-            sync_fog(gpu, draw, sel);
+        if let Some(gpu) = cache.wmos.get_mut(entity) {
+            sync_fog(gpu, sel);
         }
     }
     for vis in &gx.visible {
         let GxDoodadVis::Prop(entity, sel) = vis else {
             continue; // cell items are never on the interior lane
         };
-        if let (Some(gpu), Some(draw)) = (cache.props.get_mut(entity), gx.props.get(entity)) {
-            sync_fog(gpu, draw, sel);
+        if let Some(gpu) = cache.props.get_mut(entity) {
+            sync_fog(gpu, sel);
         }
     }
+}
+
+/// Drop the entries whose region is no longer published; an entry on the published mesh takes the
+/// published `Arc`, and one on an older bake stays as it is until its replacement assembles.
+fn refresh_cache<K: std::hash::Hash + Eq>(
+    cache: &mut HashMap<K, GxCellGpu>,
+    published: &HashMap<K, std::sync::Arc<GxCellDraw>>,
+) {
+    cache.retain(|k, gpu| {
+        let Some(draw) = published.get(k) else {
+            return false;
+        };
+        if draw.mesh.id() == gpu.draw.mesh.id() && !std::sync::Arc::ptr_eq(draw, &gpu.draw) {
+            gpu.draw = draw.clone();
+        }
+        true
+    });
+}
+
+/// Whether a bake's mesh is on the GPU: prepared and placed in the mesh allocator's slabs.
+fn mesh_resident(
+    meshes: &RenderAssets<RenderMesh>,
+    allocator: &MeshAllocator,
+    id: AssetId<Mesh>,
+) -> bool {
+    meshes.get(id).is_some()
+        && allocator.mesh_vertex_slice(&id).is_some()
+        && allocator.mesh_index_slice(&id).is_some()
 }
 
 /// Assemble one region's GPU state against the shared pool; `None`, and undrawn this frame, while
 /// any member texture is not resident (slots already assigned stay assigned).
 fn assemble_region(
-    draw: &GxCellDraw,
+    draw: &std::sync::Arc<GxCellDraw>,
     pool: &mut GxTexturePool,
     pipes: &GxPipelines,
     pipeline_cache: &PipelineCache,
@@ -578,7 +615,7 @@ fn assemble_region(
     }
     let runs = build_runs(&draw.draws, &item_slot, &draw.killed);
     Some(GxCellGpu {
-        mesh: draw.mesh.id(),
+        draw: draw.clone(),
         bind_groups,
         record_table,
         cell_uniform,
@@ -692,21 +729,20 @@ impl ViewNode for StaticGxNode {
         // drain order. Cells draw whole; a region draws only its admitted runs.
         let mut resolved: Vec<(&GxCellGpu, &GxCellDraw, Option<&GxSel>)> = Vec::new();
         for (entity, sel) in &gx.visible_wmos {
-            if let (Some(gpu), Some(draw)) = (cache.wmos.get(entity), gx.wmos.get(entity)) {
-                resolved.push((gpu, draw, Some(sel)));
+            if let Some(gpu) = cache.wmos.get(entity) {
+                resolved.push((gpu, &gpu.draw, Some(sel)));
             }
         }
         for vis in &gx.visible {
             match vis {
                 GxDoodadVis::Cell(cell) => {
-                    if let (Some(gpu), Some(draw)) = (cache.cells.get(cell), gx.cells.get(cell)) {
-                        resolved.push((gpu, draw, None));
+                    if let Some(gpu) = cache.cells.get(cell) {
+                        resolved.push((gpu, &gpu.draw, None));
                     }
                 }
                 GxDoodadVis::Prop(entity, sel) => {
-                    if let (Some(gpu), Some(draw)) = (cache.props.get(entity), gx.props.get(entity))
-                    {
-                        resolved.push((gpu, draw, Some(sel)));
+                    if let Some(gpu) = cache.props.get(entity) {
+                        resolved.push((gpu, &gpu.draw, Some(sel)));
                     }
                 }
             }
