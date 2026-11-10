@@ -15,8 +15,9 @@
 //!
 //! What each tier sheds, cumulative:
 //! - [`MemoryTier::Tight`]: unused art drops at the next sweep: the use-swept caches lose their
-//!   grace ([`crate::art_scope::unused_grace`]), and the tile-streamed handle caches, otherwise
-//!   swept by distance alone, take the use rule ([`crate::art_scope::ArtScope::apply_pressed`]).
+//!   grace ([`crate::art_scope::unused_grace`]) (placement materials among them), and the other
+//!   tile-streamed handle caches (clutter materials, world textures), otherwise swept by distance
+//!   alone, take the use rule ([`crate::art_scope::ArtScope::apply_pressed`]).
 //!   Nothing drawn changes; art shown again rebuilds.
 //! - [`MemoryTier::Low`]: other players past the nearest 60 wait unbuilt (`benilla-app`'s
 //!   `entities::body_cap`, a deviation written down there), and the view distance drops to

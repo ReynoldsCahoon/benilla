@@ -1509,9 +1509,15 @@ fn drop_streamed_world(
 }
 
 /// Expire the placement material dedup by distance, the within-map half of
-/// [`drop_streamed_world`]'s clear.
+/// [`drop_streamed_world`]'s clear, and by use: an entry nothing draws for
+/// [`crate::art_scope::unused_grace`] drops with its textures, as the reference frees a texture
+/// with its last reference (a lookup adds one to the handle's count, `0x41af10`; a texture-cache
+/// entry frees at zero, `0x47b010`: gx/textures#texture-cache). Since a WMO's props go with their last room
+/// ([`spawn::groups`]'s `release_orphaned_props`), a walked city leaves their materials unheld, and
+/// distance alone never bound inside a city: they pinned their textures until the governor
+/// pressed. A walk back past the grace rebuilds them.
 fn scope_placement_art(mut scope: crate::art_scope::ArtScope, mut placements: ResMut<Placements>) {
-    scope.apply_pressed(
+    scope.apply_unheld(
         &mut placements.materials,
         crate::art_scope::ArtSlot::PlaceMats,
     );
