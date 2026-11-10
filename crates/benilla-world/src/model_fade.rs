@@ -71,6 +71,7 @@ pub fn fade_band(radius: f32) -> Option<(f32, f32)> {
 /// visibility; the teardown is the `SWModelFadeout` pump (`0x672ef0`) on the model an object left
 /// behind ([`DespawnFade`]). The interior classifier keeps the light law through either.
 #[derive(Component, Clone)]
+#[component(storage = "SparseSet")]
 pub struct RenderFade {
     /// `Time::elapsed_secs` the ramp runs from: its arming, or an appear ramp's arrival.
     pub started: f32,
@@ -502,6 +503,7 @@ pub fn apply_render_fade(
 /// `0x613af0`), so the ramp runs from the arrival; here it is held while a loading cover is up,
 /// so it never plays behind one.
 #[derive(Component, Clone)]
+#[component(storage = "SparseSet")]
 pub struct PendingAppearFade {
     /// `Time::elapsed_secs` when the part began waiting, the backstop timeout's origin.
     pub since: f32,
@@ -516,6 +518,7 @@ const PENDING_TIMEOUT_SECS: f32 = 8.0;
 /// models as one, so a part that resolves later (a held item) joins this ramp; it is dropped when
 /// the ramp ends, after which a new part spawns steady.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
+#[component(storage = "SparseSet")]
 pub enum UnitAppearFade {
     /// Waiting for the world to be shown: since `since`, the backstop's origin, with the ramp
     /// running from `arrived`.

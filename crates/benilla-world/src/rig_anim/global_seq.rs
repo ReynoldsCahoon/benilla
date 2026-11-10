@@ -16,6 +16,7 @@ enum SeqTarget {
 
 /// A model instance's global-sequence channels and clock anchor.
 #[derive(Component)]
+#[component(storage = "SparseSet")]
 pub struct GlobalSeqDrive {
     bones: Vec<(SeqTarget, GlobalBone)>,
     /// The scene clock at attach (secs), stamped once, like the reference's `+0x68`. The clock is

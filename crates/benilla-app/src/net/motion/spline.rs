@@ -867,6 +867,7 @@ type SwimMarkQuery = (
 /// a removal moves each unit into another archetype, and the ECS keeps every archetype it ever
 /// made (wow-optimize FINDINGS, "What the ECS bookkeeping grows from").
 #[derive(Component)]
+#[component(storage = "SparseSet")]
 pub(in crate::net) struct SwimEvaluated {
     epoch: u64,
 }
@@ -891,6 +892,7 @@ pub(crate) struct CreatureSwimming;
 
 /// The last ground clamp this unit took: its seat and the cast gate's inputs, each compared by bit.
 #[derive(Component, Clone, Copy)]
+#[component(storage = "SparseSet")]
 pub(crate) struct GroundClamped {
     /// Where the last cast stood.
     xz: [f32; 2],

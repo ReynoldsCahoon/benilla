@@ -25,6 +25,7 @@ pub use pick::{ray_member, ray_mesh_bounds, ray_posed_mesh, RayHit};
 /// Marks a static doodad's drawn batch that occludes the mouse pick ([`occludes_pick`]): an
 /// entity part of blend 0, so [`DoodadOccluders`] walks these alone, never every model part.
 #[derive(Component, Clone, Copy)]
+#[component(storage = "SparseSet")]
 pub struct PickOccluderPart;
 
 impl PickOccluderPart {

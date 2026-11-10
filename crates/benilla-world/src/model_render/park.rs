@@ -24,6 +24,7 @@ pub struct ParkedMesh(pub Handle<Mesh>);
 
 /// Consecutive frames this part has been hidden (its own or an ancestor's verdict).
 #[derive(Component, Default)]
+#[component(storage = "SparseSet")]
 pub struct HiddenFrames(pub u16);
 
 /// Counts hidden frames, parks the long-hidden and unparks the shown, by last `PostUpdate`'s
