@@ -107,6 +107,70 @@ impl WmoGroups {
     }
 }
 
+/// Free the props whose every naming room is released, now that `released` has gone: their
+/// entities, their set's merged blobs (and any blob still accumulating) and their retained-pass
+/// items, and their model handle, so the M2 and its textures unload once nothing else holds them.
+/// A prop still loading leaves the pending count. A room spawning again wants and loads them anew
+/// ([`spawn_wmo_groups`]), as on its first spawn; the collision hull stays in the placement's weld.
+/// Props sharing a merged blob share their rooms exactly (`MergeSite::Prop` keys on them), so a
+/// blob is never split.
+///
+/// Deviation: memory only. The reference links a group's doodad defs into the map chunks and
+/// frees them when a chunk unloads (`UnloadChunk` `0x6a6b10` -> `CMapDoodadDef::Release`
+/// `0x6a67a0`), not when the group's 30 s timer frees its file data (`CMapObjGroup::Free`
+/// `0x6b98c0`). Here they go with their rooms: a prop is drawn only through a room the portal walk
+/// reaches, and a released room is out of the far box, so nothing on screen changes; a city's
+/// thousands of props no longer stay resident until the whole building frees (2026-11-10, the
+/// user's call: Stormwind's walk held up to 5,500 such props and 230 models only they used).
+#[allow(clippy::too_many_arguments)]
+fn release_orphaned_props(
+    commands: &mut Commands,
+    doodads: &mut [super::prop_light::WmoDoodadInst],
+    entities: &mut Vec<Entity>,
+    prop_blobs: &mut std::collections::HashMap<Arc<[u16]>, Vec<Entity>>,
+    state: &[GroupSpawn],
+    released: u16,
+    uid: u32,
+    instance: Option<Entity>,
+    merge: &mut crate::terrain_stream::merge::StaticMerge,
+    mut gx: Option<&mut crate::static_gx::StaticGx>,
+    pending_spawns: &mut usize,
+) -> usize {
+    let live = |g: &u16| state.get(usize::from(*g)).is_some_and(|s| s.spawned);
+    let mut sets: Vec<Arc<[u16]>> = Vec::new();
+    let mut gone = std::collections::HashSet::new();
+    for d in doodads.iter_mut() {
+        if !d.wanted || !d.groups.contains(&released) || d.groups.iter().any(live) {
+            continue;
+        }
+        if d.spawned {
+            gone.extend(d.ents.drain(..));
+            d.spawned = false;
+        } else {
+            *pending_spawns -= 1;
+        }
+        d.wanted = false;
+        d.handle = Handle::default();
+        if !sets.iter().any(|s| s[..] == d.groups[..]) {
+            sets.push(Arc::clone(&d.groups));
+        }
+    }
+    for s in &sets {
+        if let Some(blobs) = prop_blobs.remove(s) {
+            gone.extend(blobs);
+        }
+        merge.drop_prop_set(uid, s);
+        if let (Some(gx), Some(i)) = (gx.as_deref_mut(), instance) {
+            gx.release_prop_set(i, s);
+        }
+    }
+    for &e in &gone {
+        commands.entity(e).try_despawn();
+    }
+    entities.retain(|e| !gone.contains(e));
+    gone.len()
+}
+
 /// A model-space box through the placement, as a WoW world box: its eight corners' hull.
 fn world_box(lo: [f32; 3], hi: [f32; 3], transform: &Transform) -> ([f32; 3], [f32; 3]) {
     if lo.iter().zip(&hi).any(|(a, b)| a > b) {
@@ -245,6 +309,19 @@ pub(in crate::terrain_stream) fn spawn_wmo_groups(
                             gx.release_wmo_group(i, gi);
                         }
                         forms.release(key);
+                        release_orphaned_props(
+                            &mut commands,
+                            &mut p.doodads,
+                            &mut p.entities,
+                            &mut p.prop_blobs,
+                            &groups.state,
+                            gi,
+                            uid,
+                            instance,
+                            &mut merge,
+                            gx.as_deref_mut(),
+                            pending_spawns,
+                        );
                     }
                 }
                 continue;
@@ -442,6 +519,80 @@ pub(in crate::terrain_stream) fn spawn_wmo_groups(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A prop goes when every room naming it is released, with its entities, its set's blob and its
+    /// handle; one with a room still spawned stays, a groupless one stays, and one still loading
+    /// leaves the pending count.
+    #[test]
+    fn a_prop_goes_with_its_last_room() {
+        use super::super::prop_light::{PropLight, WmoDoodadInst};
+        let mut world = World::new();
+        let mut spawn = || world.spawn_empty().id();
+        let (e_a, e_b, e_d, e_c, blob, other) =
+            (spawn(), spawn(), spawn(), spawn(), spawn(), spawn());
+        let held: Handle<benilla_assets::M2Model> =
+            bevy::asset::uuid_handle!("6f1c2a3b-0000-4000-8000-000000000001");
+        let prop = |groups: &[u16], ents: Vec<Entity>, spawned: bool| WmoDoodadInst {
+            handle: held.clone(),
+            url: String::new(),
+            wanted: true,
+            transform: Transform::IDENTITY,
+            groups: Arc::from(groups),
+            light: PropLight::Exterior,
+            spawned,
+            ents,
+            hull_welded: true,
+        };
+        let mut doodads = vec![
+            prop(&[1, 2], vec![e_a], true), // both rooms gone: freed
+            prop(&[2], vec![e_b], true),    // its one room gone: freed
+            prop(&[2, 3], vec![e_d], true), // room 3 still spawned: stays
+            prop(&[], vec![e_c], true),     // no room names it: stays
+            prop(&[2], Vec::new(), false),  // still loading: leaves the pending count
+        ];
+        let mut state: Vec<GroupSpawn> = (0..4).map(|_| GroupSpawn::default()).collect();
+        state[3].spawned = true; // rooms 1 and 2 released, 3 spawned
+        let mut entities = vec![e_a, e_b, e_d, e_c, blob, other];
+        let mut prop_blobs = std::collections::HashMap::new();
+        prop_blobs.insert(Arc::<[u16]>::from([1u16, 2].as_slice()), vec![blob]);
+        let mut merge = crate::terrain_stream::merge::StaticMerge::default();
+        let mut pending = 1usize;
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let gone = {
+            let mut commands = Commands::new(&mut queue, &world);
+            release_orphaned_props(
+                &mut commands,
+                &mut doodads,
+                &mut entities,
+                &mut prop_blobs,
+                &state,
+                2,
+                7,
+                None,
+                &mut merge,
+                None,
+                &mut pending,
+            )
+        };
+        queue.apply(&mut world);
+        assert_eq!(gone, 3, "two props' entities and one blob");
+        for e in [e_a, e_b, blob] {
+            assert!(world.get_entity(e).is_err(), "{e} should be despawned");
+        }
+        for e in [e_d, e_c, other] {
+            assert!(world.get_entity(e).is_ok(), "{e} should stay");
+        }
+        assert_eq!(entities, vec![e_d, e_c, other]);
+        assert!(prop_blobs.is_empty());
+        assert_eq!(pending, 0, "the loading prop left the pending count");
+        let freed = |d: &WmoDoodadInst| !d.wanted && !d.spawned && d.handle == Handle::default();
+        assert!(freed(&doodads[0]) && freed(&doodads[1]) && freed(&doodads[4]));
+        assert!(doodads[2].spawned && doodads[3].spawned);
+        assert!(
+            doodads[0].hull_welded,
+            "the hull stays welded: a respawn must not add it again"
+        );
+    }
 
     /// A group's model box through a placement: the world box holds the moved corners, and an
     /// unread group's empty box never meets the far box.

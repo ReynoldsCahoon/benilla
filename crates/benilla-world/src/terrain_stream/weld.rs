@@ -194,6 +194,7 @@ mod tests {
 
     fn blank_placement() -> Placement {
         Placement {
+            prop_blobs: Default::default(),
             model: ModelHandle::M2(Default::default()),
             transform: Transform::IDENTITY,
             entities: Vec::new(),

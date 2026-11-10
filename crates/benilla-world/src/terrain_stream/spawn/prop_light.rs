@@ -21,6 +21,12 @@ pub(crate) struct WmoDoodadInst {
     pub(crate) groups: Arc<[u16]>,
     pub(crate) light: PropLight,
     pub(crate) spawned: bool,
+    /// The entities this prop spawned (merged batches excepted: they live in its set's blobs),
+    /// despawned when its rooms are all released ([`super::groups::release_orphaned_props`]).
+    pub(crate) ents: Vec<bevy::prelude::Entity>,
+    /// Its collision hull is in the placement's weld, which outlives the prop: a respawn after a
+    /// release must not weld it twice.
+    pub(crate) hull_welded: bool,
 }
 
 /// A WMO prop's lighting, its MOLR lights already in world space for the spawn-time fold.

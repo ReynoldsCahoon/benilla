@@ -556,8 +556,9 @@ pub(super) fn spawn_loaded_placements(
                             ))
                             .id(),
                     );
-                } else {
+                } else if !d.hull_welded {
                     welds.add_prop(unique_id, verts, tris);
+                    d.hull_welded = true;
                 }
             }
             spawn_emitters_for(
@@ -584,7 +585,8 @@ pub(super) fn spawn_loaded_placements(
                 &mut ents,
             );
             tag_world_object(&mut commands, &ents, &object);
-            p.entities.extend(ents);
+            p.entities.extend_from_slice(&ents);
+            d.ents = ents;
             d.spawned = true;
             *pending_spawns -= 1;
             activity.placements_spawned += 1;
@@ -655,6 +657,8 @@ fn resolve_wmo_doodads(
             let url = m2_url(&d.model);
             let wanted = groups.is_empty();
             out.push(WmoDoodadInst {
+                ents: Vec::new(),
+                hull_welded: false,
                 handle: if wanted {
                     asset_server.load(url.clone())
                 } else {
@@ -784,6 +788,7 @@ mod retire_tests {
 
     fn placement(model: ModelHandle, doodads: Vec<WmoDoodadInst>) -> Placement {
         Placement {
+            prop_blobs: Default::default(),
             model,
             transform: Transform::IDENTITY,
             entities: Vec::new(),
@@ -828,6 +833,8 @@ mod retire_tests {
 
     fn prop(handle: Handle<M2Model>) -> WmoDoodadInst {
         WmoDoodadInst {
+            ents: Vec::new(),
+            hull_welded: false,
             handle,
             url: String::new(),
             wanted: true,

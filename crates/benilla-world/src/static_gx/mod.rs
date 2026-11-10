@@ -619,6 +619,32 @@ impl StaticGx {
         }
     }
 
+    /// Drop one referrer set's prop items from its building's prop region and mark the region for
+    /// re-bake: every room naming those props was released
+    /// (`terrain_stream::spawn::groups::release_orphaned_props`). The set keeps its index, unused,
+    /// so a later divert of the same rooms reuses it.
+    pub fn release_prop_set(&mut self, instance: Entity, groups: &Arc<[u16]>) {
+        let frame = self.frame;
+        let Some(region) = self.props.get_mut(&instance) else {
+            return;
+        };
+        let Some(set) = region.sets.iter().position(|s| s[..] == groups[..]) else {
+            return;
+        };
+        let before = region.items.len();
+        region
+            .items
+            .retain(|i| i.prop.as_ref().is_none_or(|p| usize::from(p.set) != set));
+        if region.items.len() != before {
+            region.rebuild_pick_bounds();
+            if !region.dirty {
+                region.dirty_since = frame;
+            }
+            region.dirty = true;
+            region.last_change = frame;
+        }
+    }
+
     /// Drop a dead owner tile's cell items and mark their cells for re-bake; a diverted batch has
     /// no entity, so nothing else releases it. Regions follow their instance entity instead: a
     /// straddler handoff keeps a placement alive under a new owner tile.

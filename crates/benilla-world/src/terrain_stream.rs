@@ -261,6 +261,9 @@ struct Placement {
     gate: Option<WmoGate>,
     /// A spawned WMO's per-group render state ([`spawn::groups`]); `None` until it spawns.
     wmo_groups: Option<spawn::groups::WmoGroups>,
+    /// A WMO's merged prop blobs by the rooms that name their props, freed with the rooms
+    /// ([`spawn::groups::release_orphaned_props`]); they are in [`Self::entities`] too.
+    prop_blobs: HashMap<std::sync::Arc<[u16]>, Vec<Entity>>,
 }
 
 impl Placement {
@@ -1403,6 +1406,7 @@ fn register_doodad(
     placements.by_id.insert(
         d.unique_id,
         Placement {
+            prop_blobs: Default::default(),
             model: ModelHandle::M2(handle),
             transform: Transform {
                 translation: wow_to_bevy(d.position),
@@ -1445,6 +1449,7 @@ fn register_wmo(placements: &mut Placements, asset_server: &AssetServer, w: &Wmo
     placements.by_id.insert(
         w.unique_id,
         Placement {
+            prop_blobs: Default::default(),
             model,
             transform: Transform {
                 translation: wow_to_bevy(w.position),
@@ -1901,6 +1906,7 @@ mod straddler_tests {
 
     fn straddler(owner: (i32, i32), entities: Vec<Entity>) -> Placement {
         Placement {
+            prop_blobs: Default::default(),
             model: ModelHandle::M2(Default::default()),
             transform: Transform::IDENTITY,
             entities,

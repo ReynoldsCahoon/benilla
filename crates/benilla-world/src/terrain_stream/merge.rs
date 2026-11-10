@@ -277,6 +277,13 @@ impl StaticMerge {
         true
     }
 
+    /// Drop the unbaked accumulators of one placement's prop set: its props were released before
+    /// their blob closed ([`super::spawn::groups::release_orphaned_props`]).
+    pub(super) fn drop_prop_set(&mut self, uid: u32, groups: &Arc<[u16]>) {
+        self.props
+            .retain(|k, _| !(k.0 == uid && k.1[..] == groups[..]));
+    }
+
     /// Accumulators not yet baked, the reveal gate's `merge_pending`; an overcount only delays.
     pub(super) fn unflushed(&self) -> usize {
         self.doodads.len() + self.props.len()
@@ -369,14 +376,19 @@ pub(super) fn flush_static_merge(
                 groups: Arc::clone(&key.1),
             });
         let exterior = vis.is_some();
-        p.entities.push(spawn_blob(
+        let blob = spawn_blob(
             &mut commands,
             &mut meshes,
             &key.2,
             acc.source(),
             vis,
             exterior,
-        ));
+        );
+        p.entities.push(blob);
+        p.prop_blobs
+            .entry(Arc::clone(&key.1))
+            .or_default()
+            .push(blob);
         false
     });
     // Re-consolidate quiet cells: first-fit whole fragments under the vertex cap, only when that
@@ -727,6 +739,7 @@ mod tests {
 
     fn blank_placement(portal_instance: Option<Entity>) -> Placement {
         Placement {
+            prop_blobs: Default::default(),
             model: ModelHandle::M2(Default::default()),
             transform: Transform::IDENTITY,
             entities: Vec::new(),
