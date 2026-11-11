@@ -921,8 +921,14 @@ pub(crate) mod schedule_tests {
     }
 
     /// `PostUpdate`'s undeclared-order pairs on the declared graph; `GlobalTransform` and the
-    /// particle `EffectQuads` are most of it.
-    const POST_UPDATE_CEILING: usize = 371;
+    /// particle `EffectQuads` are most of it. Known pairs accepted with a reason:
+    /// - the names' screen seat (`nameplates::project_nameplates`) against the `Transform`,
+    ///   `MeshTag` and `Visibility` writers no declared order places against it (the sky, sun and
+    ///   cloud follows, billboards, particles, ribbons, the zfill and straddle twins, the cull and
+    ///   liquid hides, the raid marks, the target highlight, the cover): it writes only
+    ///   `NamePlate` entities, which none of them query, the disjoint-lane kind; and the window
+    ///   it reads against the pointer's hand-back, which writes the cursor alone.
+    const POST_UPDATE_CEILING: usize = 374;
     const POST_UPDATE_SLACK: usize = 20;
     /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
     /// [`Classes`] explains, so the executor orders them however the graph falls. The count may
