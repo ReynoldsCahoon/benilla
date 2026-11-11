@@ -43,6 +43,9 @@ pub(super) struct WarmLanes<'w> {
     pub(super) images: ResMut<'w, Assets<Image>>,
     /// For the minimap interior composite's tile material, through its production builder.
     ui_quads: ResMut<'w, Assets<crate::ui_pass::UiQuadMaterial>>,
+    /// For the overhead names' material, and the world depth it samples.
+    names: ResMut<'w, Assets<crate::name_pass::NameMaterial>>,
+    world_depth: Option<Res<'w, crate::name_pass::WorldDepth>>,
 }
 
 /// A portrait booth camera and its layer. Booths run `Msaa::Off`, so each model pipeline has a
@@ -565,6 +568,27 @@ pub(super) fn spawn_menagerie(
         ),
         // Visible, unlike the paced model rigs: one pipeline, drawn at a negligible scale.
         Transform::from_xyz(0.0, 0.0, 0.0).with_scale(Vec3::splat(0.001)),
+        crate::ui_pass::ui_render_layers(),
+        WarmRig,
+    ));
+    count += 1;
+
+    // The overhead names' lane: a `Material2d` in the player-UI pass, keyed on the name block's
+    // vertex layout; one plate drawn as `nameplates` spawns one, with stand-in glyphs.
+    let glyphs = lanes.images.add(Image::default());
+    let world_depth = lanes
+        .world_depth
+        .as_ref()
+        .map_or_else(|| glyphs.clone(), |d| d.image.clone());
+    commands.spawn((
+        Mesh2d(meshes.add(crate::nameplates::warm_name_mesh())),
+        MeshMaterial2d(lanes.names.add(crate::name_pass::NameMaterial {
+            color: Vec4::ONE,
+            glyphs,
+            world_depth,
+        })),
+        Transform::from_xyz(0.0, 0.0, crate::name_pass::NAME_Z).with_scale(Vec3::splat(0.001)),
+        bevy::mesh::MeshTag(0),
         crate::ui_pass::ui_render_layers(),
         WarmRig,
     ));

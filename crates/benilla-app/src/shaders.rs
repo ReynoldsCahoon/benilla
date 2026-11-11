@@ -48,7 +48,7 @@ mod tests {
                  `shaders::plugin`, or was registered from a file that is not directly under src/"
             );
         }
-        assert_eq!(found, 5, "the game's shader set changed size");
+        assert_eq!(found, 7, "the game's shader set changed size");
     }
 
     /// Every `.wgsl` file under `dir` of the embedded source, as the asset server would serve it.

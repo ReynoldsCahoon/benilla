@@ -324,9 +324,6 @@ const BAKE_PX: f32 = 36.0;
 /// `lineCount - i`, one pitch being the font size. The baseline sits `TextEngine::ascent_ratio`
 /// into the layout cell (the `[0x17c]` load param), as in the 2-D path.
 fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
-    use bevy::asset::RenderAssetUsages;
-    use bevy::mesh::{Indices, PrimitiveTopology};
-
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
@@ -387,6 +384,19 @@ fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
         }
     }
     drop(e);
+    name_mesh(positions, uvs, normals, indices)
+}
+
+/// A name block's mesh from its glyph quads: the vertex layout every plate's pipeline is keyed on.
+fn name_mesh(
+    positions: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    normals: Vec<[f32; 3]>,
+    indices: Vec<u32>,
+) -> Mesh {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::{Indices, PrimitiveTopology};
+
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
@@ -396,6 +406,21 @@ fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_indices(Indices::U32(indices));
     mesh
+}
+
+/// One glyph quad in a name block's layout, for the pipeline warm-up (`pipe_warm`).
+pub(crate) fn warm_name_mesh() -> Mesh {
+    name_mesh(
+        vec![
+            [-0.5, 0.0, 0.0],
+            [0.5, 0.0, 0.0],
+            [0.5, 1.0, 0.0],
+            [-0.5, 1.0, 0.0],
+        ],
+        vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        vec![[0.0, 0.0, 1.0]; 4],
+        vec![0, 2, 1, 0, 3, 2],
+    )
 }
 
 /// What `ShouldShowName` (`0x6070a0`) reads for one unit.
