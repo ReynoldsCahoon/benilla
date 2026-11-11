@@ -91,14 +91,14 @@ mod poi_marker;
 mod portrait;
 #[cfg(feature = "dev")]
 mod preflight;
-/// The synthetic crowd alone, in a `crowd-probe` build without `dev` (the iPad's memory tests).
-#[cfg(all(feature = "crowd-probe", not(feature = "dev")))]
-#[path = "capture/probe_crowd.rs"]
-mod probe_crowd;
 /// The chat probe alone, in a `chat-probe` build without `dev` (the iPad's teleport soaks).
 #[cfg(all(feature = "chat-probe", not(feature = "dev")))]
 #[path = "capture/probe_chat.rs"]
 mod probe_chat;
+/// The synthetic crowd alone, in a `crowd-probe` build without `dev` (the iPad's memory tests).
+#[cfg(all(feature = "crowd-probe", not(feature = "dev")))]
+#[path = "capture/probe_crowd.rs"]
+mod probe_crowd;
 /// The quest bot alone, in a `quest-probe` build without `dev` (the iPad's gameplay soaks).
 #[cfg(all(feature = "quest-probe", not(feature = "dev")))]
 #[path = "capture/probe_quest.rs"]
