@@ -128,6 +128,10 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("mat_anim_table::MatAnimMirrors", "record"),
     ("mat_anim_table::MatAnimTable", "record"),
     ("mat_anim_table::affine_row", "record"),
+    // The governor's tier, which the game's shedding reads (`memory_governor`'s module record:
+    // the crowd cap in `entities::body_cap`, the spell effects in `entities::spell_fx`).
+    ("memory_governor::MemoryTier", "record"),
+    ("memory_governor::tier", "record"),
     ("mesh_tag::HIGHLIGHT_BIT", "record"),
     ("model_fade::ModelFade", "record"),
     ("model_fade::ParentModel", "record"),
