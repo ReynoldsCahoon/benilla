@@ -524,6 +524,8 @@ impl MeshAllocator {
         for (mesh_id, mesh) in &extracted_meshes.extracted {
             self.copy_mesh_vertex_data(mesh_id, mesh, render_device, render_queue);
             self.copy_mesh_index_data(mesh_id, mesh, render_device, render_queue);
+            // benilla: one upload toward the pending-write flush (`BENILLA.md`).
+            crate::render_asset::count_upload_for_flush(render_queue);
         }
     }
 

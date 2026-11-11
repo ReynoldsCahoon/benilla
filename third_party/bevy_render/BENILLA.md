@@ -54,5 +54,19 @@ full-window UI view and the world view's share at its render scale. The fork add
 A post-process write there reads and writes one texture, which wgpu's validation rejects, so a
 wrong marker fails loudly. All platforms; only views carrying the marker change.
 
+## The patch — pending writes submitted every n uploads
+
+wgpu records every `Queue::write_buffer` / `write_texture` of a frame into one "PendingWrites"
+command buffer, submitted ahead of the frame's own. A teleport landing prepares hundreds of
+textures, meshes and materials in one frame, thousands of copies in that one command buffer, and
+the Metal driver of the iPad Air 2 (A8X, iOS 15) keeps the memory behind it and never gives it back
+(measured: the same uploads split into ~12 command buffers leave it flat). `src/render_asset.rs`
+adds `set_pending_write_flush(n)` and `count_upload_for_flush`, called after each prepared asset
+in `prepare_assets` (and `prepare_erased_assets`, `src/erased_render_asset.rs`, which take the
+`RenderQueue` for it) and after each mesh copied into its slab (`src/mesh/allocator.rs`); every
+n-th call submits the pending writes (`queue.submit` with no command buffers), counted across
+asset types. Order is kept: writes after the submit go into the next pending batch. Off (0) by
+default, upstream's behaviour; benilla sets 4 on iOS (`benilla_world::world_plugins`).
+
 Check: `diff -r <registry>/bevy_render-0.18.1 third_party/bevy_render` shows only those lines, the shadow-sampling
-lines above, the slab node table, the single main texture, and this file.
+lines above, the slab node table, the single main texture, the pending-write flush, and this file.

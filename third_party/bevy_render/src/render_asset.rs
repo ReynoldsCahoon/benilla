@@ -356,6 +356,7 @@ pub fn prepare_assets<A: RenderAsset>(
     mut prepare_next_frame: ResMut<PrepareNextFrameAssets<A>>,
     param: StaticSystemParam<<A as RenderAsset>::Param>,
     bpf: Res<RenderAssetBytesPerFrameLimiter>,
+    queue: Res<crate::renderer::RenderQueue>,
 ) {
     let mut wrote_asset_count = 0;
 
@@ -387,6 +388,7 @@ pub fn prepare_assets<A: RenderAsset>(
                 render_assets.insert(id, prepared_asset);
                 bpf.write_bytes(write_bytes);
                 wrote_asset_count += 1;
+                count_upload_for_flush(&queue);
             }
             Err(PrepareAssetError::RetryNextUpdate(extracted_asset)) => {
                 prepare_next_frame.assets.push((id, extracted_asset));
@@ -426,6 +428,7 @@ pub fn prepare_assets<A: RenderAsset>(
                 render_assets.insert(id, prepared_asset);
                 bpf.write_bytes(write_bytes);
                 wrote_asset_count += 1;
+                count_upload_for_flush(&queue);
             }
             Err(PrepareAssetError::RetryNextUpdate(extracted_asset)) => {
                 prepare_next_frame.assets.push((id, extracted_asset));
@@ -538,5 +541,27 @@ impl RenderAssetBytesPerFrameLimiter {
         } else {
             false
         }
+    }
+}
+
+/// benilla: after every `n` uploads (a prepared render asset, a mesh copied into its slab), submit
+/// the queue's pending writes, so one frame's uploads reach the GPU in several command buffers
+/// rather than in wgpu's single "PendingWrites" one. 0 (the default, upstream's behaviour) never
+/// submits early. The Metal driver of the iPad Air 2 (A8X, iOS 15) keeps the memory behind one
+/// huge upload command buffer for good; a teleport landing puts thousands of copies in it.
+/// See `BENILLA.md`.
+static PENDING_WRITE_FLUSH_EVERY: AtomicUsize = AtomicUsize::new(0);
+static UPLOADS_SINCE_FLUSH: AtomicUsize = AtomicUsize::new(0);
+
+/// Submit the pending writes after every `every` uploads; 0 turns it off.
+pub fn set_pending_write_flush(every: usize) {
+    PENDING_WRITE_FLUSH_EVERY.store(every, Ordering::Relaxed);
+}
+
+/// Count one upload, and submit the pending writes when the count reaches the setting.
+pub(crate) fn count_upload_for_flush(queue: &crate::renderer::RenderQueue) {
+    let every = PENDING_WRITE_FLUSH_EVERY.load(Ordering::Relaxed);
+    if every > 0 && UPLOADS_SINCE_FLUSH.fetch_add(1, Ordering::Relaxed) % every == every - 1 {
+        queue.submit(core::iter::empty());
     }
 }

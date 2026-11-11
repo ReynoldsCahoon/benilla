@@ -197,6 +197,19 @@ impl Plugin for WorldFoundation {
                 mb * 1024 * 1024,
             ));
         }
+        // Submit the queue's pending writes after every n uploads (prepared render assets, mesh
+        // copies), so a landing frame's thousands of copies reach the GPU in several command
+        // buffers, not one; `WOW_WRITE_FLUSH=<n>` sets n, 0 turns it off. Engine pacing, not a
+        // 1.12 behaviour: off by default, every 4 on iOS, where the Metal driver keeps the memory
+        // behind one huge upload command buffer for good (the vendored `bevy_render`'s
+        // `BENILLA.md`).
+        let default_every = if cfg!(target_os = "ios") { 4 } else { 0 };
+        bevy::render::render_asset::set_pending_write_flush(
+            std::env::var("WOW_WRITE_FLUSH")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(default_every),
+        );
         // Direct draws on every camera: Bevy's indirect lane is a per-draw encode loop on Metal
         // (no MULTI_DRAW_INDIRECT) plus GPU preprocessing; `WOW_INDIRECT=1` restores it. A
         // required component, as `NoIndirectDrawing` must ride a camera's spawn: the work-item

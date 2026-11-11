@@ -334,6 +334,7 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
     mut prepare_next_frame: ResMut<PrepareNextFrameAssets<A>>,
     param: StaticSystemParam<<A as ErasedRenderAsset>::Param>,
     bpf: Res<RenderAssetBytesPerFrameLimiter>,
+    queue: Res<crate::renderer::RenderQueue>,
 ) {
     let mut wrote_asset_count = 0;
 
@@ -364,6 +365,7 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
                 render_assets.insert(id, prepared_asset);
                 bpf.write_bytes(write_bytes);
                 wrote_asset_count += 1;
+                crate::render_asset::count_upload_for_flush(&queue);
             }
             Err(PrepareAssetError::RetryNextUpdate(extracted_asset)) => {
                 prepare_next_frame.assets.push((id, extracted_asset));
@@ -403,6 +405,7 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
                 render_assets.insert(id, prepared_asset);
                 bpf.write_bytes(write_bytes);
                 wrote_asset_count += 1;
+                crate::render_asset::count_upload_for_flush(&queue);
             }
             Err(PrepareAssetError::RetryNextUpdate(extracted_asset)) => {
                 prepare_next_frame.assets.push((id, extracted_asset));
