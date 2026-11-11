@@ -19,6 +19,16 @@ What the real client does is read at its bytes in
 [benilla-re](https://github.com/samwhosung/benilla-re), the reverse engineering benilla is built
 against, by the same client addresses the comments here cite.
 
+## This fork
+
+This is [ReynoldsCahoon/benilla](https://github.com/ReynoldsCahoon/benilla), a fork of
+[samwhosung/benilla](https://github.com/samwhosung/benilla). Its `ipad` branch runs benilla on
+low-spec hardware, with the iPad Air 2 (A8X, 2 GB, iOS 15) as the yardstick: a memory governor
+that sheds load in tiers before the OS kills the app, GPU uploads paced and split across
+submissions, art and caches released when nothing draws them, and touch controls. It merges
+upstream's `main` as it moves. The issues, releases, Discord and devlog linked below are
+upstream's.
+
 ## What's inside
 
 - **Formats:** readers for the whole asset stack (the MPQ patch chain, BLP, DBC, ADT, WDT, WDL, M2
@@ -51,7 +61,7 @@ generated from the code.
 Fully playable on a 1.12.1 server that doesn't enforce Warden or need client changes beyond its
 MPQ archives. What is left:
 
-- The long tail of small differences from 1.12.1, tracked as
+- The long tail of small differences from 1.12.1, tracked as upstream's
   [issues](https://github.com/samwhosung/benilla/issues).
 - Addon compatibility, the remaining options and performance, ongoing.
 
@@ -86,7 +96,7 @@ On Windows, in PowerShell:
 $env:WOW_DATA="C:\path\to\WoW\Data"; cargo run --release -p benilla
 ```
 
-Each release is a tag on the [Releases page](https://github.com/samwhosung/benilla/releases):
+Each release is a tag on upstream's [Releases page](https://github.com/samwhosung/benilla/releases):
 `git checkout <tag>` first runs that release, and `main` is the development tip.
 
 `WOW_DATA` names the install's `Data` folder; a link to the install named `WoW` at the repo root

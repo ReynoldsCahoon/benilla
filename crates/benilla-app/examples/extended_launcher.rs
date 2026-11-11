@@ -12,7 +12,8 @@
 //! A crate of its own copies the `benilla` launcher (`crates/benilla`): a build script that stamps
 //! its commit and gives its binary the 8 MB main-thread stack the app needs on Windows, a `main`
 //! like this one that reads the stamp back as `crates/benilla/src/main.rs` does, and a manifest
-//! that takes benilla as the workspace does:
+//! that takes benilla as the workspace does (from this fork's `ipad` branch, whose vendored
+//! patches the low-spec work needs; upstream's `main` is `https://github.com/samwhosung/benilla`):
 //!
 //! ```toml
 //! [features]
@@ -22,12 +23,12 @@
 //!
 //! [dependencies]
 //! # `default-features = false`, or `--no-default-features` still builds benilla-app with `dev`.
-//! benilla-app = { git = "https://github.com/samwhosung/benilla", default-features = false }
+//! benilla-app = { git = "https://github.com/ReynoldsCahoon/benilla", branch = "ipad", default-features = false }
 //! # benilla's version, adding no features: bevy's defaults bring its audio stack back.
 //! bevy = { version = "0.18.1", default-features = false }
 //!
 //! [build-dependencies]
-//! benilla-buildstamp = { git = "https://github.com/samwhosung/benilla" }
+//! benilla-buildstamp = { git = "https://github.com/ReynoldsCahoon/benilla", branch = "ipad" }
 //!
 //! # Cargo reads `[patch]` and `[profile]` from the root manifest only, so benilla's are repeated:
 //! # without the kira patch the mixer is not benilla's, without the alsa one the lock holds two
@@ -36,13 +37,13 @@
 //! # GPU family 2 cannot draw, and without bevy_ecs a single-threaded schedule keeps its systems'
 //! # stored access.
 //! [patch.crates-io]
-//! kira = { git = "https://github.com/samwhosung/benilla" }
-//! alsa = { git = "https://github.com/samwhosung/benilla" }
-//! wgpu-hal = { git = "https://github.com/samwhosung/benilla" }
-//! naga = { git = "https://github.com/samwhosung/benilla" }
-//! bevy_pbr = { git = "https://github.com/samwhosung/benilla" }
-//! bevy_render = { git = "https://github.com/samwhosung/benilla" }
-//! bevy_ecs = { git = "https://github.com/samwhosung/benilla" }
+//! kira = { git = "https://github.com/ReynoldsCahoon/benilla", branch = "ipad" }
+//! alsa = { git = "https://github.com/ReynoldsCahoon/benilla", branch = "ipad" }
+//! wgpu-hal = { git = "https://github.com/ReynoldsCahoon/benilla", branch = "ipad" }
+//! naga = { git = "https://github.com/ReynoldsCahoon/benilla", branch = "ipad" }
+//! bevy_pbr = { git = "https://github.com/ReynoldsCahoon/benilla", branch = "ipad" }
+//! bevy_render = { git = "https://github.com/ReynoldsCahoon/benilla", branch = "ipad" }
+//! bevy_ecs = { git = "https://github.com/ReynoldsCahoon/benilla", branch = "ipad" }
 //!
 //! [profile.dev]
 //! opt-level = 1
