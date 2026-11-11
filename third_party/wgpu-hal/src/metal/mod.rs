@@ -23,6 +23,8 @@ mod command;
 mod conv;
 mod device;
 mod layer_observer;
+// benilla: wgpu-core's staging buffers reused (`BENILLA.md`).
+pub mod staging_pool;
 mod surface;
 mod time;
 
@@ -550,6 +552,8 @@ impl crate::Queue for Queue {
 pub struct Buffer {
     raw: metal::Buffer,
     size: wgt::BufferAddress,
+    /// benilla: a pooled staging buffer, returned to [`staging_pool`] on destroy.
+    pooled: bool,
 }
 
 unsafe impl Send for Buffer {}

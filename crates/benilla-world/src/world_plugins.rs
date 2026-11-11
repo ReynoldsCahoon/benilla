@@ -210,6 +210,14 @@ impl Plugin for WorldFoundation {
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(default_every),
         );
+        // The Metal backend reuses wgpu-core's staging buffers instead of making and releasing
+        // one per write (the vendored `wgpu-hal`'s `BENILLA.md`); on by default, and on iOS
+        // `WOW_STAGING_POOL=0` turns it off for a measurement. Engine pacing, not a 1.12 behaviour.
+        #[cfg(target_os = "ios")]
+        wgpu_hal::metal::staging_pool::ENABLED.store(
+            std::env::var("WOW_STAGING_POOL").as_deref() != Ok("0"),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         // Direct draws on every camera: Bevy's indirect lane is a per-draw encode loop on Metal
         // (no MULTI_DRAW_INDIRECT) plus GPU preprocessing; `WOW_INDIRECT=1` restores it. A
         // required component, as `NoIndirectDrawing` must ride a camera's spawn: the work-item

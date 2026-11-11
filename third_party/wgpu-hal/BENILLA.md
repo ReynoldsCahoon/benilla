@@ -105,3 +105,22 @@ buffer's `GPUStartTime`/`GPUEndTime`. With `GPU_TIMING` set (benilla's iOS `WOW_
 submitted command buffer gets a completed handler that adds the part of its span past the latest
 end seen to `GPU_BUSY_NS` (the union, so buffers the GPU overlaps are not counted twice), by label
 in `GPU_BUSY_BY_LABEL`, and counts itself in `GPU_BUFFERS`. Off, nothing is added to a submit.
+
+## Staging buffers pooled — `src/metal/{staging_pool,device,mod}.rs`
+
+wgpu-core makes a fresh `MAP_WRITE | COPY_SRC` buffer for every `write_buffer`,
+`write_buffer_with` and `write_texture` (`StagingBuffer::new`), and destroys it once its submission
+completes (`Queue::maintain` dropping the `FlushedStagingBuffer`). On iOS a Metal buffer's creation
+and release are costly: on the iPad Air 2 in Stormwind, `queue.submit` took 14-16 ms of the render
+thread's ~40 ms frame, and a Mac profile of the same scene put a third of `submit` in
+`destroy_buffer` of staging buffers. A staging buffer reaches `destroy_buffer` only after the GPU is
+done with it, so the Metal backend keeps it in `staging_pool`, by power-of-two size class (4 KiB to
+4 MiB), and the next staging request of that class reuses it; `create_buffer` allocates a staging
+buffer at its class size so it can go back. The pool holds at most 16 MiB; past that a returned
+buffer is released as before, and a staging buffer over 4 MiB is never pooled. `Buffer::pooled`
+marks the ones to return. `staging_pool::ENABLED` (on by default) is benilla's switch: its iOS
+`WOW_STAGING_POOL=0` turns the pool off for a measurement.
+
+Check: a pooled buffer is only ever handed out after `destroy_buffer` (the GPU finished with it),
+and only to a `MAP_WRITE | COPY_SRC` request, which wgpu-core fills completely before copying from
+it.

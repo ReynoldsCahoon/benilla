@@ -359,7 +359,11 @@ impl super::Device {
     }
 
     pub unsafe fn buffer_from_raw(raw: metal::Buffer, size: wgt::BufferAddress) -> super::Buffer {
-        super::Buffer { raw, size }
+        super::Buffer {
+            raw,
+            size,
+            pooled: false,
+        }
     }
 
     pub fn raw_device(&self) -> &Mutex<metal::Device> {
@@ -386,7 +390,26 @@ impl crate::Device for super::Device {
         //TODO: HazardTrackingModeUntracked
 
         objc::rc::autoreleasepool(|| {
-            let raw = self.shared.device.lock().new_buffer(desc.size, options);
+            // benilla: a staging buffer is taken from the pool, or made at its size class so it
+            // can go back to it (`staging_pool`).
+            let class = super::staging_pool::is_staging(desc)
+                .then(|| super::staging_pool::class(desc.size))
+                .flatten();
+            if class.is_some() {
+                if let Some(raw) = super::staging_pool::take(desc.size) {
+                    self.counters.buffers.add(1);
+                    return Ok(super::Buffer {
+                        raw,
+                        size: desc.size,
+                        pooled: true,
+                    });
+                }
+            }
+            let raw = self
+                .shared
+                .device
+                .lock()
+                .new_buffer(class.unwrap_or(desc.size), options);
             if let Some(label) = desc.label {
                 raw.set_label(label);
             }
@@ -394,11 +417,16 @@ impl crate::Device for super::Device {
             Ok(super::Buffer {
                 raw,
                 size: desc.size,
+                pooled: class.is_some(),
             })
         })
     }
-    unsafe fn destroy_buffer(&self, _buffer: super::Buffer) {
+    unsafe fn destroy_buffer(&self, buffer: super::Buffer) {
         self.counters.buffers.sub(1);
+        // benilla: the GPU is done with it; a pooled staging buffer is kept for reuse.
+        if buffer.pooled {
+            super::staging_pool::give(buffer.raw);
+        }
     }
 
     unsafe fn add_raw_buffer(&self, _buffer: &super::Buffer) {
