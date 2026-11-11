@@ -210,6 +210,24 @@ impl Plugin for WorldFoundation {
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(default_every),
         );
+        // Bevy's light visibility checks run only while a Bevy light exists. benilla lights the
+        // world itself and spawns none, yet `check_dir_light_mesh_visibility` queues a command
+        // every frame that builds a fresh `ViewVisibility` query over every archetype: ~0.9 ms of
+        // the iPad Air 2's main thread a frame (`ios-perf-apply`, 2026-11-11), for nothing.
+        // Engine housekeeping, not a 1.12 behaviour.
+        app.configure_sets(
+            PostUpdate,
+            bevy::light::SimulationLightSystems::CheckLightVisibility.run_if(
+                |lights: Query<
+                    (),
+                    Or<(
+                        With<bevy::light::DirectionalLight>,
+                        With<bevy::light::PointLight>,
+                        With<bevy::light::SpotLight>,
+                    )>,
+                >| !lights.is_empty(),
+            ),
+        );
         // The Metal backend reuses wgpu-core's staging buffers instead of making and releasing
         // one per write (the vendored `wgpu-hal`'s `BENILLA.md`); on by default, and on iOS
         // `WOW_STAGING_POOL=0` turns it off for a measurement. Engine pacing, not a 1.12 behaviour.
