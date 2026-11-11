@@ -97,7 +97,6 @@ impl Plugin for SoftKeyboardPlugin {
 /// module docs. After the interface's input pass, so a tap that focused a box has, and the hover
 /// names the frame the tap ended on.
 fn follow_focus(
-    script: Option<NonSend<benilla_ui::script::UiScript>>,
     capture: Res<UiKeyboardCapture>,
     hover: Res<crate::ui_script::PlayerUiHover>,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -106,7 +105,7 @@ fn follow_focus(
     let tapped_box = buttons.just_released(MouseButton::Left)
         && capture.typing
         && hover.0.is_some()
-        && hover.0 == script.as_deref().and_then(|s| s.focused_editbox_id());
+        && hover.0 == capture.focused_box;
     for (entity, mut window) in &mut windows {
         if !capture.typing {
             if window.ime_enabled {

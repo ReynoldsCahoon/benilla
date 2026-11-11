@@ -118,8 +118,9 @@ pub(super) const SKIN_WIDTH: f32 = 0.02;
 /// deadline on while the world is stale or any load counter moves, so only a dead stream hits it.
 /// Terrain that never arrives still holds the body, by the world query gate ([`super::edge`]),
 /// so what the release can hand over early is a placement that never spawned. Deviation: the
-/// reference's blocking load (`0x694920`) waits out its reads before the frame goes on and has
-/// no such release; without one, a model that never loads would freeze our body for good.
+/// reference's blocking load (`0x694920`) waits out its reads before the frame goes on and has no
+/// such release; the timeout exists because without one a model that never loads would freeze our
+/// body for good.
 pub(crate) const SETTLE_TIMEOUT: f32 = 6.0;
 
 /// The player body's collision capsule, swept by avian's `MoveAndSlide`: origin at its centre, the
@@ -224,8 +225,8 @@ pub(crate) struct MoverInput {
     pub(crate) dead: bool,
     /// The far-sight term, held true while our view is out on a far-sight object and we drive our
     /// own body: `[mover+0x1c70] & 1`, read only when the mover is the active player (`0x514537`).
-    /// The latch sets only once the subject resolves (`0x5ee3f6`), so this follows the resolved
-    /// [`super::view_subject::ViewSubject`], not the raw `PLAYER_FARSIGHT` field.
+    /// It is the latch ([`super::view_subject::FarSight::on`]), not the raw `PLAYER_FARSIGHT`
+    /// field: it sets only once the subject resolves (`0x5ee3f6`).
     pub(crate) view_is_out: bool,
 }
 
@@ -698,6 +699,26 @@ impl Player {
     /// `UnitOnTaxi`, which reads [`crate::player::UNIT_FLAG_TAXI_FLIGHT`] (`0x517a86`).
     pub(crate) fn server_riding(&self) -> bool {
         self.server_riding
+    }
+
+    /// The root mode as the frame's acks left it (`MOVEMENTFLAGS & 0x1200`).
+    pub(crate) fn rooted(&self) -> bool {
+        self.modes.rooted
+    }
+
+    /// Rooted, as a root's ack leaves the mover, for a test.
+    #[cfg(test)]
+    pub(crate) fn root_for_test(&mut self) {
+        self.modes.rooted = true;
+    }
+
+    /// Autorun, for a test to hold and read.
+    #[cfg(test)]
+    pub(crate) fn autorun_for_test(&mut self, held: Option<bool>) -> bool {
+        if let Some(held) = held {
+            self.autorun = held;
+        }
+        self.autorun
     }
 }
 

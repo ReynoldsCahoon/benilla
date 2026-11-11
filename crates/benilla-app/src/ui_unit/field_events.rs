@@ -1,10 +1,9 @@
 //! The interface events of the field watches and the packet handlers that signal unit events
 //! ([`crate::field_watch`]): the notice lane, whose notices fire their callbacks' signals in the
-//! packets' order among the other lanes ([`crate::lanes`]), after every snapshot those events'
-//! handlers read is pushed ([`FieldEventPushes`]) and the unit tokens are seated
-//! ([`crate::ui_aura::UnitGuidPush`]), as the update handler's notify pass follows its two write
-//! passes over every block of the packet (`0x465277` after `0x46520e`, `0x465222`). The unit
-//! tokens' views the drain then steps back to each packet's state ([`super::views`]).
+//! packets' order among the other lanes ([`crate::lanes`]), each after its packet's writes, as
+//! the update handler's notify pass follows its two write passes over every block of the packet
+//! (`0x465277` after `0x46520e`, `0x465222`). The unit tokens' views the drain then steps back to
+//! each packet's state ([`super::views`]).
 
 use bevy::prelude::*;
 
@@ -14,13 +13,32 @@ use benilla_ui::strings::Arg;
 use crate::field_watch::{FieldNotice, NoticeLane};
 use crate::lanes::Until;
 
-/// The feeds that push what a field event's handlers read: the group's and the pet's tokens, the
-/// player's combat stats and
-/// inventory, the inspected unit's slots, the honor block and the watched faction. The lanes'
-/// drain runs after all of them, as the update handler writes every block of its packet before its
-/// notify pass (`0x46520e`, `0x465222`, then `0x46522d`).
-#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct FieldEventPushes;
+/// The units' token flags a dying VM left for the next ([`benilla_ui::script::TokenFlagsCarry`]).
+#[derive(Resource)]
+pub(crate) struct TokenFlagsCarried(benilla_ui::script::TokenFlagsCarry);
+
+/// Take the dying VM's token flags and their links out, after its last signal, the shutdown's
+/// deselect (`0x490bdf`).
+pub(crate) fn fold_dying_vm_token_flags(world: &mut World) {
+    let Some(carry) = world
+        .get_non_send_resource_mut::<UiScript>()
+        .map(|mut s| s.take_token_flags())
+    else {
+        return;
+    };
+    world.insert_resource(TokenFlagsCarried(carry));
+}
+
+/// Seat a new in-game VM's token flags before its files run: a `/reload`'s the dying VM's, which
+/// the unit objects keep; a world entry's none, as its units are created after it, each reading
+/// its own (`0x5fbb21`).
+pub(crate) fn seed_vm_token_flags(world: &mut World, script: &mut UiScript, reload: bool) {
+    if let Some(TokenFlagsCarried(carry)) = world.remove_resource::<TokenFlagsCarried>() {
+        if reload {
+            script.seat_token_flags(carry);
+        }
+    }
+}
 
 /// What a field notice's firing reads.
 #[derive(bevy::ecs::system::SystemParam)]
@@ -47,6 +65,10 @@ pub(crate) struct NoticeFiring<'w, 's> {
     marks: Option<ResMut<'w, crate::portrait::PortraitMarks>>,
     // The happiness watch's tables, which its run reads the bucket through.
     pet_stats: Option<Res<'w, crate::ui_pet_stats::PetStatTables>>,
+    // The explored watch's setter rebuilds the landmark list the bits gate.
+    landmarks: crate::ui_world_map::LandmarkReads<'w, 's>,
+    // The recruitment cascade's retry, which a run that cannot act arms.
+    cascade: Option<ResMut<'w, crate::ui_chat::GuildRecruitmentCascade>>,
 }
 
 impl NoticeFiring<'_, '_> {
@@ -96,12 +118,71 @@ impl NoticeFiring<'_, '_> {
             drunk(script, &mut self.sink, guid, old, new);
             return false;
         }
+        if let FieldNotice::TooltipUnit { guid } = notice {
+            if self.holds_unit(guid) {
+                script.tooltip_unit_refresh(guid);
+            }
+            return false;
+        }
+        if let FieldNotice::Plate { guid, call } = notice {
+            crate::vplates::fire_plate_call(script, guid, call);
+            return false;
+        }
+        // Each writer acts on the unit its lookup finds (`0x468460` with mask 8 or 0x10).
+        if let FieldNotice::TokenFlags { guid, change } = notice {
+            if self.holds_unit(guid) {
+                script.unit_token_flags(guid, change);
+            }
+            return false;
+        }
+        // The two health fields' watchers on the unit's own list, in the order they were linked
+        // (`0x467f65`): its unit-field watchers' signal, each plate bar's write and, on the health
+        // field, each tooltip's (`0x529560`, linked by the render at `0x52a0a8`).
+        if let FieldNotice::Unit { guid, id } = notice {
+            use crate::field_watch::id::{UNIT_HEALTH, UNIT_MAXHEALTH};
+            if matches!(id, UNIT_HEALTH | UNIT_MAXHEALTH) {
+                let store = self
+                    .index
+                    .as_ref()
+                    .and_then(|i| i.0.get(&guid))
+                    .and_then(|&e| self.views.get(e).ok());
+                let sink = &mut self.sink;
+                crate::vplates::health_watch(script, guid, store, id == UNIT_HEALTH, |script| {
+                    fire(script, sink, notice);
+                });
+                return false;
+            }
+        }
+        if notice == FieldNotice::CorpsePlate {
+            script.tooltip_corpse_refresh();
+            return false;
+        }
+        if notice == FieldNotice::ExploredZones {
+            // The bytes as the watcher's packet left them, as the shapeshift offset reads the
+            // form byte.
+            let explored = self
+                .player
+                .iter()
+                .next()
+                .and_then(|e| self.views.get(e).ok())
+                .map(|store| crate::ui_world_map::explored_of(&store.0));
+            if let Some(explored) = explored {
+                self.landmarks.explored_zones_changed(script, explored);
+            }
+            return false;
+        }
+        if notice == FieldNotice::RecruitmentCascade {
+            if let Some(cascade) = self.cascade.as_mut() {
+                cascade.run(script);
+            }
+            return false;
+        }
         if notice == FieldNotice::SkillLines {
             script.rebuild_skills();
             return false;
         }
         if notice == FieldNotice::SkillMax {
-            script.rebuild_trade_skill(&mut |t| self.reband(t));
+            script.rebuild_trade_skill(&mut |_| {});
             script.rebuild_skills();
             return false;
         }
@@ -118,7 +199,11 @@ impl NoticeFiring<'_, '_> {
             return false;
         }
         if notice == FieldNotice::Professions {
-            script.rebuild_trade_skill(&mut |t| self.reband(t));
+            script.rebuild_trade_skill(&mut |_| {});
+            return false;
+        }
+        if notice == FieldNotice::PetMacros {
+            crate::ui_macro::derive_pet_followers(script);
             return false;
         }
         if notice == FieldNotice::Shapeshift {
@@ -138,34 +223,19 @@ impl NoticeFiring<'_, '_> {
             return false;
         }
         fire(script, &mut self.sink, notice);
-        if let FieldNotice::Unit {
-            guid,
-            id: crate::field_watch::id::UNIT_HEALTH,
-        } = notice
-        {
-            self.tooltip_health(script, guid);
-        }
         false
     }
 }
 
 impl NoticeFiring<'_, '_> {
-    /// The unit tooltip's own watcher on the health of the unit it shows (`0x529560`, which the
-    /// render registers on the object, `0x52a0a8`), after the bridge's: `guid`'s health as its
-    /// packet left it.
-    fn tooltip_health(&self, script: &mut UiScript, guid: u64) {
-        let store = self
-            .index
+    /// Whether the object manager holds `guid` as a unit as of the notice's place (`0x468460` with
+    /// mask 8, `0x491a1a`).
+    fn holds_unit(&self, guid: u64) -> bool {
+        self.index
             .as_ref()
             .and_then(|i| i.0.get(&guid))
-            .and_then(|&e| self.views.get(e).ok());
-        if let Some(store) = store {
-            script.tooltip_unit_health(
-                guid,
-                store.0.unit_health().unwrap_or(0),
-                store.0.unit_max_health().unwrap_or(0),
-            );
-        }
+            .and_then(|&e| self.views.get(e).ok())
+            .is_some_and(crate::net::ObjectStore::is_unit)
     }
 
     /// `SetPetGuid`'s signals in its order (`0x4bc847`-`0x4bc911`): on a change, `UNIT_PET`, then,
@@ -223,11 +293,6 @@ impl NoticeFiring<'_, '_> {
         true
     }
 
-    /// The profession list's rebuild by a skill watch, its bands and line rank read again.
-    fn reband(&self, t: &mut benilla_ui::script::TradeSkillState) {
-        crate::ui_tradeskill::reband(t, self.me.iter().next(), self.skill_lines.as_deref());
-    }
-
     /// `0x5de180`'s line after its rebuild (`0x5de345`-`0x5de41c`), for a line with a `SkillLine`
     /// row and a race-class row without flags `0x402` (`0x5de34a`-`0x5de35f`): over an old value
     /// of 0 `ERR_SKILL_GAINED_S` (`0x5de378`), else, on a shown value above 0,
@@ -280,8 +345,14 @@ fn peek(world: &World) -> Option<crate::lanes::Stamp> {
 }
 
 /// The VM and the host, with the open trainer `SetPetGuid` reads between notices.
-type NoticeVm<'w, 's> =
-    crate::script_calls::VmWith<'w, 's, Option<Res<'static, crate::ui_trainer::TrainerOpen>>>;
+type NoticeVm<'w, 's> = crate::script_calls::VmWith<
+    'w,
+    's,
+    (
+        Option<Res<'static, crate::ui_trainer::TrainerOpen>>,
+        crate::ui_chat::TaxiWalk<'static>,
+    ),
+>;
 
 /// The notices `until` admits, in stamp order, each one's signals with the host lent; the lane's
 /// firing stops after a notice whose firing stamped anything, so the drain takes what it pushed
@@ -293,6 +364,27 @@ fn fire_lane(vm: &mut NoticeVm, lane: &mut NoticeLane, firing: &mut NoticeFiring
         return;
     }
     while let Some((stamp, notice)) = lane.pop(until) {
+        // An engine write, with no signal: the host's autorun bit.
+        if notice == FieldNotice::AutorunClear {
+            vm.engine_autorun_clear();
+            continue;
+        }
+        if notice == FieldNotice::ZoneChannelWalk {
+            // An engine turn on the slots beside the VM, then the walk's tail with the host lent.
+            let ((), moved) = crate::lanes::firing(stamp, || {
+                if vm.turn(|script, (_, mut walk)| walk.walk(script)) {
+                    vm.run(|script| {
+                        if let (Some(script), Some(cascade)) = (script, firing.cascade.as_mut()) {
+                            cascade.tail(script);
+                        }
+                    });
+                }
+            });
+            if moved {
+                break;
+            }
+            continue;
+        }
         if notice == FieldNotice::UsableRefresh {
             let ((), moved) = crate::lanes::firing(stamp, || vm.engine_usable_refresh());
             if moved {
@@ -300,9 +392,49 @@ fn fire_lane(vm: &mut NoticeVm, lane: &mut NoticeLane, firing: &mut NoticeFiring
             }
             continue;
         }
+        if let FieldNotice::SpellSlots { spell } = notice {
+            // Each slot resolved as the walk reaches it (`0x4e5df5`), so a listener's write to a
+            // later slot is seen.
+            let ((), moved) = crate::lanes::firing(stamp, || {
+                for action in 1..=120 {
+                    if !vm.engine_spell_slot_notified(action, spell) {
+                        continue;
+                    }
+                    vm.run(|script| {
+                        if let Some(script) = script {
+                            script.fire_event(
+                                "ACTIONBAR_SLOT_CHANGED",
+                                vec![ScriptValue::Int(i64::from(action))],
+                            );
+                        }
+                    });
+                }
+            });
+            if moved {
+                break;
+            }
+            continue;
+        }
+        if let FieldNotice::ActionSlotChanged { action } = notice {
+            let ((), moved) = crate::lanes::firing(stamp, || {
+                vm.engine_slot_written(action);
+                vm.run(|script| {
+                    if let Some(script) = script {
+                        script.fire_event(
+                            "ACTIONBAR_SLOT_CHANGED",
+                            vec![ScriptValue::Int(i64::from(action))],
+                        );
+                    }
+                })
+            });
+            if moved {
+                break;
+            }
+            continue;
+        }
         let trainer = match &notice {
             FieldNotice::PetGuidSet { changed: true, .. } => {
-                crate::ui_trainer::open_pet_trainer(vm.own().as_deref())
+                crate::ui_trainer::open_pet_trainer(vm.own().0.as_deref())
             }
             _ => None,
         };
@@ -403,8 +535,13 @@ fn drunk(
     new: u8,
 ) {
     let me = script.is_active_player(guid);
-    if me && script.player_can_attack_target() {
-        script.fire_event("UNIT_LEVEL", vec![ScriptValue::Str("target".to_string())]);
+    if me {
+        if script.player_can_attack_target() {
+            script.fire_event("UNIT_LEVEL", vec![ScriptValue::Str("target".to_string())]);
+        }
+        // The plates' level latch (`0x5e2b42` → `0x605550`): the next frame's gate refreshes each
+        // kept plate's level, which the drunkenness lowers (`0x7cbce0`).
+        script.latch_nameplate_levels();
     }
     // The name cache as the watcher runs, through the lent host (`0x609210`).
     let name = (!me).then(|| {
@@ -463,6 +600,10 @@ pub(super) fn add_notice_lane(app: &mut App) {
 /// to hear them, and the one that comes up later must not hear changes from before it. The
 /// reference's interface exists before the world it watches, so it has no such window; the
 /// snapshots the VM reads are pushed whole when it comes up, as they are at a `/reload`.
+///
+/// A follow stop's autorun clear goes too: with no VM no call touches the bit, so the steer's
+/// release takes it clear ([`crate::player::CallAutorun`]), as it does where [`fire_lane`] drops
+/// the lane for want of a VM.
 pub(super) fn drop_field_notices(mut lane: ResMut<NoticeLane>) {
     lane.clear();
 }
@@ -546,12 +687,19 @@ pub(crate) fn fire(
                 script.fire_event("PLAYER_CONTROL_LOST", vec![]);
             }
         }
-        // Caught by [`fire_lane`] before it reaches here: the refresh runs on the host's action
-        // states ([`crate::script_calls::ScriptCallHost::engine_usable_refresh`]).
-        FieldNotice::UsableRefresh => {}
+        // Caught by [`fire_lane`] before it reaches here: the refresh and the slot write's pair
+        // run on the host's action states
+        // ([`crate::script_calls::ScriptCallHost::engine_usable_refresh`]), and the taxi arm's
+        // walk on the slots beside the VM ([`crate::ui_chat::TaxiWalk`]).
+        FieldNotice::UsableRefresh
+        | FieldNotice::ActionSlotChanged { .. }
+        | FieldNotice::SpellSlots { .. }
+        | FieldNotice::ZoneChannelWalk => {}
         // Fired by [`NoticeFiring::fire`], which holds the slots, the banks, the names, the form
-        // table, the spell catalog, the aura cache, the skill lines and the pet's stat tables.
+        // table, the spell catalog, the aura cache, the skill lines, the pet's stat tables and the
+        // recruitment cascade's retry.
         FieldNotice::QuestLog
+        | FieldNotice::ExploredZones
         | FieldNotice::Tutorial { .. }
         | FieldNotice::MirrorTimer(_)
         | FieldNotice::Drunk { .. }
@@ -563,12 +711,24 @@ pub(crate) fn fire(
         | FieldNotice::SkillValue { .. }
         | FieldNotice::Professions
         | FieldNotice::PortraitMark { .. }
-        | FieldNotice::PetGuidSet { .. } => {}
+        | FieldNotice::PetMacros
+        | FieldNotice::PetGuidSet { .. }
+        | FieldNotice::TooltipUnit { .. }
+        | FieldNotice::Plate { .. }
+        | FieldNotice::TokenFlags { .. }
+        | FieldNotice::CorpsePlate
+        | FieldNotice::RecruitmentCascade => {}
         // Put on the trainer lane by the packet's handler ([`crate::ui_trainer::TrainerPasses`]).
-        FieldNotice::TrainerPass => {}
+        FieldNotice::TrainerPass
+        | FieldNotice::AutoMoveStop
+        | FieldNotice::AutorunClear
+        | FieldNotice::InputTick
+        | FieldNotice::FarSight { .. } => {}
         // Run at its place by the packet's handler ([`crate::net::objects`]), its signal written
         // there.
-        FieldNotice::AreaSpiritHealerClear | FieldNotice::QuestAccepted { .. } => {}
+        FieldNotice::AreaSpiritHealerClear
+        | FieldNotice::QueryCorpse
+        | FieldNotice::QuestAccepted { .. } => {}
         // `%d%d` (`0x4018d5`): the two counts as numbers, which `ChatFrame_DisplayTimePlayed`
         // prints (`ChatFrame.lua:1279`).
         FieldNotice::PlayedTime { total, level } => script.fire_event(
@@ -585,6 +745,15 @@ pub(crate) fn fire(
             vec![ScriptValue::Int(i64::from(free_repop))],
         ),
         FieldNotice::MinimapPing(ping) => ping.fire(script),
+        FieldNotice::Revived => {
+            script.unlock_all_items();
+            script.fire_event("PLAYER_ALIVE", vec![]);
+        }
+        FieldNotice::Line { key } => {
+            if let Some(line) = crate::ui_action::keyed_line(script, key) {
+                crate::ui_action::show_now(script, sink, "ui_unit", line);
+            }
+        }
         FieldNotice::PvpPreference { on } => {
             let (toast, verbose) = super::pvp_announcement(on);
             // The verbose sentence is no catalog row, so it goes `unkeyed` to chat:
@@ -649,6 +818,7 @@ pub(crate) fn fire_unit_notice(script: &mut UiScript, notice: FieldNotice) {
             }
         }
         FieldNotice::Signal { guid, id } => signal_unit(script, guid, id),
+        FieldNotice::TokenFlags { guid, change } => script.unit_token_flags(guid, change),
         other => panic!("not a unit notice: {other:?}"),
     }
 }
@@ -726,6 +896,7 @@ fn global_event(id: u16) -> Option<&'static str> {
     Some(match id {
         id::PLAYER_REGEN_DISABLED => "PLAYER_REGEN_DISABLED",
         id::PLAYER_REGEN_ENABLED => "PLAYER_REGEN_ENABLED",
+        id::AUTOFOLLOW_END => "AUTOFOLLOW_END",
         id::PET_ATTACK_START => "PET_ATTACK_START",
         id::PET_ATTACK_STOP => "PET_ATTACK_STOP",
         id::PLAYER_GUILD_UPDATE => "PLAYER_GUILD_UPDATE",
@@ -733,6 +904,7 @@ fn global_event(id: u16) -> Option<&'static str> {
         id::MERCHANT_UPDATE => "MERCHANT_UPDATE",
         id::UPDATE_FACTION => "UPDATE_FACTION",
         id::PLAYER_UNGHOST => "PLAYER_UNGHOST",
+        id::CORPSE_OUT_OF_RANGE => "CORPSE_OUT_OF_RANGE",
         id::PLAYER_UPDATE_RESTING => "PLAYER_UPDATE_RESTING",
         id::PET_UI_UPDATE => "PET_UI_UPDATE",
         id::PLAYTIME_CHANGED => "PLAYTIME_CHANGED",
@@ -742,6 +914,9 @@ fn global_event(id: u16) -> Option<&'static str> {
         id::PET_BAR_UPDATE => "PET_BAR_UPDATE",
         id::AREA_SPIRIT_HEALER_IN_RANGE => "AREA_SPIRIT_HEALER_IN_RANGE",
         id::AREA_SPIRIT_HEALER_OUT_OF_RANGE => "AREA_SPIRIT_HEALER_OUT_OF_RANGE",
+        id::PLAYER_CAMPING => "PLAYER_CAMPING",
+        id::PLAYER_QUITING => "PLAYER_QUITING",
+        id::LOGOUT_CANCEL => "LOGOUT_CANCEL",
         id::INSPECT_HONOR_UPDATE => "INSPECT_HONOR_UPDATE",
         id::PLAYERBANKBAGSLOTS_CHANGED => "PLAYERBANKBAGSLOTS_CHANGED",
         id::PLAYER_FARSIGHT_FOCUS_CHANGED => "PLAYER_FARSIGHT_FOCUS_CHANGED",
@@ -1412,32 +1587,6 @@ mod tests {
             .get_resource_or_init::<crate::ui_world_enter::ArrivalLane>()
             .push(crate::ui_world_enter::Entry::Reload);
         crate::ui_world_enter::fire_lane(app.world_mut());
-    }
-
-    /// Every feed whose push a field event's handlers read runs ahead of the drain that fires it,
-    /// as the update handler writes every block of its packet before its notify pass (`0x46520e`,
-    /// `0x465222`, then `0x46522d`).
-    #[test]
-    fn the_field_event_pushes_run_ahead_of_the_drain() {
-        let mut headless = crate::game_plugins::schedule_tests::headless_client();
-        let ahead = [
-            crate::test_support::runs_before(
-                &mut headless,
-                crate::ui_char::feed_char,
-                crate::lanes::fire_in_order,
-            ),
-            crate::test_support::runs_before(
-                &mut headless,
-                crate::ui_party::feed_party,
-                crate::lanes::fire_in_order,
-            ),
-            crate::test_support::runs_before(
-                &mut headless,
-                crate::ui_pet::feed_pet_unit,
-                crate::lanes::fire_in_order,
-            ),
-        ];
-        assert_eq!(ahead, [true; 3], "char, party, pet");
     }
 
     /// The active player's arrival runs its ghost state (`0x5dea50` → `0x5deb2a` → `0x5de9c0`)

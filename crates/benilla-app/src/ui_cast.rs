@@ -2,20 +2,18 @@
 //! (`ReportCastFailure 0x6e1a00`), the wire edges that become the `SPELLCAST_*` events stock
 //! `CastingBarFrame.lua:6-13` registers for, named from `Spell.dbc`, and the tradeskill repeat's
 //! disarm. A script call's reports are signalled inside the call ([`crate::script_calls`]), the
-//! rest from their lane in the packets' order ([`fire_cast_reports`]), after the frame's feed has
-//! pushed the VM's cast state ([`feed_cast_reports`]). The cast lifecycle is `crate::spell`'s.
+//! rest from their lane in the packets' order ([`fire_cast_reports`]), where the getters read the
+//! cast state each packet left ([`CastLive`]). The cast lifecycle is `crate::spell`'s.
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use benilla_ui::script::{ScriptValue, UiScript};
 
-use crate::spell::CastState;
 use crate::ui_action::{CastFail, CastFailLines, MessageSink, Shown, Spells};
-use crate::ui_unit::UnitFeed;
 
 mod views;
-pub(crate) use views::{slot_moves_here, CastViews};
+pub(crate) use views::{slot_moves_here, CastLive, CastViews};
 
 /// One edge of our own cast, queued by the spell's packet handlers, its reports and its cancels.
 pub(crate) enum CastBarEdge {
@@ -62,8 +60,6 @@ pub(crate) enum CastReport {
     /// send stores it (`0x6e594c`, `0x6e5952`), `STOP_AUTOREPEAT_SPELL` (436) as
     /// `StopAutoRepeatSpell` clears it (`0x6ea16a`, `0x6ea170`).
     AutoRepeat(bool),
-    /// The frame's retry of the refused lines that wait on an item's record (`0x6e29b0`).
-    Redisplay,
     /// A line the cast validator shows itself through `CGGameUI::DisplayError 0x496720`, outside
     /// `ReportCastFailure`: a learn rung's, or the tame rung's ahead of its report.
     Line(crate::ui_action::UiError),
@@ -78,6 +74,9 @@ pub(crate) struct CastReports(std::collections::VecDeque<(crate::lanes::Stamp, C
 impl CastReports {
     /// Stamp `report` and queue it behind everything stamped before it.
     fn push(&mut self, report: CastReport) {
+        // A call's host signals it at its next point: the census counts a send made before then.
+        #[cfg(debug_assertions)]
+        benilla_ui::script::census::queued();
         let stamp = crate::lanes::stamp();
         let at = self.0.partition_point(|(s, _)| *s < stamp);
         self.0.insert(at, (stamp, report));
@@ -95,6 +94,13 @@ impl CastReports {
     /// [`CastReport::Line`].
     pub(crate) fn line(&mut self, line: crate::ui_action::UiError) {
         self.push(CastReport::Line(line));
+    }
+
+    /// `ShowItemCastFailure 0x6e29b0`, run by the item answer of a refused line that waited on
+    /// it ([`crate::items::RecordCallback::CastFailure`]): the line again, under the plain key,
+    /// with no log line and no event.
+    pub(crate) fn redisplay(&mut self, spell_id: u32, reason: u8, item: u32) {
+        self.refused(CastFail::item_redisplay(spell_id, reason, item));
     }
 
     /// `SMSG_PET_CAST_FAILED` (`0x6e8eb0`): one message, no log line and no event.
@@ -150,6 +156,7 @@ impl CastReports {
         self.0.drain(..).map(|(_, r)| r).collect()
     }
 
+    /// How many reports are queued.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.0.len()
@@ -399,7 +406,6 @@ impl CastReporter<'_, '_> {
                 CastReport::AutoRepeat(false) => {
                     out.push(Ready::Event("STOP_AUTOREPEAT_SPELL", vec![]))
                 }
-                CastReport::Redisplay => out.extend(self.redisplays(script)),
                 CastReport::Line(e) => {
                     let get = |key: &str| script.lua().globals().get::<String>(key).ok();
                     if let Some(text) = crate::ui_action::ui_error_text(&e, &get) {
@@ -409,15 +415,6 @@ impl CastReporter<'_, '_> {
             }
         }
         out
-    }
-
-    /// The refused lines whose item record has answered since (`0x6e29b0`).
-    pub(crate) fn redisplays(&mut self, script: &UiScript) -> Vec<Ready> {
-        let shown = self.lines.redisplays(script);
-        shown
-            .into_iter()
-            .filter_map(|s| self.line(script, s))
-            .collect()
     }
 
     /// A line's world half done, its event readied: a chat line's too, which `DisplayError`
@@ -431,7 +428,7 @@ impl CastReporter<'_, '_> {
 
 /// The reports a script call makes, signalled inside it ([`crate::script_calls`]): the by-key
 /// refusals its verb raised (an item not ready, a slot that cannot be used), then its cast's
-/// reports in order. What was queued before the call stays for the frame's feed.
+/// reports in order. What was queued before the call stays on its lane.
 #[derive(SystemParam)]
 pub(crate) struct CallReports<'w, 's> {
     reports: ResMut<'w, CastReports>,
@@ -439,27 +436,34 @@ pub(crate) struct CallReports<'w, 's> {
     reporter: CastReporter<'w, 's>,
 }
 
-/// Where a call's reports start: the refusal keys' count, and the clock its cast reports are
-/// stamped after.
+/// Where a call's reports start: the clock its refusal keys and its cast reports are stamped
+/// after.
 #[derive(Clone, Copy)]
-pub(crate) struct ReportMark(usize, crate::lanes::Mark);
+pub(crate) struct ReportMark(crate::lanes::Mark, crate::lanes::Mark);
+
+impl ReportMark {
+    /// The clock the call's lane items are stamped after: its cast reports, its tutorial triggers.
+    pub(crate) fn lanes(self) -> crate::lanes::Mark {
+        self.1
+    }
+}
 
 impl CallReports<'_, '_> {
     pub(crate) fn mark(&self) -> ReportMark {
-        ReportMark(self.ui_errors.len(), crate::lanes::mark())
+        let now = crate::lanes::mark();
+        ReportMark(now, now)
     }
 
     /// A mark at the clock's `at`, for an engine writer that marked where its step began: the
     /// cast reports it made since then are its own, and it raises no refusal keys.
     pub(crate) fn mark_at(&self, at: crate::lanes::Mark) -> ReportMark {
-        ReportMark(self.ui_errors.len(), at)
+        ReportMark(crate::lanes::mark(), at)
     }
 
     /// The reports queued since `mark`, taken off their queues and readied.
     pub(crate) fn ready_since(&mut self, script: &UiScript, mark: ReportMark) -> Vec<Ready> {
         let ReportMark(errors, reports) = mark;
-        let start = errors.min(self.ui_errors.len());
-        let errors = self.ui_errors.take_from(start);
+        let errors = self.ui_errors.take_since(errors);
         let mut ready: Vec<Ready> = errors
             .iter()
             .filter_map(|e| {
@@ -474,34 +478,6 @@ impl CallReports<'_, '_> {
         ready.extend(self.reporter.ready(script, reports));
         ready
     }
-}
-
-/// Push the cast state the frame's packets and cancels left ([`CastState`]), which
-/// `SpellStopCasting` (`0x6e6e80`) and the bar's checked tests read: a queued strike and the spell
-/// awaiting its click count as in flight, so the first Esc stops it and `ToggleGameMenu` skips
-/// `ClearTarget()` (`UIParent.lua:1489-1492`). The reports made outside any script call fire from
-/// their lane after every feed ([`fire_cast_reports`]), each listener reading the view its own
-/// packet left, which the views lane pushes at its place ([`views`]); a refused line that waits
-/// on its item's record is retried there, behind the frame's packets.
-#[allow(clippy::type_complexity)] // a Bevy system's full input set
-pub(crate) fn feed_cast_reports(
-    // The reports and the cast state, which the host's casts write, and the views' log.
-    mut vm: crate::script_calls::VmWith<(
-        ResMut<'static, CastReports>,
-        CastReporter<'static, 'static>,
-        CastState<'static, 'static>,
-        Option<ResMut<'static, CastViews>>,
-    )>,
-) {
-    vm.turn(|script, (mut reports, reporter, cast_state, mut views)| {
-        let Some(script) = script else {
-            return;
-        };
-        views::feed_live(script, views.as_deref_mut(), cast_state.view());
-        if reporter.lines.any_waiting() {
-            reports.push(CastReport::Redisplay);
-        }
-    });
 }
 
 /// The cast lane's `fire_until` ([`crate::lanes`]): each report the lane holds while `until`
@@ -537,24 +513,15 @@ fn fire_cast_reports(
     }
 }
 
-/// The frame's cast-state push, then every report queued fired alone, for a test that drives the
-/// reports without the other lanes.
-#[cfg(test)]
-pub(crate) fn signal_reports(world: &mut World) {
-    use bevy::ecs::system::RunSystemOnce;
-    world.run_system_once(feed_cast_reports).unwrap();
-    fire_cast_lane(world);
-}
-
 /// The session's end drops the reports no VM will hear, as the chat lane drops its lines: the
 /// Lua state they were for is replaced at the session end.
 fn end_session_reports(mut reports: ResMut<CastReports>) {
     reports.clear();
 }
 
-/// The reports queued, fired alone, for a test that drives them without the other lanes.
+/// Every report queued, fired alone, for a test that drives the reports without the other lanes.
 #[cfg(test)]
-pub(crate) fn fire_cast_lane(world: &mut World) {
+pub(crate) fn signal_reports(world: &mut World) {
     use bevy::ecs::system::RunSystemOnce;
     let until = crate::lanes::Until::all();
     while world
@@ -568,8 +535,7 @@ pub(crate) fn fire_cast_lane(world: &mut World) {
     }
 }
 
-/// The cast-state push, before the VM ticks so an edge and its first `OnUpdate` share a frame, and
-/// after the local cancel so a move or Esc kills the bar on the next tick; and the cast lane.
+/// The cast lane and the cast views' log.
 pub(crate) struct UiCastPlugin;
 
 impl Plugin for UiCastPlugin {
@@ -582,13 +548,6 @@ impl Plugin for UiCastPlugin {
                 |world| world.get_resource::<CastReports>()?.peek(),
                 fire_cast_reports,
                 None,
-            )
-            .add_systems(
-                Update,
-                // After the spell's local cancel, whose state this pushes the same frame.
-                feed_cast_reports
-                    .in_set(UnitFeed)
-                    .after(crate::spell::LocalCancel),
             )
             .add_systems(
                 OnExit(crate::client_state::ClientState::InWorld),

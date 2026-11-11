@@ -150,11 +150,11 @@ pub(crate) struct KeybindState {
     /// Bumped by every change to the live table or the commands: the app's signal to re-derive
     /// dispatch. It says nothing of `UPDATE_BINDINGS`.
     generation: u64,
-    /// A host-side load of a set into the live table (the seed at the VM's birth) is owed its
-    /// `UPDATE_BINDINGS`, which the reference signals at the copy into set 3 (`0x4b649d`). The Lua
-    /// verbs signal in place (`SetBinding` `0x4b805b`, `LoadBindings`) and leave the debt, a
-    /// separate signal; a registration (`0x4b6f70`) signals nothing, so it moves
-    /// [`Self::generation`] alone.
+    /// A host-side load of a set into the live table (the binding reader's set choice) is owed its
+    /// `UPDATE_BINDINGS`, which the reference signals at the copy into set 3 (`0x4b649d`) and the
+    /// host pays there. The Lua verbs signal in place (`SetBinding` `0x4b805b`, `LoadBindings`)
+    /// and leave the debt, a separate signal; a registration (`0x4b6f70`) signals nothing, so it
+    /// moves [`Self::generation`] alone.
     signal_owed: bool,
     requests: Vec<KeybindRequest>,
 }
@@ -222,7 +222,8 @@ impl KeybindState {
     ///
     /// Deviation: a key rebound to the command it already has keeps a duplicate index in 1.12.1
     /// (`0x4b7786` lowers the other keys' indices before `0x4b77ac` returns on the same name), so
-    /// both getters there answer one key too few; that client fault is not reproduced.
+    /// both getters there answer one key too few; it is not reproduced because it is a client
+    /// fault.
     fn keys_of<'a>(&'a self, command: &'a str) -> impl Iterator<Item = &'a String> + 'a {
         self.live
             .iter()
@@ -275,7 +276,7 @@ impl KeybindState {
     /// `SetBinding(key[, command])` on the live set: refused only for a key string the validator
     /// rejects (`0x4b762c`). The command is never read (`0x4b7490`), so a name no `Bindings.xml`
     /// declared is stored and answered like any other.
-    fn set_binding(&mut self, key: &str, command: Option<&str>) -> bool {
+    pub(super) fn set_binding(&mut self, key: &str, command: Option<&str>) -> bool {
         let Some(key) = normalize_binding_key(key) else {
             return false;
         };
@@ -285,8 +286,9 @@ impl KeybindState {
     }
 
     /// `LoadBindings(set)`: 0 defaults, 1 account, 2 character, which falls back to the account
-    /// set (the reference's starts as a copy), each falling back to the defaults. Loading defaults
-    /// keeps the current set, as the window's Reset To Default does.
+    /// set (the reference's starts as a copy), each falling back to the defaults. The current set
+    /// stays: the verb only copies the set into the live one (`0x4b8249`-`0x4b8252`), so the
+    /// window's Cancel (`LoadBindings(GetCurrentBindingSet())`) reloads the set saved last.
     fn load(&mut self, set: u32) {
         let list = match set {
             0 => &self.defaults,
@@ -298,9 +300,6 @@ impl KeybindState {
             _ => return,
         };
         self.live = list.clone();
-        if set != 0 {
-            self.current_set = set;
-        }
         self.generation += 1;
     }
 
@@ -404,9 +403,13 @@ impl super::UiScript {
         }
     }
 
-    /// Host-side `LoadBindings` (world entry: character set if it exists, else account).
+    /// Host-side `LoadBindings` (world entry: character set if it exists, else account), which
+    /// makes `set` current first, as the sets' read does (`0x4b64cb`).
     pub fn load_binding_set(&mut self, set: u32) {
         let mut model = self.model_mut();
+        if set != 0 {
+            model.keybinds.current_set = set;
+        }
         model.keybinds.load(set);
         model.keybinds.signal_owed = true;
     }
@@ -997,6 +1000,34 @@ mod tests {
         assert_eq!(s.current_binding_set(), 1);
         assert!(!s.character_bindings_exist());
         assert_eq!(s.take_keybind_requests(), vec![KeybindRequest::Save(1)]);
+    }
+
+    /// Ticking Character Specific loads set 2 (`KeyBindingFrame_ChangeBindingProfile`), and
+    /// Cancel's `LoadBindings(GetCurrentBindingSet())` puts the account set back: `LoadBindings`
+    /// never writes the current set (`0x4b8249`-`0x4b8252`), so it is still 1.
+    #[test]
+    fn a_cancelled_character_tick_leaves_the_account_set_live() {
+        let mut s = script();
+        s.run(r#"SetBinding("F", "JUMP") SaveBindings(1)"#).unwrap();
+        s.run(r#"SetBinding("F", "CAMERAZOOMIN") SaveBindings(2)"#)
+            .unwrap();
+        // World entry on the account set.
+        s.load_binding_set(1);
+        assert_eq!(s.current_binding_set(), 1);
+        s.run("LoadBindings(2)").unwrap();
+        assert_eq!(
+            s.eval::<String>(r#"return GetBindingAction("F")"#).unwrap(),
+            "CAMERAZOOMIN",
+            "the tick shows the character set"
+        );
+        assert_eq!(s.eval::<i64>("return GetCurrentBindingSet()").unwrap(), 1);
+        s.run("LoadBindings(GetCurrentBindingSet())").unwrap();
+        assert_eq!(
+            s.eval::<String>(r#"return GetBindingAction("F")"#).unwrap(),
+            "JUMP",
+            "Cancel puts the account set back"
+        );
+        assert_eq!(s.current_binding_set(), 1);
     }
 
     #[test]

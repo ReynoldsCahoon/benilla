@@ -20,9 +20,10 @@
 //!
 //! Each step runs whole where its caller runs it: a packet's in its handler (the object's page
 //! text, a record's answer, a read's reply, a name's answer), a page turn and `CloseItemText`
-//! inside their calls, a click's or a bag use's read at its apply. What a handler signals goes on
-//! the item-text lane at its place ([`ItemTextLane`]); the getters read the session through the
-//! host at the call ([`ItemTextLive`]).
+//! inside their calls, and a click's or a bag use's read inside the click or the call
+//! ([`crate::script_calls::ScriptCallHost`]). What a handler signals goes on the item-text lane at
+//! its place ([`ItemTextLane`]); the getters read the session through the host at the call
+//! ([`ItemTextLive`]).
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -176,9 +177,9 @@ enum Wait {
 #[derive(Resource, Default)]
 pub(crate) struct ItemTextOpen {
     pub(crate) pending: Option<ReadSession>,
-    /// Reads a click or a bag use asked for, in order; [`apply_reads`] runs each as `0x4e32e0`
-    /// with flag 0, with the world in hand for the latch.
-    reads: Vec<(u64, ReadSource)>,
+    /// Reads a click or a bag use asked for, in order, each `0x4e32e0` with flag 0, which the
+    /// call host runs before the click or the call goes on ([`ItemTextSteps::next_read`]).
+    reads: Vec<QueuedRead>,
     /// The last read's serial.
     serials: u64,
 }
@@ -197,7 +198,10 @@ impl ItemTextOpen {
 
     fn read(&mut self, object_guid: u64, source: ReadSource) -> bool {
         let reread = self.object() == Some(object_guid);
-        self.reads.push((object_guid, source));
+        self.reads.push(QueuedRead {
+            guid: object_guid,
+            source,
+        });
         reread
     }
 
@@ -224,6 +228,19 @@ impl ItemTextOpen {
     #[cfg(test)]
     pub(crate) fn open_letter(&mut self, item_guid: u64, text_id: u32) {
         self.open(item_guid, ReadSource::Letter { text_id });
+    }
+}
+
+/// A read a click or a bag use asked for, which its host runs ([`ItemTextOpen::reads`]).
+pub(crate) struct QueuedRead {
+    guid: u64,
+    source: ReadSource,
+}
+
+impl QueuedRead {
+    /// The object read.
+    pub(crate) fn guid(&self) -> u64 {
+        self.guid
     }
 }
 
@@ -256,6 +273,41 @@ pub(crate) fn close_core(world: &mut World) {
     crate::ui_session::release(world, object);
     world.resource_mut::<ItemTextOpen>().pending = None;
     emit(world, Place::Here, serial, TextSignal::Closed);
+}
+
+/// The reader's state for an item's deactivate, whose release or destroy runs in an object
+/// packet's handler; absent in a harness without the reader.
+#[derive(SystemParam)]
+pub(crate) struct ItemTextLeg<'w> {
+    open: Option<ResMut<'w, ItemTextOpen>>,
+    lane: Option<ResMut<'w, ItemTextLane>>,
+    latch: crate::ui_session::LatchSteps<'w>,
+}
+
+impl ItemTextLeg<'_> {
+    /// `CGItem_C::Deactivate`'s reader leg (`0x5d86ee`-`0x5d8713`): an `item` the reader's cell
+    /// names (`[0xbc3fa0]`) closes it as `0x4e32e0` of a zero guid, the core [`close_core`] runs,
+    /// at the packet's place: the latch release (`0x4e3357`), which re-enters the core while the
+    /// reader holds the latch and signals there first, the cell cleared (`0x4e3364`) and
+    /// `ITEM_TEXT_CLOSED` (`0x4e33a2`) on the lane.
+    pub(crate) fn run(&mut self, item: u64) {
+        let (Some(open), Some(lane)) = (self.open.as_deref_mut(), self.lane.as_deref_mut()) else {
+            return;
+        };
+        let Some(serial) = open
+            .pending
+            .as_ref()
+            .filter(|s| s.object_guid == item)
+            .map(|s| s.serial)
+        else {
+            return;
+        };
+        if self.latch.release(item) {
+            lane.push(serial, TextSignal::Closed);
+        }
+        open.pending = None;
+        lane.push(serial, TextSignal::Closed);
+    }
 }
 
 /// What the reader signals (`0x703e50`): `ITEM_TEXT_BEGIN` (293), `ITEM_TEXT_TRANSLATION` (294)
@@ -314,6 +366,12 @@ impl ItemTextLane {
     /// Whether a verb a listener calls may act on read `serial`, the live one.
     fn admits(&self, serial: u64) -> bool {
         self.firing.is_none_or(|firing| firing == serial)
+    }
+
+    /// How many signals wait on the lane, for the tests of its ends.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> usize {
+        self.steps.len()
     }
 }
 
@@ -397,17 +455,12 @@ fn item_text_reads(_: &mut World) -> bevy::ecs::query::FilteredAccessSet {
     bevy::ecs::query::FilteredAccessSet::default()
 }
 
-/// The queued reads, each `0x4e32e0(guid, 0)`, run with the world in hand ([`read_core`]).
-fn apply_reads(mut open: ResMut<ItemTextOpen>, mut commands: Commands) {
-    for (guid, source) in std::mem::take(&mut open.reads) {
-        commands.queue(move |world: &mut World| read_core(world, guid, source, Place::Here));
-    }
-}
-
-/// One read, `0x4e32e0(guid, 0)`. The open object again (`0x4e330c`) releases the latch on the
-/// cell (`0x4e3323`), which closes the reader if it holds it, then fires `ITEM_TEXT_CLOSED`
-/// (`0x4e332d`); one never begun keeps its cell. Another object releases the latch on the old cell
-/// (`0x4e3357`), closing a begun reader through `0x493310` once, then takes the cell (`0x4e3364`)
+/// One read, `0x4e32e0(guid, 0)`, with the world in hand: one an engine makes outside any call
+/// ([`read_now`]); a click's and a bag use's run inside them, through the call host. The open
+/// object again (`0x4e330c`) releases the latch on the cell (`0x4e3323`), which closes the reader
+/// if it holds it, then fires `ITEM_TEXT_CLOSED` (`0x4e332d`); one never begun keeps its cell.
+/// Another object releases the latch on the old cell (`0x4e3357`), closing a begun reader through
+/// `0x493310` once, then takes the cell (`0x4e3364`)
 /// and opens ([`open_tail`]).
 fn read_core(world: &mut World, guid: u64, source: ReadSource, place: Place) {
     let cell = world
@@ -456,8 +509,8 @@ fn open_tail(world: &mut World, place: Place) {
 /// (`0x4e35de`). In 1.12.1 a turn to a page not yet cached closes the book, which stays closed, and
 /// a letter whose author's name is not cached shows without its From line, then closes when the
 /// name lands. `0x4930d0`'s same-target test (`0x4930eb`-`0x4930f3`) only skips a unit's greeting,
-/// so this is a bug. benilla keeps the book open and shows it again ([`show_at`]): the page or the
-/// From line appears when it lands.
+/// so this is a bug, and benilla keeps the book open and shows it again ([`show_at`]) because of
+/// that: the page or the From line appears when it lands.
 fn answered(world: &mut World, wait: Wait, place: Place) {
     let Some(sess) = world
         .resource_mut::<ItemTextOpen>()
@@ -509,6 +562,11 @@ fn show(
 /// hand is waited on. A page chain with no page keeps its cell and stops (`0x4e341d`). With the record at hand,
 /// the session is marked latched for the register that follows; its object and serial.
 fn look_up_text(mut open: ResMut<ItemTextOpen>, reads: ItemTextShow) -> Option<(u64, u64)> {
+    look_up(&mut open, &reads)
+}
+
+/// [`look_up_text`] on the reader and its reads as the caller holds them.
+fn look_up(open: &mut ItemTextOpen, reads: &ItemTextShow) -> Option<(u64, u64)> {
     let sess = open.pending.as_mut()?;
     if sess.registered || sess.awaiting.is_some() {
         return None;
@@ -635,6 +693,11 @@ fn request_read(
     objects: Objects,
     net: Res<NetCommands>,
 ) -> bool {
+    request(&open, &objects, &net, object)
+}
+
+/// [`request_read`] on the reader, the objects and the wire as the caller holds them.
+fn request(open: &ItemTextOpen, objects: &Objects, net: &NetCommands, object: u64) -> bool {
     let Some(sess) = open.pending.as_ref().filter(|s| s.object_guid == object) else {
         return true;
     };
@@ -647,7 +710,7 @@ fn request_read(
     if !reads_by_server {
         return false;
     }
-    match read_position(object, &objects) {
+    match read_position(object, objects) {
         Some((bag, slot)) => {
             let _ = net.0.send(ClientCommand::ReadItem { bag, slot });
         }
@@ -693,13 +756,13 @@ fn player_slot(player: &benilla_protocol::ObjectFields, i: u8) -> Option<u64> {
     }
 }
 
-/// A read of `object_guid`'s pages run whole, as a click's apply runs it, for a test.
-#[cfg(test)]
+/// A read of `object_guid`'s pages run whole outside any call, as an engine's own read makes it
+/// (the book probe's).
 pub(crate) fn read_now(world: &mut World, object_guid: u64) {
     read_core(world, object_guid, ReadSource::pages(), Place::Here);
 }
 
-/// A read of the bag letter `item_guid` run whole, as a bag use's apply runs it, for a test.
+/// A read of the bag letter `item_guid` run whole outside any call, for a test.
 #[cfg(test)]
 pub(crate) fn read_letter_now(world: &mut World, item_guid: u64, text_id: u32) {
     read_core(
@@ -875,13 +938,9 @@ impl Plugin for UiItemTextPlugin {
             )
             .add_systems(
                 Update,
-                (
-                    // With no in-game interface up no drain fires the lane, and no listener
-                    // hears it.
-                    drop_unheard.run_if(not(crate::ui_script::ingame_ui_up)),
-                    apply_reads,
-                )
-                    .chain()
+                // With no in-game interface up no drain fires the lane, and no listener hears it.
+                drop_unheard
+                    .run_if(not(crate::ui_script::ingame_ui_up))
                     .in_set(UiFeed),
             );
     }
@@ -988,8 +1047,8 @@ pub(crate) struct ItemTextShow<'w, 's> {
     unit_names: crate::ui_unit::NameTables<'w>,
     filter: Option<Res<'w, crate::text_filter::TextFilter>>,
     switches: Option<Res<'w, crate::text_filter::TextFilterSwitches>>,
-    // The character's skill per language and the word pools, absent in a harness without chat.
-    languages: Option<Res<'w, crate::ui_chat::ChatLanguages>>,
+    // The word pools and the character's skill per language as the show runs (`0x4e3837`).
+    languages: crate::ui_chat::LanguageReads<'w, 's>,
 }
 
 impl ItemTextShow<'_, '_> {
@@ -1021,16 +1080,16 @@ impl ItemTextShow<'_, '_> {
     fn record_at_hand(&self, record: TextRecord, object: u64, ask: Ask<'_>) -> bool {
         match record {
             TextRecord::Page(page_id) => self.pages.page(page_id, object, ask).is_some(),
-            TextRecord::Body(text_id) => self.body(text_id, ask).is_some(),
+            TextRecord::Body(text_id) => self.body(text_id, object, ask).is_some(),
         }
     }
 
-    fn body(&self, text_id: u32, ask: Ask<'_>) -> Option<&String> {
+    /// The letter's body, asked with the item's guid as the key (`0x4e343e`, `0x4e3629`).
+    fn body(&self, text_id: u32, item: u64, ask: Ask<'_>) -> Option<&String> {
         self.mail.bodies.read(text_id, ask, |commands| {
-            let _ = commands.0.send(ClientCommand::ItemTextQuery {
-                text_id,
-                mail_id: 0,
-            });
+            let _ = commands
+                .0
+                .send(ClientCommand::ItemTextQuery { text_id, key: item });
         })
     }
 
@@ -1047,7 +1106,7 @@ impl ItemTextShow<'_, '_> {
         let ask = Ask::Event(&self.net);
         let is_letter = matches!(sess.source, ReadSource::Letter { .. });
         let raw = match &mut sess.source {
-            ReadSource::Letter { text_id } => match self.body(*text_id, ask) {
+            ReadSource::Letter { text_id } => match self.body(*text_id, object, ask) {
                 Some(body) => body.clone(),
                 None => {
                     sess.awaiting = Some(Wait::Record(TextRecord::Body(*text_id)));
@@ -1090,10 +1149,11 @@ impl ItemTextShow<'_, '_> {
         // single item text is not (`0x4e3666`-`0x4e3677`).
         let language = readable(object, &self.objects, &self.items, &self.go_templates)
             .and_then(|r| r.language);
-        if let (false, Some(language), Some(languages)) =
-            (is_letter, language, self.languages.as_deref())
-        {
-            text = languages.garble_item_text(language, translate, &text);
+        if let (false, Some(language)) = (is_letter, language) {
+            text = self
+                .languages
+                .gate()
+                .garble_item_text(language, translate, &text);
         }
         sess.text = text;
         true
@@ -1106,7 +1166,8 @@ pub(crate) struct PageMaterials(pub(crate) benilla_formats::PageTextMaterialCata
 
 /// The reader's verbs inside their calls ([`benilla_ui::script::ItemTextCall`]): the page turns
 /// and the creator's lookup here, the close core in the host
-/// ([`crate::script_calls::ScriptCallHost`]).
+/// ([`crate::script_calls::ScriptCallHost`]); and the steps of a click's or a bag use's read,
+/// whose core the host runs inside them.
 #[derive(SystemParam)]
 pub(crate) struct ItemTextSteps<'w, 's> {
     /// Absent in a harness without the reader.
@@ -1155,6 +1216,68 @@ impl ItemTextSteps<'_, '_> {
     /// The reader's cell `[0xbc3fa0]`, as a close its listeners call finds it.
     pub(crate) fn object(&mut self) -> Option<u64> {
         self.session().map(|s| s.object_guid)
+    }
+
+    /// The next read a click or a bag use asked for, in order. The reader is lent mutably only
+    /// when a read waits, so a use that read nothing writes nothing.
+    pub(crate) fn next_read(&mut self) -> Option<QueuedRead> {
+        let open = self.open.as_mut().filter(|o| !o.reads.is_empty())?;
+        Some(open.reads.remove(0))
+    }
+
+    /// The reader's cell `[0xbc3fa0]` and its read, as the read core tests it (`0x4e330c`).
+    pub(crate) fn cell(&self) -> Option<(u64, u64)> {
+        let sess = self.open.as_deref()?.pending.as_ref()?;
+        Some((sess.object_guid, sess.serial))
+    }
+
+    /// The object read again: what read `serial` still owes the listeners of its open and its
+    /// show is dropped, as its `ITEM_TEXT_CLOSED` fires in place.
+    pub(crate) fn closed_again(&mut self, serial: u64) {
+        if let Some(lane) = self.lane.as_deref_mut() {
+            lane.closed_in_place(serial);
+        }
+    }
+
+    /// The cell taken by `read` (`0x4e3364`), the session written afresh.
+    pub(crate) fn begin(&mut self, read: QueuedRead) {
+        if let Some(open) = self.open.as_deref_mut() {
+            open.open(read.guid, read.source);
+        }
+    }
+
+    /// The open's lookups (`0x4e33b0`-`0x4e348b`, [`look_up_text`]): the object, with its text
+    /// at hand and the session marked latched, or `None` where the open waits or ends.
+    pub(crate) fn look_up(&mut self) -> Option<u64> {
+        let (Some(open), Some(show)) = (self.open.as_deref_mut(), self.show.as_ref()) else {
+            return None;
+        };
+        look_up(open, show).map(|(object, _)| object)
+    }
+
+    /// A bag book's read request after the begin ([`request_read`]); `true` when it is one.
+    pub(crate) fn request_read(&mut self, object: u64) -> bool {
+        let (Some(open), Some(show)) = (self.open.as_deref(), self.show.as_ref()) else {
+            return true;
+        };
+        request(open, &show.objects, &show.net, object)
+    }
+
+    /// The show `0x4e35b0(object, 1)` on the open reader: whether it wrote the page, for the
+    /// caller to signal `ITEM_TEXT_READY` (`0x4e3860`).
+    pub(crate) fn show_open(&mut self, object: u64) -> bool {
+        let Some(show) = self.show.as_ref() else {
+            return false;
+        };
+        let Some(sess) = self
+            .open
+            .as_deref_mut()
+            .and_then(|o| o.pending.as_mut())
+            .filter(|s| s.object_guid == object)
+        else {
+            return false;
+        };
+        show.show(sess, true)
     }
 
     /// The close core's cell clear (`0x4e3364`), in place: what the read still owes its listeners
@@ -1254,8 +1377,7 @@ mod tests {
                 .insert_resource(crate::text_filter::TextFilterSwitches {
                     profanity,
                     ..Default::default()
-                })
-                .add_systems(Update, apply_reads);
+                });
             app.insert_non_send_resource(UiScript::new().unwrap());
             app.world_mut()
                 .resource_mut::<Items>()
@@ -1270,9 +1392,7 @@ mod tests {
                 .resource_mut::<MailOpen>()
                 .bodies
                 .insert(77, "Oh darn it.".into());
-            app.world_mut()
-                .resource_mut::<ItemTextOpen>()
-                .read_letter(LETTER, 77);
+            read_letter_now(app.world_mut(), LETTER, 77);
             for _ in 0..4 {
                 app.update();
             }
@@ -1298,8 +1418,7 @@ mod tests {
             .init_resource::<crate::net::GuidIndex>()
             .init_resource::<crate::world_state::WorldStates>()
             .insert_resource(darn_filter())
-            .init_resource::<crate::text_filter::TextFilterSwitches>()
-            .add_systems(Update, apply_reads);
+            .init_resource::<crate::text_filter::TextFilterSwitches>();
         net::register(&mut app);
         app.insert_non_send_resource(UiScript::new().unwrap());
         let mut data = [0i32; 24];
@@ -1367,8 +1486,7 @@ mod tests {
                 .init_resource::<NameCache>()
                 .init_resource::<GameObjectTemplates>()
                 .init_resource::<crate::net::GuidIndex>()
-                .init_resource::<crate::world_state::WorldStates>()
-                .add_systems(Update, apply_reads);
+                .init_resource::<crate::world_state::WorldStates>();
             net::register(&mut app);
             let script = UiScript::new().unwrap();
             script
@@ -1431,9 +1549,7 @@ mod tests {
                     .collect()
             };
 
-            app.world_mut()
-                .resource_mut::<ItemTextOpen>()
-                .read_pages(BOOK);
+            read_now(app.world_mut(), BOOK);
             for _ in 0..4 {
                 app.update();
             }
@@ -1493,9 +1609,7 @@ mod tests {
                 assert_eq!(flags, Some(2), "the item is marked read (`0x5d9a80`)");
                 // A read of it again: no request, the page at once (`0x4e359b`).
                 close_core(app.world_mut());
-                app.world_mut()
-                    .resource_mut::<ItemTextOpen>()
-                    .read_pages(BOOK);
+                read_now(app.world_mut(), BOOK);
                 for _ in 0..4 {
                     app.update();
                 }
@@ -1527,8 +1641,7 @@ mod tests {
             .init_resource::<NameCache>()
             .init_resource::<GameObjectTemplates>()
             .init_resource::<crate::net::GuidIndex>()
-            .init_resource::<crate::world_state::WorldStates>()
-            .add_systems(Update, apply_reads);
+            .init_resource::<crate::world_state::WorldStates>();
         net::register(&mut app);
         app.insert_non_send_resource(UiScript::new().unwrap());
         let mut data = [0i32; 24];
@@ -1617,12 +1730,7 @@ mod tests {
     fn a_page_read_opens_before_its_template_lands() {
         let mut world = World::new();
         world.init_resource::<ItemTextOpen>();
-        assert!(!world
-            .resource_mut::<ItemTextOpen>()
-            .read_pages(0xF110_0000_0000_0001));
-        use bevy::ecs::system::RunSystemOnce;
-        world.run_system_once(apply_reads).unwrap();
-        world.flush();
+        read_now(&mut world, 0xF110_0000_0000_0001);
         let open = world.resource::<ItemTextOpen>();
         let sess = open.pending.as_ref().expect("open");
         assert!(matches!(&sess.source, ReadSource::Pages { list, page: 0 } if list.is_empty()));
@@ -1633,8 +1741,15 @@ mod tests {
         benilla_formats::LanguageWords::from_rows([(1, "kazum".to_string())])
     }
 
-    /// The reader's resources over a character who knows language 1 to `skill`.
-    fn reading_app(skill: u32) -> (App, crossbeam_channel::Receiver<ClientCommand>) {
+    /// Our player in [`reading_app`].
+    const READER: u64 = 0x10;
+
+    /// The reader's resources over our player, who knows language 1 to `skill` and holds `fields`
+    /// besides.
+    fn reading_app(
+        skill: u16,
+        fields: &[(u16, u32)],
+    ) -> (App, crossbeam_channel::Receiver<ClientCommand>) {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.insert_resource(NetCommands(tx))
@@ -1647,12 +1762,23 @@ mod tests {
             .init_resource::<GameObjectTemplates>()
             .init_resource::<crate::net::GuidIndex>()
             .init_resource::<crate::world_state::WorldStates>()
-            .insert_resource(crate::ui_chat::ChatLanguages::for_test(
-                orcish(),
-                &[(1, skill)],
-            ))
-            .add_systems(Update, apply_reads);
+            .insert_resource(crate::ui_chat::ChatLanguages::for_test(orcish()));
         net::register(&mut app);
+        let world = app.world_mut();
+        crate::ui_chat::test_speaker::know(world, 1);
+        let mut pairs = crate::ui_chat::test_speaker::skill_fields(skill).to_vec();
+        pairs.extend_from_slice(fields);
+        let player = world
+            .spawn((
+                crate::net::Guid(READER),
+                crate::net::SelfPlayer,
+                crate::net::ObjectStore(benilla_protocol::ObjectFields::from_pairs(&pairs)),
+            ))
+            .id();
+        world
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .insert(READER, player);
         app.insert_non_send_resource(UiScript::new().unwrap());
         (app, rx)
     }
@@ -1667,7 +1793,7 @@ mod tests {
     fn a_game_objects_page_is_rewritten_in_its_language() {
         const TABLET: u64 = 0xF110_0043_2400_0001;
         for (skill, language, want) in [(0, 1, "kazum <br> kazum."), (150, 1, PAGE), (0, 0, PAGE)] {
-            let (mut app, _rx) = reading_app(skill);
+            let (mut app, _rx) = reading_app(skill, &[]);
             let mut data = [0i32; 24];
             data[7] = 358;
             data[8] = language;
@@ -1707,7 +1833,7 @@ mod tests {
     #[test]
     fn a_letters_text_is_not_rewritten() {
         const LETTER: u64 = 0x4000_0000_0000_0009;
-        let (mut app, _rx) = reading_app(0);
+        let (mut app, _rx) = reading_app(0, &[]);
         let mut template = crate::items::test_template("Letter");
         template.language_id = 1;
         app.world_mut()
@@ -1723,13 +1849,36 @@ mod tests {
             .resource_mut::<MailOpen>()
             .bodies
             .insert(77, PAGE.into());
-        app.world_mut()
-            .resource_mut::<ItemTextOpen>()
-            .read_letter(LETTER, 77);
+        read_letter_now(app.world_mut(), LETTER, 77);
         for _ in 0..4 {
             app.update();
         }
         assert_eq!(shown(&app), PAGE);
+    }
+
+    /// A bag letter's body is asked with the item's own guid as the key (`0x4e343e`, `0x4e3629`),
+    /// not a mail id.
+    #[test]
+    fn a_letters_body_is_asked_with_the_items_guid() {
+        const LETTER: u64 = 0x4000_0000_0000_0009;
+        let (mut app, rx) = reading_app(0, &[]);
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(5_000, Some(crate::items::test_template("Letter")));
+        crate::items::test_spawn_item(
+            app.world_mut(),
+            LETTER,
+            benilla_protocol::ObjectFields::from_pairs(&[(3, 5_000)]),
+            false,
+        );
+        read_letter_now(app.world_mut(), LETTER, 77);
+        assert!(rx.try_iter().any(|c| matches!(
+            c,
+            ClientCommand::ItemTextQuery {
+                text_id: 77,
+                key: LETTER
+            }
+        )));
     }
 
     /// A bag book's page is rewritten in its template's language (`+0x1a0`, `0x4e37e9`) to the
@@ -1740,7 +1889,7 @@ mod tests {
     fn a_bag_books_page_is_rewritten_unless_read_and_untranslated_on_reason_1() {
         use benilla_protocol::SessionEvent as E;
         const BOOK: u64 = 0x4000_0000_0000_0021;
-        const ME: u64 = 0x10;
+        const ME: u64 = READER;
         const PACK_SLOT_1: u16 = 532;
         const SCRAMBLED: &str = "kazum <br> kazum.";
         for (skill, reply, want) in [
@@ -1751,7 +1900,13 @@ mod tests {
             // Skill 150 passes "hello" whole: only the untranslated show scrambles it.
             (150, "reason 1", SCRAMBLED),
         ] {
-            let (mut app, _rx) = reading_app(skill);
+            let (mut app, _rx) = reading_app(
+                skill,
+                &[
+                    (PACK_SLOT_1 + 6, BOOK as u32),
+                    (PACK_SLOT_1 + 7, (BOOK >> 32) as u32),
+                ],
+            );
             let world = app.world_mut();
             let mut template = crate::items::test_template("Gnarled Book");
             template.page_text = 358;
@@ -1762,20 +1917,6 @@ mod tests {
             world
                 .resource_mut::<PageTexts>()
                 .insert(358, PAGE.into(), 0);
-            let player = world
-                .spawn((
-                    crate::net::Guid(ME),
-                    crate::net::SelfPlayer,
-                    crate::net::ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[
-                        (PACK_SLOT_1 + 6, BOOK as u32),
-                        (PACK_SLOT_1 + 7, (BOOK >> 32) as u32),
-                    ])),
-                ))
-                .id();
-            world
-                .resource_mut::<crate::net::GuidIndex>()
-                .0
-                .insert(ME, player);
             crate::items::test_spawn_item(
                 world,
                 BOOK,
@@ -1787,9 +1928,7 @@ mod tests {
                 ]),
                 false,
             );
-            app.world_mut()
-                .resource_mut::<ItemTextOpen>()
-                .read_pages(BOOK);
+            read_now(app.world_mut(), BOOK);
             for _ in 0..4 {
                 app.update();
             }

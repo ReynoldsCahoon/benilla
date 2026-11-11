@@ -161,9 +161,12 @@ fn arrival(world: &mut World, control_gained: bool) {
     replay_book(world);
     // `0x5deac2` → `0x4b2fd0(1, 0)`: the book sorted, `SPELLS_CHANGED` (`0x4b302a`).
     signal(world, Signal::SpellsChanged);
-    leg(world, crate::ui_macro::derive_on_arrival);
+    leg(world, crate::ui_macro::derive_every);
     // `0x5dead1`: the slot pass with the manager's `+0xc8` clear, as at every create.
     leg(world, crate::ui_action::recount::arrival_slot_pass);
+    // Ours, no reference fact: a character's buttons moved off the older macro numbering, now the
+    // bar is loaded.
+    crate::ui_macro::renumber_parked_buttons(world);
     ghost_state(world);
     // `0x5deb49`: `+0xc8` clear, as at every create.
     if control_gained {
@@ -184,10 +187,22 @@ fn cascade(world: &mut World) {
     // `0x490927` `SelectTarget(0)`, the collection, `PLAYER_LOGIN` if armed, `PLAYER_ENTERING_WORLD`
     // and the minimap initializer (`0x49096f`).
     leg(world, open_cascade);
+    // `0x49096f` → `0x4ed9d0` → `0x6d8e10`: the minimap's static records zeroed, the gossip
+    // marker's among them.
+    leg(world, crate::poi_marker::clear_at_world_enter);
     // `0x490974` → `0x4989c0`: the chat display latch released, its lines shown.
     leg(world, crate::ui_chat::release_display);
     // `0x490979` → `0x4e4f90`: the bar's usable cache, then the bonus bar.
     leg(world, action_bar);
+    // `0x49097e` → `0x4c6d30`: the alert array's set-up, ending in the recompute and its
+    // `UPDATE_INVENTORY_ALERTS` (`0x4c6dd6` → `0x4c7ee0`).
+    leg(world, |mut vm: crate::script_calls::HostedVm| {
+        vm.run(|script| {
+            if let Some(script) = script {
+                script.recompute_inventory_alerts();
+            }
+        })
+    });
     // `0x490983` → `0x4e4100`: the buff cache's set-up.
     leg(world, crate::ui_aura::enter_world_in_place);
     // `0x49098d` → `0x4f8cc0`: the bags' rescan.
@@ -307,8 +322,8 @@ fn tutorial(world: &mut World, id: u32) {
 }
 
 /// `"player"` names us for the sequence's listeners: the stock windows bind their model panes to
-/// it at `PLAYER_ENTERING_WORLD` (`PaperDollFrame.lua:39`), ahead of the resolver feed's full push
-/// (`feed_unit_guids`).
+/// it at `PLAYER_ENTERING_WORLD` (`PaperDollFrame.lua:39`), with no host to ask too: a getter with
+/// one resolves it off the live player.
 fn seat_player(mut vm: crate::script_calls::VmWith<()>, me: Query<&Guid, With<SelfPlayer>>) {
     let Some(me) = me.iter().next().map(|g| g.0) else {
         return;
@@ -483,10 +498,11 @@ fn reads(world: &mut World) -> FilteredAccessSet {
             .to_vec();
     let legs = [
         system_access(world, seat_player),
-        system_access(world, crate::ui_macro::derive_on_arrival),
+        system_access(world, crate::ui_macro::derive_every),
         system_access(world, crate::ui_action::recount::arrival_slot_pass),
         system_access(world, control_rose),
         system_access(world, open_cascade),
+        system_access(world, crate::poi_marker::clear_at_world_enter),
         system_access(world, crate::ui_chat::release_display),
         system_access(world, action_bar),
         system_access(world, crate::ui_aura::enter_world_in_place),
@@ -533,6 +549,14 @@ fn reads(world: &mut World) -> FilteredAccessSet {
     .flatten()
     {
         set.add_unfiltered_resource_read(id);
+    }
+    // The macro files the renumbering takes its moves from, holding the world; it writes the bar
+    // through the host.
+    if let Some(id) = world
+        .components()
+        .get_resource_id(std::any::TypeId::of::<crate::ui_macro::MacroFiles>())
+    {
+        set.add_unfiltered_resource_write(id);
     }
     set
 }

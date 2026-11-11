@@ -22,7 +22,7 @@
 //! but the wire-type remap (`0x49a870`) that would admit other kinds is untraced.
 //!
 //! Deviation: sizes ride the plates' damped diagonal basis ([`plate_basis`]), not the unbounded
-//! reference law, so bubble text and plate text keep one em at every window size.
+//! reference law, because that way bubble text and plate text keep one em at every window size.
 //!
 //! Not built: the reference also ends a bubble whose speaker's model data is not resident
 //! (`0x7103d0`); here a speaker with no model yet only counts as not drawn.
@@ -41,7 +41,7 @@ use crate::vplates::{gx_px, plate_basis, text_px, VPlateSet, VPlates};
 use benilla_world::view::WorldCamera;
 
 /// The two bubble CVars (registrar `0x603280`), booting at the reference's defaults.
-#[derive(Resource)]
+#[derive(Resource, Clone, Copy)]
 pub(crate) struct BubbleConfig {
     /// `ChatBubbles`: say, yell and their monster variants.
     pub(crate) all: bool,
@@ -616,7 +616,10 @@ pub(crate) struct BubbleSet;
 pub(crate) struct ChatBubblePlugin;
 
 /// The two bubble CVars' change callback.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut bubbles: ResMut<BubbleConfig>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut bubbles: bevy::prelude::Mut<'_, BubbleConfig>,
+) {
     match ev.key().as_str() {
         "chatbubbles" => bubbles.all = ev.flag(),
         "chatbubblesparty" => bubbles.party = ev.flag(),
@@ -626,7 +629,6 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut bubbles: ResMut<Bub
 
 impl Plugin for ChatBubblePlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_cvar);
         app.init_resource::<BubbleQueue>()
             .init_resource::<BubbleConfig>()
             .init_resource::<Bubbles>()

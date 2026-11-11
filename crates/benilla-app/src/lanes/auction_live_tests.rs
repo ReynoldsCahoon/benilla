@@ -168,8 +168,8 @@ fn boar_says(text: &str) -> SessionEvent {
 const NAME: &str = "return tostring((GetAuctionItemInfo('list', 1)))";
 
 /// The page lands with silk's record out, so the VM's row holds no name; the record's answer
-/// then fills it for a host-lent getter at the call, with no push between, while the VM's copy
-/// still holds none until the page's tail runs. The throttle reads the house at the call too.
+/// then fills it for a host-lent getter at the call, and the page's tail, which runs at the
+/// answer's packet, fills the VM's copy there. The throttle reads the house at the call too.
 #[test]
 fn the_auction_getters_read_the_house_at_the_call() {
     let mut c = client();
@@ -177,12 +177,10 @@ fn the_auction_getters_read_the_house_at_the_call() {
     assert_eq!(c.eval::<String>(true, NAME), "nil", "the record is out");
     c.handle(vec![silk()]);
     assert_eq!(c.eval::<String>(true, NAME), "Silk Cloth");
-    assert_eq!(c.eval::<String>(false, NAME), "nil", "the VM's copy waits");
-    c.frame(vec![]);
     assert_eq!(
         c.eval::<String>(false, NAME),
         "Silk Cloth",
-        "the tail's push"
+        "the tail's push at the answer's packet"
     );
 
     const CAN: &str = "return CanSendAuctionQuery() == 1";
@@ -523,7 +521,8 @@ const DEPOSIT: &str = "return CalculateAuctionDeposit(120)";
 /// `CalculateAuctionDeposit` and `GetAuctionSellItemInfo` on a sell slot item whose record the
 /// cache lacks answer the miss (`0x4ce2ca`, `0x4ce726`) and keep the callback `0x4ce2f0` with the
 /// item's guid (`0x4ce25e`, `0x4ce5e3`), one per call, which signals `NEW_AUCTION_UPDATE` at the
-/// record's packet (`0x4ce2fa`); the getters then answer its price and the deposit on it.
+/// record's packet (`0x4ce2fa`), their lookups finding the query the item's create sent in
+/// flight (`0x5d8300`); the getters then answer its price and the deposit on it.
 #[test]
 fn a_sell_item_whose_record_lands_later_signals_the_new_auction_update() {
     let guid = item_guid(1);
@@ -535,13 +534,9 @@ fn a_sell_item_whose_record_lands_later_signals_the_new_auction_update() {
         .into_iter()
         .filter(|s| s.starts_with("ItemQuery"))
         .collect();
-    assert_eq!(
-        queries,
-        [format!(
-            "{:?}",
-            crate::net::ClientCommand::ItemQuery { entry: WOOL, guid }
-        )],
-        "one query in flight, with the item's guid"
+    assert!(
+        queries.is_empty(),
+        "the create's query is in flight: {queries:?}"
     );
     c.frame(vec![vec![wool_record()]]);
     assert_eq!(c.eval::<i64>(true, "return Infos"), 2, "one per call");
@@ -584,4 +579,29 @@ fn a_sell_item_whose_object_is_gone_asks_no_record() {
     c.frame(vec![vec![SessionEvent::ObjectDestroyed(guid)]]);
     refuse(&mut c);
     assert_eq!(asks(&mut c), 0, "a gone object asks nothing");
+}
+
+/// A page that waits on silk's record keeps the list's callback (`0x4cc9bf`, dedupe 0) ahead of
+/// a later sold notice's (`0x4ccfa2`); the answer runs them in that order (`0x55bf12`-`0x55bf39`),
+/// so the page's sort and update (`0x4cca10` → `0x4cd8b0`) fire ahead of the notice's line.
+#[test]
+fn a_pages_callback_runs_ahead_of_a_later_notices_in_the_answers_list() {
+    let mut c = client();
+    let sold = SessionEvent::AuctionOwnerNotification(AuctionOwnerNotification {
+        auction_id: 9,
+        bid: 500,
+        out_bid: 0,
+        bidder_guid: 0,
+        item_entry: SILK,
+        random_property_id: 0,
+    });
+    c.frame(vec![vec![hello()], vec![page()], vec![sold], vec![silk()]]);
+    assert_eq!(
+        c.seen(),
+        [
+            "AUCTION_HOUSE_SHOW:nil",
+            "AUCTION_ITEM_LIST_UPDATE:nil",
+            "CHAT_MSG_SYSTEM:A buyer has been found for your auction of Silk Cloth.",
+        ]
+    );
 }

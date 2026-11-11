@@ -14,12 +14,12 @@ use crate::names::NameCache;
 use crate::net::{GuidIndex, NetCommands, ObjectStore, SelfGuid};
 
 use super::edit::ChannelState;
-use super::event::{flag_of_tag, kind_of_wire, language_name, ChatEvent, ChatEventKind};
+use super::event::{flag_of_tag, kind_of_wire, ChatEvent, ChatEventKind};
 use super::frames::{route, ChatWindows};
 use crate::query_cache::Ask;
 
 /// Frames a line waits on a name, about 2 s at 60 fps, before it gives up.
-const NAME_MAX_TRIES: u16 = 120;
+pub(crate) const NAME_MAX_TRIES: u16 = 120;
 
 /// The most monster and battleground lines held at once for their `$`-macro subject's name.
 pub(super) const MAX_HELD_SUBJECT_LINES: usize = 64;
@@ -130,8 +130,8 @@ enum Pending {
         rank: u8,
         female: bool,
     },
-    /// One combat-log line, classified at the packet; it waits only on an item's name, as the
-    /// reference's deferred queue (`0xc4e208`) does, until the cache answers.
+    /// One combat-log line, written by its formatter at the packet or at its item's callback
+    /// ([`crate::combat_log`]); a line whose item missed waits in the wait list, not here.
     Combat(Box<super::combat::PendingCombat>),
     /// A ready event (client-composed lines; name-carrying notices).
     Event(ChatEvent),
@@ -176,8 +176,7 @@ impl Pending {
     /// holds a line for its sender's (a player line's sender, a channel notice's two, an addon
     /// line's or a roll's sender, an emote's performer) and a monster or battleground line for
     /// its `$`-macro subject's, by guid whatever the subject is (`0x49daea` asks the name cache
-    /// `0xc0e228` through `0x55f080` with that callback); and an item's, as the combat log's list
-    /// holds a line for its item (`0x6293a0`).
+    /// `0xc0e228` through `0x55f080` with that callback).
     fn waits_on(&self) -> [Option<Answer>; 2] {
         let some = |g: u64| (g != 0).then_some(Answer::Player(g));
         match self {
@@ -190,10 +189,6 @@ impl Pending {
             Pending::Notice { a_guid, b_guid, .. } => [some(*a_guid), some(*b_guid)],
             Pending::Addon { guid, .. } | Pending::Roll { guid, .. } => [some(*guid), None],
             Pending::TextEmote { performer, .. } => [some(*performer), None],
-            Pending::Combat(line) => match line.named {
-                super::combat::Named::Item(entry) => [Some(Answer::Item(entry)), None],
-                _ => [None, None],
-            },
             _ => [None, None],
         }
     }
@@ -288,6 +283,17 @@ struct ChatQueue {
     /// held, not shown ([`Pending::Latched`]), until the world-enter cascade's release
     /// (`0x4989c0`).
     latched: Option<crate::lanes::Mark>,
+    /// The combat log's wait list (`0xc4e208`): one slot per line whose item missed at its
+    /// formatter's lookup, the lowest free slot taken first (`0x6293f0`).
+    waits: Vec<Option<CombatWait>>,
+}
+
+/// A combat line's entry in the wait list: its formatter's kind at `+0`, its item at `+4`, and
+/// what its callback writes the line again from (`+0x8` on).
+struct CombatWait {
+    kind: super::combat::ItemLog,
+    item: u32,
+    replay: super::combat::Replay,
 }
 
 /// One item in the lane, with its stamp ([`crate::lanes::stamp`]).
@@ -296,11 +302,10 @@ struct Queued {
     item: Pending,
 }
 
-/// A record a held line may read, landed in a packet: a name by guid, an item's by entry.
+/// A record a held line may read, landed in a packet: a name by guid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Answer {
     Player(u64),
-    Item(u32),
 }
 
 /// Why a [`Pending::Release`] retries the held lines.
@@ -390,7 +395,7 @@ impl ChatLog {
     ///
     /// Deviation: the reference holds every line that waits on its `$`-macro subject's name in
     /// the name cache's callback list (`0x49daea` → `0x55f080`) until the name answers, with no
-    /// bound; here at most [`MAX_HELD_SUBJECT_LINES`] wait, the oldest dropped past that, as a
+    /// bound; here at most [`MAX_HELD_SUBJECT_LINES`] wait, the oldest dropped past that, because a
     /// subject no player owns never answers.
     fn hold(&self, item: Pending) {
         let mut q = self.q();
@@ -447,11 +452,10 @@ impl ChatLog {
             })
     }
 
-    /// A record a held line may read landed in the packet being handled. The lines waiting on it
-    /// show here, in the packets' order, as the caches run the callbacks waiting on a record: the
-    /// name cache's (`0x55f426`-`0x55f452`), whose chat callback shows the lines (`0x49ccc0`), and
-    /// the item cache's, whose combat-log callback writes them (`0x6294b0`). Queued only when a
-    /// line could be waiting: one held, or one queued ahead of the answer that reads it.
+    /// A name a held line may read landed in the packet being handled. The lines waiting on it
+    /// show here, in the packets' order, as the name cache runs the callbacks waiting on a record
+    /// (`0x55f426`-`0x55f452`), whose chat callback shows the lines (`0x49ccc0`). Queued only when
+    /// a line could be waiting: one held, or one queued ahead of the answer that reads it.
     pub(crate) fn answer_landed(&self, answer: Answer) {
         let mut q = self.q();
         let waits = !q.held.is_empty()
@@ -464,6 +468,17 @@ impl ChatLog {
                 from: 0,
             });
         }
+    }
+
+    /// Whether a held or queued line waits on `answer`: its lookup left `0x49ccc0` there.
+    pub(super) fn a_line_waits_on(&self, answer: Answer) -> bool {
+        let q = self.q();
+        q.held
+            .iter()
+            .any(|(_, item)| item.waits_on().contains(&Some(answer)))
+            || q.pending
+                .iter()
+                .any(|i| i.item.waits_on().contains(&Some(answer)))
     }
 
     /// The frame's age pass ahead of the drain: the lines held now are retried after every item
@@ -537,6 +552,39 @@ impl ChatLog {
     /// Queue one combat-log line, classified at the packet by [`super::combat`], for its names.
     pub(crate) fn push_combat(&self, line: super::combat::PendingCombat) {
         self.q().push(Pending::Combat(Box::new(line)));
+    }
+
+    /// Keep a combat-log line whose item missed at its formatter's lookup in the wait list: the
+    /// lowest free slot (`0x6293f0`), its formatter's `kind`, its `item` and what the item's
+    /// callback writes it again from ([`Self::take_wait`]). Nothing is queued on the lane.
+    pub(crate) fn push_combat_waiting(
+        &self,
+        kind: super::combat::ItemLog,
+        item: u32,
+        replay: super::combat::Replay,
+    ) {
+        let mut q = self.q();
+        let wait = Some(CombatWait { kind, item, replay });
+        match q.waits.iter().position(Option::is_none) {
+            Some(slot) => q.waits[slot] = wait,
+            None => q.waits.push(wait),
+        }
+    }
+
+    /// The last waiting entry of `kind` and `item`, scanned from the back and freed (`0x6295b0`):
+    /// what one item callback writes its line again from, so lines of one kind and item come out
+    /// newest first, one per callback.
+    pub(crate) fn take_wait(
+        &self,
+        kind: super::combat::ItemLog,
+        item: u32,
+    ) -> Option<super::combat::Replay> {
+        let mut q = self.q();
+        let slot = q
+            .waits
+            .iter()
+            .rposition(|w| w.as_ref().is_some_and(|w| w.kind == kind && w.item == item))?;
+        q.waits[slot].take().map(|w| w.replay)
     }
 
     /// Queue a decoded `SMSG_CHANNEL_NOTIFY`; a guid tail waits for its names.
@@ -723,12 +771,15 @@ impl ChatLog {
         });
     }
 
-    /// Drop every pending and held item on disconnect.
+    /// Drop every pending and held item on disconnect, and the combat log's wait list with them:
+    /// the item cache drops their callbacks there ([`crate::items::Items::clear_session`]), so an
+    /// entry left would be freed by a later line's callback in that line's place.
     pub(crate) fn clear_session(&self) {
         let mut q = self.q();
         q.pending.clear();
         q.held.clear();
         q.answers = 0;
+        q.waits.clear();
     }
 
     /// What is parked, in order, by kind: the order a packet batch left the lines in.
@@ -1281,24 +1332,60 @@ pub(super) fn deliver(
 type SlotsAndHost<'w, 's> = crate::script_calls::disjoint::Pair<
     'w,
     's,
-    ResMut<'static, ChannelState>,
+    ChatSlots<'static>,
     Option<crate::script_calls::ScriptCallHost<'w, 's>>,
 >;
 
+/// The chat lane's channel slots, and the bubble and filter switches a line reads as it shows:
+/// CVar knobs, which the host's callbacks write inside the calls that write their rows.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct ChatSlots<'w> {
+    channels: ResMut<'w, ChannelState>,
+    bubbles: Res<'w, crate::chat_bubble::BubbleConfig>,
+    filters: Res<'w, crate::text_filter::TextFilterSwitches>,
+    /// The last init's scope, which the defense flag's flip tests before it signals (`0x49bdc0`).
+    world_states: Option<Res<'w, crate::world_state::WorldStates>>,
+}
+
 /// [`deliver`] with the host lent around the event alone: a join a handler makes takes its slot
 /// through the host against the slots the confirm left, and the free after it leaves that join's
-/// slot where it is, as the notify handler frees after its event (`0x49c5b0`, `0x49c5b5`).
+/// slot where it is, as the notify handler frees after its event (`0x49c5b0`, `0x49c5b5`). A
+/// confirm or a free that flips the zone-defense flag signals the readout in place, the confirm's
+/// ahead of the event and the free's after it (`0x49bbbf`, `0x49bc41` → `0x49bd50`).
 fn deliver_hosted(
     script: &mut benilla_ui::script::UiScript,
     set: &mut SlotsAndHost,
     windows: &mut ChatWindows,
     event: &mut ChatEvent,
 ) {
-    let dropping = deliver_before(script, &mut set.p0(), event);
+    let flag = set.p0().channels.defense_channel;
+    let dropping = deliver_before(script, &mut set.p0().channels, event);
+    defense_flip(script, set, flag);
     crate::script_calls::lent(script, set.p1().as_mut(), |script| {
         route(script, windows, event)
     });
-    deliver_after(script, &mut set.p0(), dropping);
+    let flag = set.p0().channels.defense_channel;
+    deliver_after(script, &mut set.p0().channels, dropping);
+    defense_flip(script, set, flag);
+}
+
+/// `0x49bd50`'s tail when the zone-defense flag moved off `before` (`0x49bdb8`-`0x49bdd6`): the
+/// readout's list follows the flag, which its getters read at the call, and `UPDATE_WORLD_STATES`
+/// signals in place, with the host lent, once an init has set the scope (`0x49bdc0`).
+fn defense_flip(script: &mut benilla_ui::script::UiScript, set: &mut SlotsAndHost, before: bool) {
+    let slots = set.p0();
+    if slots.channels.defense_channel == before {
+        return;
+    }
+    let Some(states) = slots.world_states.as_deref() else {
+        return;
+    };
+    let scoped = states.scope().is_some();
+    crate::script_calls::lent(script, set.p1().as_mut(), |script| {
+        if scoped {
+            script.fire_event("UPDATE_WORLD_STATES", Vec::new());
+        }
+    });
 }
 
 /// [`deliver`]'s half before the event: the confirm and the stamp. Returns the name whose slot
@@ -1376,7 +1463,6 @@ fn deliver_after(
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct SpeakerEffects<'w> {
     bubbles: ResMut<'w, crate::chat_bubble::BubbleQueue>,
-    bubble_cfg: Res<'w, crate::chat_bubble::BubbleConfig>,
     gestures: Res<'w, crate::creature_anim::GestureQueue>,
 }
 
@@ -1408,8 +1494,9 @@ pub(super) struct ChatReads<'w, 's> {
     guids: Res<'w, GuidIndex>,
     stores: Query<'w, 's, &'static ObjectStore>,
     states: Res<'w, crate::world_state::WorldStates>,
-    // The language gate: the word pool, this character's fluency and the GM bit.
-    langs: Res<'w, super::language::ChatLanguages>,
+    // The language gate: the word pool, and this character's fluency and GM bit as the line
+    // shows.
+    langs: super::language::LanguageReads<'w, 's>,
     // Item names for `TRADESKILL_LOG`, `FEEDPET_LOG`, `ITEMENCHANTMENT*`, `SPELLDURABILITYDAMAGE`,
     // and with the game object records the names of a combat line's held objects.
     items: Res<'w, crate::items::Items>,
@@ -1425,7 +1512,7 @@ pub(super) struct ChatReads<'w, 's> {
 /// host its calls apply through; the log; and the rest of what a line reads.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct ChatFiring<'w, 's> {
-    vm: crate::script_calls::VmWith<'w, 's, ResMut<'static, ChannelState>>,
+    vm: crate::script_calls::VmWith<'w, 's, ChatSlots<'static>>,
     log: Res<'w, ChatLog>,
     reads: ChatReads<'w, 's>,
 }
@@ -1501,7 +1588,7 @@ fn release(
 
 /// Fire one item at `at`, or hand it back to wait: for a name the cache lacks, for one whose
 /// answer comes later in the frame than `at`, so the record the reference's lookup missed there
-/// is not read early (a name, an item's), or for an item's name.
+/// is not read early (a name), or for an item's name.
 fn fire_one(
     reads: &mut ChatReads,
     log: &ChatLog,
@@ -1528,7 +1615,7 @@ fn fire_one(
     // A broadcast's lines, each fired here at its packet's place; a defence line the latch holds
     // waits as a held line.
     if let Pending::Broadcast(b) = item {
-        let lines = super::broadcast::resolve(&b, script, &set.p0(), &reads.broadcasts);
+        let lines = super::broadcast::resolve(&b, script, &set.p0().channels, &reads.broadcasts);
         for line in lines {
             let line = match line {
                 super::broadcast::BroadcastLine::Display(e) => Pending::Display(e),
@@ -1564,7 +1651,7 @@ fn fire_one(
         Pending::Wire { msg, .. } | Pending::Composed { msg, .. } => msg
             .channel
             .as_deref()
-            .and_then(|name| set.p0().stamp_of(name)),
+            .and_then(|name| set.p0().channels.stamp_of(name)),
         _ => None,
     };
     // A channel notice writes its slot around its event, outside the host's lend.
@@ -1641,6 +1728,11 @@ fn fire_one(
         item => Some(item),
     };
     let item = item?;
+    // The knobs as the line's Lua begins; a write its handlers make moves the next line's.
+    let (filters, bubbles) = {
+        let slots = set.p0();
+        (*slots.filters, *slots.bubbles)
+    };
     crate::script_calls::lent(script, set.p1().as_mut(), |script| {
         match item {
             Pending::UnitCombat(ev) => {
@@ -1797,12 +1889,19 @@ fn fire_one(
                 // The language gate: the garble writes the one buffer the line, `arg1` and the
                 // bubble read, as `0x49a870` fills `[ebp-0xd0c]` once (`0x49a9f0` copy,
                 // `0x49aa7c` garble) and never reads the wire text again.
+                let langs = langs.gate();
                 let language = langs.effective_language(msg.chat_type, msg.language);
                 let mut text = langs.garble(language, &plain);
 
                 // The text filters, on the garbled buffer as in `0x49a870`: spam first, then
                 // the mask, so a dropped line consumes no mask indices (the phase is global).
-                if text_filter.should_drop(msg.chat_type, msg.chat_tag, langs.is_gm(), &text) {
+                if text_filter.should_drop(
+                    filters,
+                    msg.chat_type,
+                    msg.chat_tag,
+                    langs.is_gm(),
+                    &text,
+                ) {
                     // Nothing shows in its place: the not-a-whisper leg (`0x49ab33`) jumps to
                     // the epilogue `0x49afd7`. A whisper with a non-zero report guid also sends
                     // `CMSG_CHAT_FILTERED` (`0x331`, the `u64` guid, `0x49ab50`) in the
@@ -1814,7 +1913,7 @@ fn fire_one(
                     );
                     return None;
                 }
-                text_filter.mask_chat(msg.chat_type, &mut text);
+                text_filter.mask_chat(filters, msg.chat_type, &mut text);
                 let text = text;
                 let mut event = ChatEvent {
                     kind,
@@ -1828,7 +1927,7 @@ fn fire_one(
                     }),
                     // The effective language, not the wire's: narration types and GM mode force
                     // 0, which also drops the `[Language]` header.
-                    language: language_name(language).to_string(),
+                    language: langs.language_name(language),
                     channel: channel_base,
                     flag: flag_of_tag(msg.chat_tag).to_string(),
                     ..Default::default()
@@ -1840,9 +1939,7 @@ fn fire_one(
                 // The bubble gets the same text: the reference spawns it in this path
                 // (`0x49acd9`).
                 if let Some(kind) = event.kind {
-                    speaker
-                        .bubbles
-                        .push(&speaker.bubble_cfg, msg.sender_guid, kind, &text);
+                    speaker.bubbles.push(&bubbles, msg.sender_guid, kind, &text);
                 }
             }
             Pending::Addon {
@@ -2061,11 +2158,10 @@ fn fire_one(
                 route(script, windows, &event);
             }
             Pending::Combat(mut line) => {
-                // Names looked up with a callback as the line's (`0x6265a7`, `0x6265e0`), and
-                // asked again only on its first drain; a line waits on an item alone, and as
-                // long as the cache takes to answer: the reference's list has no timer or
-                // count, and only the answer or the session's end removes an entry
-                // (`0x6293a0`, `0x6294cc`, `0x629a90`).
+                // Its item was looked up by its formatter, at the packet or again at the item's
+                // callback ([`crate::combat_log`]); here it is only read. Names looked up with a
+                // callback as the line's (`0x6265a7`, `0x6265e0`), and asked again only on its
+                // first drain.
                 let ask = Ask::at(line.tries == 0, commands);
                 let sources = super::combat::NameSources {
                     names,
@@ -2082,7 +2178,7 @@ fn fire_one(
                             script,
                         )
                     },
-                    |entry| match items.template(entry, 0, ask).map(|t| t.name.clone()) {
+                    |entry| match items.template(entry, 0, Ask::Read).map(|t| t.name.clone()) {
                         Some(name) => super::combat::ItemName::Named(name),
                         None if items.template_answered_unknown(entry) => {
                             super::combat::ItemName::Unknown

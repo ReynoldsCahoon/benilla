@@ -36,9 +36,8 @@ pub(super) fn update(
     net: &NetCommands,
     commands: &mut Commands,
     sheath: &mut MessageWriter<crate::creature_anim::SheathRequest>,
-    loot_close: &mut crate::ui_loot::LootMoveStart,
+    loot_close: &mut crate::ui_loot::MoveStartClose,
     asks: &mut MessageReader<StandStateRequest>,
-    server: &mut MessageReader<super::ServerStandState>,
     reads: PlayerReads,
     classes: Option<&benilla_formats::ChrClasses>,
     moving: bool,
@@ -52,13 +51,6 @@ pub(super) fn update(
     let (stand_byte, gates) = stand_of(me);
     if pending.0 == Some(stand_byte) {
         pending.0 = None; // the echo landed
-    }
-    // `SMSG_STANDSTATE_UPDATE` reaches the local apply directly, with no refusal gate and no
-    // `CMSG_STANDSTATECHANGE` back, before the volunteered logic below; the last packet wins.
-    if let Some(s) = server.read().last().map(|m| m.state) {
-        let stand_now = pending.stand_state(stand_byte);
-        move_trace::posture("server", s, stand_now, player.move_flags());
-        apply_locally(pending, s, stand_now, me, commands, sheath, loot_close);
     }
     // The queued asks (the idle sit, the approach's stand, the attack's stand) ran in the
     // reference's message pass, before the X key is read, each `SetStandState` whole in its order,
@@ -107,8 +99,9 @@ pub(super) fn update(
         );
     }
     let stand_now = pending.stand_state(stand_byte);
-    // The sheath toggle (Z) cycles the anim layer's committed sheath state through its one setter
-    // ([`crate::creature_anim::SheathRequest`]), which sends `CMSG_SETSHEATHED`; only it plays the
+    // A sheath toggle (Z) made with no host lent (a lent one ran in its call, [`SheathToggle`])
+    // cycles the anim layer's committed sheath state through the setter's request
+    // ([`crate::creature_anim::SheathRequest`]), which sends `CMSG_SETSHEATHED` and plays the
     // ceremony (`bInstant = 0` in `ToggleSheath` `0x5eb480`). No body model yet drops the press.
     if binds.fired(crate::bindings::Input::ToggleSheath) {
         if let Some((e, Some((drv, committed)), store, engaged, wielded, precast, _)) = me {
@@ -117,7 +110,7 @@ pub(super) fn update(
                 engaged,
                 precast,
                 seated: stand_now != 0,
-                mid_ceremony: drv.sheath_ceremony_active(),
+                mid_ceremony: drv.sheath_ceremony_active() || committed.ceremony_owed(),
             };
             if toggle_refused(store.map(|s| &s.0), toggle) {
                 debug!("sheath toggle refused ({toggle:?})");
@@ -317,6 +310,74 @@ fn stand_gates(fields: &ObjectFields, precast: bool) -> state::StandGates {
     }
 }
 
+/// `ToggleSheath()` inside its call (`0x48a070` → `0x5eb480`): the toggle's player gates, its cycle
+/// over what is worn, the model's tests, then the setter's commit and its `CMSG_SETSHEATHED`
+/// (`0x611dbc`), so the packet leaves ahead of the script's next verb; the driver plays the
+/// ceremony ([`crate::creature_anim::CommittedSheath::toggle_now`]). Each absent in a harness
+/// without it.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct SheathToggle<'w, 's> {
+    net: Res<'w, NetCommands>,
+    pending: Option<Res<'w, super::StandPending>>,
+    control: Option<Res<'w, super::OwnControlLost>>,
+    classes: Option<Res<'w, crate::chr_classes::ChrClassTable>>,
+    edits: Option<Res<'w, crate::creature_anim::UnitEdits>>,
+    me: Query<'w, 's, ToggleRow, With<SelfPlayer>>,
+}
+
+/// The active player's driver, model and committed state, as the toggle's call reads them.
+type ToggleRow = (
+    Entity,
+    &'static crate::creature_anim::AnimDriver,
+    &'static AnimationPlayer,
+    &'static bevy::animation::transition::AnimationTransitions,
+    &'static benilla_assets::ModelAnimations,
+    &'static mut crate::creature_anim::CommittedSheath,
+    Option<&'static ObjectStore>,
+    Option<&'static crate::creature_anim::Wielded>,
+);
+
+impl SheathToggle<'_, '_> {
+    /// The toggle, as [`update`] runs a press no call settled.
+    pub(crate) fn toggle(&mut self) {
+        let Ok((e, drv, player, tr, anims, mut committed, store, wielded)) = self.me.single_mut()
+        else {
+            return;
+        };
+        let fields = store.map(|s| &s.0);
+        let edits = self.edits.as_deref();
+        let byte = fields.map_or(0, ObjectFields::unit_stand_state);
+        let toggle = ToggleGates {
+            control_lost: self.control.as_deref().is_some_and(|c| c.0),
+            engaged: edits.is_some_and(|x| x.attacking(e)),
+            precast: edits.is_some_and(|x| x.precast(e).is_some()),
+            seated: self
+                .pending
+                .as_deref()
+                .map_or(byte, |p| p.stand_state(byte))
+                != 0,
+            mid_ceremony: drv.sheath_ceremony_active() || committed.ceremony_owed(),
+        };
+        if toggle_refused(fields, toggle) {
+            debug!("sheath toggle refused in a call ({toggle:?})");
+            return;
+        }
+        let classes = self.classes.as_deref().map(|t| &t.0);
+        let worn = toggle_worn(&wielded.copied().unwrap_or_default(), fields, classes);
+        let next = crate::creature_anim::toggle_sheath_next(committed.state().unwrap_or(0), worn);
+        let Some(state) = next else { return };
+        if crate::creature_anim::toggle_model_refuses(drv, player, tr, anims) {
+            debug!("sheath toggle refused in a call by its model");
+            return;
+        }
+        if committed.toggle_now(state, fields, classes) {
+            let _ = self.net.0.send(ClientCommand::SetSheathed {
+                state: u32::from(state),
+            });
+        }
+    }
+}
+
 /// What `ToggleSheath` (`0x5eb480`) reads of the player ahead of its cycle, past the active-player
 /// test, besides the descriptor [`toggle_refused`] reads; each refuses silently, with no call and
 /// no packet. Its model tests (`0x5eb542`, `0x5eb580`) are the setter's executor's, which holds
@@ -370,6 +431,38 @@ fn toggle_worn(
     )
 }
 
+/// `SMSG_STANDSTATE_UPDATE` (`HandleStandStateUpdatePacket 0x603e50`): its byte applied to the
+/// active player inside its packet (`0x603e8a` → `0x6127b0` → `SetLocalStandState 0x5f0790`), with
+/// no refusal gate and no `CMSG_STANDSTATECHANGE` back ([`apply_locally`]): the prediction, and
+/// for a change to a state but 0 the loot close (`0x5f07d5`) and the attack stop (`0x5f07e7`),
+/// each at its packet, so a sit followed by a stand in one frame closes the loot at the sit.
+/// Nothing with no active player (`0x603e7a`, `0x603e81`).
+pub(super) fn server_stand_state(
+    state: u8,
+    pending: &mut super::StandPending,
+    me: &SelfPosture,
+    flags: u32,
+    commands: &mut Commands,
+    sheath: &mut MessageWriter<crate::creature_anim::SheathRequest>,
+    loot_close: &mut crate::ui_loot::MoveStartClose,
+) {
+    let Some(me) = me.single() else {
+        return;
+    };
+    let (stand_byte, _) = stand_of(Some(me));
+    let stand_now = pending.stand_state(stand_byte);
+    move_trace::posture("server", state, stand_now, flags);
+    apply_locally(
+        pending,
+        state,
+        stand_now,
+        Some(me),
+        commands,
+        sheath,
+        loot_close,
+    );
+}
+
 /// The stand state's local apply, the reference's `0x6127b0`, reached from `SetStandState` after
 /// its send and from `SMSG_STANDSTATE_UPDATE` (`0x603e50`), doing what [`local_apply`] decides.
 /// Not built: the input resume on a stand (`0x5f07ba`) and the follow-camera re-acquire each call
@@ -381,7 +474,7 @@ fn apply_locally(
     me: Option<SelfPostureItem>,
     commands: &mut Commands,
     sheath: &mut MessageWriter<crate::creature_anim::SheathRequest>,
-    loot_close: &mut crate::ui_loot::LootMoveStart,
+    loot_close: &mut crate::ui_loot::MoveStartClose,
 ) {
     let drawn = me
         .and_then(|(_, drv, ..)| drv)
@@ -393,8 +486,9 @@ fn apply_locally(
         pending.0 = Some(s);
     }
     if apply.leave {
-        // The same close as the movement start's (`0x60e9dd`), under the same `0x6126b0`.
-        loot_close.0 = true;
+        // The same close as the movement start's (`0x60e9dd`), under the same `0x6126b0`, here,
+        // ahead of the attack stop (`0x5f07e7`).
+        loot_close.close();
         commands.run_system_cached(stop_attack_for_stand_state);
     }
     if let (true, Some((e, ..))) = (apply.stow, me) {
@@ -424,7 +518,7 @@ fn set_stand_state(
     pending: &mut super::StandPending,
     commands: &mut Commands,
     sheath: &mut MessageWriter<crate::creature_anim::SheathRequest>,
-    loot_close: &mut crate::ui_loot::LootMoveStart,
+    loot_close: &mut crate::ui_loot::MoveStartClose,
 ) {
     if send_stand_state(s, stand_now, gates, flags, me.is_some(), net) {
         apply_locally(pending, s, stand_now, me, commands, sheath, loot_close);

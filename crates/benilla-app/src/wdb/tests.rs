@@ -160,6 +160,7 @@ fn roster(realm: &str) -> Roster {
                 y: 0.0,
                 z: 0.0,
             },
+            guild_id: 0,
             flags: 0,
             equipment: [benilla_protocol::CharEnumItem::default(); 19],
             pet_display_id: 0,
@@ -335,7 +336,7 @@ fn an_answer_from_one_session_is_served_without_a_query_in_the_next() {
             .lookup(ITEM_TEXT, || {
                 let _ = c.0.send(ClientCommand::ItemTextQuery {
                     text_id: ITEM_TEXT,
-                    mail_id: 1,
+                    key: 1,
                 });
             })
             .is_some_and(|t| t == "Dear $N,")
@@ -633,12 +634,9 @@ fn held_next_session<T: SavedCache>(key: u32) -> bool {
     Session::<T>::start("R").store().store().get(key).is_some()
 }
 
-/// Every saved answer from its packet through the IO thread's emission ([`crate::net::io::inbound`])
-/// and the live client's handler table to the store's file, and back in the next process.
-#[test]
-fn each_answer_reaches_its_own_stores_file_through_the_live_handlers() {
-    let _home = Home::new("live");
-    let answers = [
+/// One answer of each saved store, by its opcode.
+fn every_answer() -> [(u16, Vec<u8>); 8] {
+    [
         (NameCache::ANSWER, creature_answer(CREATURE)),
         (GameObjectTemplates::ANSWER, game_object_answer()),
         (ItemNames::ANSWER, item_name_answer()),
@@ -647,7 +645,33 @@ fn each_answer_reaches_its_own_stores_file_through_the_live_handlers() {
         (QuestLog::ANSWER, quest_answer("The Kobold Menace")),
         (PageTexts::ANSWER, page_answer()),
         (MailOpen::ANSWER, item_text_answer()),
-    ];
+    ]
+}
+
+/// A saved answer's bytes ride ahead of its record in the one packet
+/// ([`crate::net::io::inbound`]), so only the record's last event ends the packet: the lanes
+/// flush after the answer's handlers, never between its bytes and its record.
+#[test]
+fn a_saved_answers_bytes_never_end_its_packet() {
+    for (opcode, body) in every_answer() {
+        let packet = benilla_protocol::messages::parse_server(opcode, &body).expect("parses");
+        let events = crate::net::io::inbound(opcode, benilla_protocol::decode(packet), body);
+        let ends: Vec<bool> = events
+            .iter()
+            .map(crate::net::handlers::ends_its_packet)
+            .collect();
+        let mut want = vec![false; ends.len().saturating_sub(1)];
+        want.push(true);
+        assert_eq!(ends, want, "{opcode:#06x}: {events:?}");
+    }
+}
+
+/// Every saved answer from its packet through the IO thread's emission ([`crate::net::io::inbound`])
+/// and the live client's handler table to the store's file, and back in the next process.
+#[test]
+fn each_answer_reaches_its_own_stores_file_through_the_live_handlers() {
+    let _home = Home::new("live");
+    let answers = every_answer();
     let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
     app.insert_resource(roster("R"));
     fn load_all(world: &mut World) {
@@ -720,7 +744,7 @@ fn an_ask_in_flight_at_a_disconnect_is_asked_again_after_the_relogin() {
         w.resource::<MailOpen>().bodies.lookup(ITEM_TEXT, || {
             let _ = commands.0.send(ClientCommand::ItemTextQuery {
                 text_id: ITEM_TEXT,
-                mail_id: 1,
+                key: 1,
             });
         });
         crate::query_cache::queries(&rx).len()

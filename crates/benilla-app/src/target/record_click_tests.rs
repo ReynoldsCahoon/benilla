@@ -119,9 +119,23 @@ fn client_bound(wtf: &str) -> App {
                     CameraOrSelectOrMoveStart();
                     CameraOrSelectOrMoveStop();
                 </Binding>
+                <Binding name="PROBESTICKY" runOnUp="true">
+                    if ( keystate == "down" ) then
+                        CameraOrSelectOrMoveStart();
+                    else
+                        if ARMED then SetCVar("deselectOnClick", "0") end
+                        CameraOrSelectOrMoveStop();
+                        LOG = LOG .. tostring(UnitName("target")) .. ";"
+                    end
+                </Binding>
                 <Binding name="PROBEKEYACTION">
                     TurnOrActionStart();
                     TurnOrActionStop();
+                </Binding>
+                <Binding name="PROBEKEYSELL">
+                    TurnOrActionStart();
+                    TurnOrActionStop();
+                    LOG = LOG .. "after;"
                 </Binding>
                 <Binding name="PROBEKEYREAD">
                     CameraOrSelectOrMoveStart();
@@ -459,6 +473,32 @@ fn a_key_bound_click_reads_its_target_on_the_next_line() {
     );
 }
 
+/// A release whose body turns Sticky Targeting on, then dispatches its click on the empty world:
+/// `CVar::Set` (`0x63df50`) runs `deselectOnClick`'s callback inside the write (`0x63df7d`), so the
+/// click's deselect gate reads 0 and the body's next line still reads the mob. Main ran the
+/// callback in the frame's sync, after the input pass, and deselected.
+#[test]
+fn a_set_cvar_moves_its_knob_before_the_chunks_next_line() {
+    let mut app = client("PROBESTICKY");
+    aim(&mut app);
+    click_at(&mut app, ON_MOB);
+    app.update();
+    assert_eq!(target(&app), Some(MOB));
+    let name = target_name(&app);
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .run("LOG = '' ARMED = true")
+        .unwrap();
+    click_at(&mut app, BESIDE_MOB);
+    app.update();
+    assert_eq!(target(&app), Some(MOB), "the click kept the target");
+    assert_eq!(
+        log(&app),
+        format!("{name};"),
+        "the line after the click read it"
+    );
+}
+
 /// A chest, beside us.
 const CHEST: u64 = 0xF110_0000_0000_00D4;
 /// Over the world, where the chest's pick box stands.
@@ -709,6 +749,48 @@ fn a_button_rebound_away_from_the_mouse_command_clicks_nothing() {
     assert_eq!(log(&app), "b1 down;b1 up;");
 }
 
+/// A left click that drops a held item on the world still runs its binding's up-half: the
+/// reference drops from the click the release's `CameraOrSelectOrMoveStop` dispatches
+/// (`0x514b70` → `0x481f60(1)`), so the release is the world frame's (`0x483cb0`) and ends the
+/// camera's session (`0x514c48`), and the delete confirmation comes up with the camera free.
+#[test]
+fn a_world_drop_runs_its_binding_up_half() {
+    let mut app = client("PROBEBUTTON");
+    {
+        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        script.set_container(
+            0,
+            Some(benilla_ui::script::ContainerState {
+                num_slots: 16,
+                slots: std::collections::HashMap::from([(
+                    1,
+                    benilla_ui::script::ContainerSlot {
+                        guid: 0x77,
+                        item_id: 117,
+                        count: 1,
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+        );
+        script
+            .run("PickupContainerItem(0, 1)")
+            .expect("the pickup runs");
+        assert!(script.cursor_item().is_some(), "the premise: an item held");
+    }
+    click_at(&mut app, BESIDE_MOB);
+    app.update();
+    assert_eq!(log(&app), "b1 down;b1 up;", "the release ran the up-half");
+    assert!(
+        app.world()
+            .non_send_resource::<UiScript>()
+            .cursor_item()
+            .is_some(),
+        "the item stays held for the confirmation"
+    );
+}
+
 /// The world frame's right-press hook runs ahead of the binding (`0x483c62`, then `0x483c93`): the
 /// binding reads the pending target the hook cancelled, and the repair mode it ended.
 #[test]
@@ -751,6 +833,24 @@ fn a_right_click_cancels_the_pending_target() {
             .iter()
             .any(|c| matches!(c, crate::net::ClientCommand::CastSpellAtDest { .. })),
         "a cancel casts nothing: {sent:?}"
+    );
+}
+
+/// The right click's payload leg clears the cursor and signals in place (`0x492c90`, `0x492d30`
+/// → `0x495190`), so its listeners run before the router's leg goes on: nothing the click writes
+/// after the payload leg follows them ([`crate::script_calls::census::writes_after`]).
+#[test]
+fn a_right_clicks_payload_clear_runs_ahead_of_the_rest_of_its_leg() {
+    let mut app = client("CAMERAORSELECTORMOVE");
+    aim(&mut app);
+    arm_ground_cast(&mut app);
+    let _watch = benilla_ui::script::census::watch_writes();
+    benilla_ui::script::census::take_writes();
+    right_click_at(&mut app, BESIDE_MOB);
+    app.update();
+    assert_eq!(
+        crate::script_calls::census::writes_after(),
+        Vec::<String>::new()
     );
 }
 
@@ -884,4 +984,80 @@ fn a_right_press_that_drops_the_cursor_keeps_the_pending_target() {
         );
         assert!(targeting(&app), "freelook {freelook}: the target stands");
     }
+}
+
+/// The held item's guid, in our backpack's first slot.
+const HELD_ITEM: u64 = 0x4000_0000_0000_0001;
+
+/// The vendor arm's sale from the cursor (`0x5df5d0`): it sends the sale (`0x5df5f0`), then its
+/// `ClearCursor(0, 1)` (`0x5df600` → `0x494b60` → `0x495190`) signals `CURSOR_UPDATE` inside the
+/// click, so the line after the binding's `TurnOrActionStop` runs after it.
+#[test]
+fn a_vendor_sale_signals_the_cursor_inside_the_click() {
+    use benilla_protocol::field::FIELD_UNIT_NPC_FLAGS;
+    /// `PLAYER_FIELD_PACK_SLOT_1`, the backpack's first guid.
+    const PACK_SLOT_1: u16 = 532;
+    let mut app = client_with_f("PROBEKEYSELL");
+    aim(&mut app);
+    let world = app.world_mut();
+    let (me, mob) = {
+        let index = &world.resource::<GuidIndex>().0;
+        (index[&ME], index[&MOB])
+    };
+    world.entity_mut(mob).insert(crate::net::ObjectStore(
+        ObjectFields::from_pairs(&[
+            (2, 0x9),
+            (FIELD_UNIT_HEALTH, 100),
+            (FIELD_UNIT_MAXHEALTH, 100),
+            (FIELD_UNIT_NPC_FLAGS, 0x4),
+        ])
+        .into_created(ObjectType::Unit),
+    ));
+    world.entity_mut(me).insert(crate::net::ObjectStore(
+        ObjectFields::from_pairs(&[
+            (2, 0x19),
+            (FIELD_UNIT_HEALTH, 100),
+            (FIELD_UNIT_MAXHEALTH, 100),
+            (PACK_SLOT_1, HELD_ITEM as u32),
+            (PACK_SLOT_1 + 1, (HELD_ITEM >> 32) as u32),
+        ])
+        .into_created(ObjectType::Player),
+    ));
+    hold_an_item(&mut app);
+    app.world()
+        .non_send_resource::<UiScript>()
+        .run(
+            r#"local f = CreateFrame("Frame")
+            f:RegisterEvent("CURSOR_UPDATE")
+            f:SetScript("OnEvent", function() LOG = LOG .. "cursor;" end)"#,
+        )
+        .unwrap();
+    move_to(&mut app, ON_MOB);
+    app.update();
+    app.world()
+        .non_send_resource::<UiScript>()
+        .run("LOG = ''")
+        .unwrap();
+    press_f(&mut app);
+    app.update();
+    assert!(
+        app.world()
+            .resource::<Sent>()
+            .0
+            .try_iter()
+            .any(|c| matches!(
+                c,
+                crate::net::ClientCommand::SellItem {
+                    vendor: MOB,
+                    item_guid: HELD_ITEM,
+                    ..
+                }
+            )),
+        "control: the click sold the held item"
+    );
+    assert_eq!(
+        log(&app),
+        "cursor;after;",
+        "the clear signalled inside the click"
+    );
 }

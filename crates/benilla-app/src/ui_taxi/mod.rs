@@ -9,9 +9,10 @@ use bevy::prelude::*;
 #[cfg(test)]
 use benilla_ui::script::UiScript;
 
+#[cfg(test)]
 use crate::net::{ObjectStore, SelfPlayer};
-use crate::player::UNIT_FLAG_TAXI_FLIGHT;
-use crate::ui_script::{SweepApp, SweepLeg, UiFeed};
+
+use crate::ui_script::{SweepApp, SweepLeg};
 use crate::ui_session::{LatchApp, LatchedWindow, NpcWindow};
 
 mod calls;
@@ -210,32 +211,6 @@ pub(crate) struct FlightMasterStatus {
     pub(crate) known: bool,
 }
 
-/// Push `UnitOnTaxi("player")`: the reference's verb (`0x517a40`) answers bit 20 of
-/// `UNIT_FIELD_FLAGS` (`0x517a86`), which vmangos sets only for a flight
-/// (`FlightPathMovementGenerator`). Any other server spline, such as a fear, is not a taxi: stock
-/// `UIParent.lua:474-478` closes the windows on `PLAYER_CONTROL_LOST` unless on a taxi. No self
-/// store reads as not on a taxi.
-fn feed_on_taxi(
-    mut hosted_vm: crate::script_calls::HostedVm,
-    self_q: Query<&ObjectStore, With<SelfPlayer>>,
-    mut last: Local<crate::ui_script::VmMemo<Option<bool>>>,
-) {
-    hosted_vm.run(|script| {
-        let Some(script) = script else {
-            return;
-        };
-        let last = last.get(script);
-        let on_taxi = self_q
-            .iter()
-            .next()
-            .is_some_and(|s| s.0.unit_flags() & UNIT_FLAG_TAXI_FLIGHT != 0);
-        if *last != Some(on_taxi) {
-            script.set_on_taxi(on_taxi);
-            *last = Some(on_taxi);
-        }
-    })
-}
-
 mod net;
 
 pub(crate) struct UiTaxiPlugin;
@@ -248,7 +223,7 @@ impl Plugin for UiTaxiPlugin {
             .init_resource::<TaxiRouteCache>()
             .add_latched_window::<TaxiState>()
             .add_sweep_leg(SweepLeg::Taxi, leave_world)
-            .add_systems(Update, (load_taxi_catalogs, feed_on_taxi.in_set(UiFeed)));
+            .add_systems(Update, load_taxi_catalogs);
     }
 }
 
@@ -264,43 +239,6 @@ mod tests {
     use crate::net::{ClientCommand, GuidIndex, NetCommands};
     use benilla_protocol::field::FIELD_UNIT_FLAGS;
     use benilla_protocol::ObjectFields;
-
-    /// The feed pushes the ride with the bit and clears it without; it reads nothing about server
-    /// splines.
-    #[test]
-    fn the_feed_pushes_the_taxi_flight_flag() {
-        let mut app = App::new();
-        app.add_systems(Update, feed_on_taxi);
-        app.insert_non_send_resource(UiScript::new().unwrap());
-        let me = app
-            .world_mut()
-            .spawn((
-                SelfPlayer,
-                ObjectStore(ObjectFields::from_pairs(&[(FIELD_UNIT_FLAGS, 0x1000)])),
-            ))
-            .id();
-        let on_taxi = |app: &mut App| -> bool {
-            app.update();
-            app.world().non_send_resource::<UiScript>().on_taxi()
-        };
-        assert!(!on_taxi(&mut app), "no TAXI_FLIGHT bit: nil");
-
-        app.world_mut()
-            .entity_mut(me)
-            .insert(ObjectStore(ObjectFields::from_pairs(&[(
-                FIELD_UNIT_FLAGS,
-                0x1000 | UNIT_FLAG_TAXI_FLIGHT,
-            )])));
-        assert!(on_taxi(&mut app), "the bit set: 1");
-
-        app.world_mut()
-            .entity_mut(me)
-            .insert(ObjectStore(ObjectFields::from_pairs(&[(
-                FIELD_UNIT_FLAGS,
-                0,
-            )])));
-        assert!(!on_taxi(&mut app), "landed: nil again");
-    }
 
     /// The map's fares take the flight master's discount and the express leg sends the raw route
     /// sum (`0x4dc3d0` against `0x4dc96f`). Honored, a PvP-flagged flight master and honor rank
@@ -429,7 +367,7 @@ mod tests {
     /// (`0x5ecf39`) it shows `0xb5`, `ERR_TAXINOPATHS`, inside the handler (`0x5ecf44` →
     /// `0x496720`), then closes the gossip menu (`0x4e1fa0` with a zero guid, `0x5ecf55`), whose
     /// `GOSSIP_CLOSED` follows the line, and returns before the builder (`0x5ecf6f`): no
-    /// `TAXIMAP_OPENED`. Both sit on the taxi lane at the handler's place. Two open it.
+    /// `TAXIMAP_OPENED`. Both fire inside the handler's packet. Two open it.
     #[test]
     fn a_mask_with_fewer_than_two_known_nodes_opens_no_map() {
         use benilla_protocol::SessionEvent;
@@ -456,8 +394,8 @@ mod tests {
         app.world_mut()
             .resource_mut::<crate::ui_gossip::GossipState>()
             .npc = Some(MASTER);
+        // What the packet's listeners heard, inside the packet: the lane fires at its end.
         let shown = |app: &mut App, known: [u32; 8]| {
-            let before = crate::lanes::stamp();
             crate::net::handlers::dispatch(
                 app.world_mut(),
                 vec![SessionEvent::TaxiNodesShown {
@@ -467,29 +405,16 @@ mod tests {
                 }],
             );
             app.world_mut().flush();
-            let after = crate::lanes::stamp();
-            let stamped = app.world().resource::<TaxiLane>().stamped();
             assert!(
-                stamped.iter().all(|(at, _)| before < *at && *at < after),
-                "stamped inside the handler"
+                app.world().resource::<TaxiLane>().stamped().is_empty(),
+                "the lane fired inside the packet"
             );
-            let script = app.world_mut().non_send_resource_mut::<UiScript>();
-            assert_eq!(
-                script.eval::<String>("return HEARD").unwrap(),
-                "",
-                "on the lane"
-            );
-            crate::lanes::fire_in_order(app.world_mut());
             let script = app.world_mut().non_send_resource_mut::<UiScript>();
             let heard = script.eval::<String>("return HEARD").unwrap();
             script.run("HEARD = ''").unwrap();
-            (stamped.len(), heard)
+            heard
         };
-        let (items, heard) = shown(&mut app, [0b10, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(
-            items, 1,
-            "the line, with the close's signals parked on the gossip lane"
-        );
+        let heard = shown(&mut app, [0b10, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(heard, "UI_ERROR_MESSAGE(no paths) GOSSIP_CLOSED(nil) ");
         assert_eq!(app.world().resource::<TaxiState>().cell(), None);
         assert_eq!(
@@ -503,7 +428,7 @@ mod tests {
         let mut chain = benilla_formats::open_chain(&data).expect("open chain");
         app.insert_resource(TaxiCatalogs::load(&mut chain).expect("taxi DBCs"));
         assert_eq!(
-            shown(&mut app, [0b10, 0, 0, 0, 0, 0, 0, 0x8000_0000]).1,
+            shown(&mut app, [0b10, 0, 0, 0, 0, 0, 0, 0x8000_0000]),
             "TAXIMAP_OPENED(nil) "
         );
         assert_eq!(app.world().resource::<TaxiState>().cell(), Some(MASTER));

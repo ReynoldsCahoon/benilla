@@ -24,58 +24,61 @@ fn feedable_pet(pet: &benilla_protocol::ObjectFields, self_guid: u64) -> bool {
         && pet.unit_created_by() == Some(self_guid)
 }
 
-/// Runs `DropItemOnUnit(unit)`'s legs (`0x48d960`): the trade leg, then the pet leg on a token
+/// `DropItemOnUnit(unit)`'s legs (`0x48d960`) inside its call
+/// ([`benilla_ui::script::ScriptCall::DropItemOnUnit`]): the trade leg, then the pet leg on a token
 /// that resolves to the pet's unit (`0x48da6c`-`0x48da7f`, guids compared, so `"target"` and
-/// `"targettarget"` feed a targeted pet). The world click's entry into the pet leg, a left click on
-/// the pet's model with an item held (`0x4927e8`), is [`ClickFeed`], inside the click's call.
-pub(crate) fn drop_item_on_unit(
-    mut vm: crate::script_calls::VmWith<(
-        crate::spell::ScriptCast<'static, 'static>,
-        TradeLeg<'static, 'static>,
-    )>,
-    self_q: Query<(&crate::net::Guid, &crate::net::ObjectStore), With<crate::net::SelfPlayer>>,
-    stores: Query<&crate::net::ObjectStore>,
-    index: Res<crate::net::GuidIndex>,
-    learned: Res<super::LearnedAbilities>,
-) {
-    vm.turn(|script, (mut cast, mut trade)| {
-        let Some(script) = script else {
-            return;
-        };
-        let pet_guid = cast.ladder.pet_guid();
-        let tokens = script.take_drop_item_on_unit();
-        if tokens.is_empty() {
-            return;
+/// `"targettarget"` feed a targeted pet). The world click's entry into the pet leg, a left click
+/// on the pet's model with an item held (`0x4927e8`), is [`ClickFeed`], inside the click's call.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct DropItemLeg<'w, 's> {
+    trade: TradeLeg<'w, 's>,
+    cast: crate::spell::ScriptCast<'w, 's>,
+    self_q: Query<
+        'w,
+        's,
+        (&'static crate::net::Guid, &'static crate::net::ObjectStore),
+        With<crate::net::SelfPlayer>,
+    >,
+    stores: Query<'w, 's, &'static crate::net::ObjectStore>,
+    index: Res<'w, crate::net::GuidIndex>,
+    learned: Res<'w, super::LearnedAbilities>,
+}
+
+impl DropItemLeg<'_, '_> {
+    /// The drop on the unit `token` names: the food the pet leg's attempt owes its bind, if it
+    /// started one ([`FoodBind`]).
+    pub(crate) fn drop_on(
+        &mut self,
+        script: &mut benilla_ui::script::UiScript,
+        token: &str,
+    ) -> Option<FoodBind> {
+        // Only an item on the cursor drops (`0x48d98f`-`0x48d9aa`).
+        if !matches!(script.cursor_payload(), Some(CursorPayload::Item(_))) {
+            return None;
         }
-        let Some((self_guid, self_store)) = self_q.iter().next() else {
-            return;
-        };
+        let pet_guid = self.cast.ladder.pet_guid();
+        let (self_guid, self_store) = self.self_q.iter().next()?;
+        self.trade.drop_on(script, token);
+        let guid = self.trade.unit_guid(token)?;
         let leg = PetLeg {
             pet_guid,
-            pet: index.0.get(&pet_guid).and_then(|&e| stores.get(e).ok()),
+            pet: self
+                .index
+                .0
+                .get(&pet_guid)
+                .and_then(|&e| self.stores.get(e).ok()),
             me: self_guid.0,
             me_store: self_store,
-            feed_pet: learned.feed_pet,
+            feed_pet: self.learned.feed_pet,
         };
-        // Each entry in turn: a token's trade leg, then the pet leg on the unit it resolves to
-        // (`0x515940`).
-        for token in tokens {
-            // Only an item on the cursor drops (`0x48d98f`-`0x48d9aa`).
-            if !matches!(script.cursor_payload(), Some(CursorPayload::Item(_))) {
-                continue;
-            }
-            trade.drop_on(script, &token);
-            if let Some(guid) = trade.unit_guid(&token) {
-                leg.run(script, &mut cast, guid);
-            }
-        }
-    })
+        leg.run(script, &mut self.cast, guid)
+    }
 }
 
 /// The world click's pet leg (`0x492793`-`0x4927f8`, in its object leg `0x4925d0`, ahead of the
-/// greeting and the select): a left click on our pet's model with an item held feeds it through
-/// `0x6ea1e0`, and the cursor clears on success. The press pick names the unit: the live hover can
-/// differ after a drag.
+/// greeting and the select): a left click on our pet's model or plate with an item held feeds it
+/// through `0x6ea1e0`, and the cursor clears on success. The press pick names the body's unit: the
+/// live hover can differ after a drag.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct ClickFeed<'w, 's> {
     press: Res<'w, crate::target::PressPick>,
@@ -92,19 +95,28 @@ pub(crate) struct ClickFeed<'w, 's> {
 }
 
 impl ClickFeed<'_, '_> {
-    /// The leg on the left click's release.
-    pub(crate) fn click(&mut self, script: &mut benilla_ui::script::UiScript) {
+    /// The leg on the left click's release: the food its attempt owes its bind, if it started one.
+    pub(crate) fn click(&mut self, script: &mut benilla_ui::script::UiScript) -> Option<FoodBind> {
+        let guid = self.press.hovered.guid?;
+        self.click_on(script, guid)
+    }
+
+    /// The leg on the clicked unit `guid`.
+    pub(crate) fn click_on(
+        &mut self,
+        script: &mut benilla_ui::script::UiScript,
+        guid: u64,
+    ) -> Option<FoodBind> {
+        // The pet's guid `[0xb714a0]` (`0x4927a6`-`0x4927b7`).
         let pet_guid = self.cast.ladder.pet_guid();
-        if pet_guid == 0 || self.press.hovered.guid != Some(pet_guid) {
-            return;
+        if pet_guid == 0 || guid != pet_guid {
+            return None;
         }
         // The held item `[0xb4e248]` (`0x4927b9`-`0x4927c8`).
         if !matches!(script.cursor_payload(), Some(CursorPayload::Item(_))) {
-            return;
+            return None;
         }
-        let Some((self_guid, self_store)) = self.self_q.iter().next() else {
-            return;
-        };
+        let (self_guid, self_store) = self.self_q.iter().next()?;
         let leg = PetLeg {
             pet_guid,
             pet: self
@@ -116,7 +128,7 @@ impl ClickFeed<'_, '_> {
             me_store: self_store,
             feed_pet: self.learned.feed_pet,
         };
-        leg.run(script, &mut self.cast, pet_guid);
+        leg.run(script, &mut self.cast, pet_guid)
     }
 }
 
@@ -131,59 +143,69 @@ struct PetLeg<'a> {
 }
 
 impl PetLeg<'_> {
-    /// The pet leg on the unit `guid`: the pet test, `0x6ea1e0`'s gates, the feed, and on its
-    /// success the cursor cleared.
+    /// The pet leg on the unit `guid`: the pet test, `0x6ea1e0`'s gates and the feed's attempt,
+    /// whose food its host binds ([`FoodBind`]).
     fn run(
         &self,
         script: &mut benilla_ui::script::UiScript,
         cast: &mut crate::spell::ScriptCast,
         guid: u64,
-    ) {
+    ) -> Option<FoodBind> {
         // The pet test: the unit's guid against the pet's (`0x48da6c`-`0x48da7f`).
         if self.pet_guid == 0 || guid != self.pet_guid {
-            return;
+            return None;
         }
-        let Some(pet) = self.pet else {
-            return; // not streamed in: silent, payload kept
-        };
+        // Not streamed in: silent, payload kept.
+        let pet = self.pet?;
         // The Feed Pet latch `[0xcecad8]` with a `Spell.dbc` record (`0x6ea207`-`0x6ea225`): an
         // imp passes the unit's gates, but only hunters learn it.
-        let Some(spell_id) = self.feed_pet.filter(|&id| {
+        let spell_id = self.feed_pet.filter(|&id| {
             cast.ladder
                 .spells
                 .as_ref()
                 .is_some_and(|s| s.catalog.get(id).is_some())
-        }) else {
-            return;
-        };
+        })?;
         if !feedable_pet(&pet.0, self.me) {
             debug!("DropItemOnUnit — not a pet I made; refused, payload kept");
-            return;
+            return None;
         }
         // The food: the held item's live guid. Only an item payload can be dropped on a unit.
         let Some(CursorPayload::Item(held)) = script.cursor_payload() else {
-            return;
+            return None;
         };
         let slot0 = u8::try_from(held.slot.saturating_sub(1)).unwrap_or(0);
-        let Some(item_guid) =
-            crate::ui_items::slot_guid(&self.me_store.0, held.bag, slot0, &cast.ladder.objects)
-        else {
-            return; // the slot emptied: silent
-        };
-        if feed(cast, spell_id, item_guid) {
-            // `ClearCursor(1,1)`, on success only (`0x48da8d`-`0x48da96`).
-            script.clear_cursor_payload();
-        }
+        // The slot emptied: silent.
+        let item_guid =
+            crate::ui_items::slot_guid(&self.me_store.0, held.bag, slot0, &cast.ladder.objects)?;
+        // `0x6ea266`: Feed Pet through the attempt as the active player, no item, the selection
+        // as its candidate (`0x6e5a90(spell, 0, 0)`), whose every rung may refuse it.
+        let crate::spell::ScriptCast { targeting, ladder } = cast;
+        ladder.send(spell_id, &targeting.context(), CastCommit::Spell);
+        Some(FoodBind {
+            spell_id,
+            item_guid,
+        })
     }
 }
 
-/// `0x6ea266`-`0x6ea274`: Feed Pet through the attempt as the active player, no item, the
-/// selection as its candidate (`0x6e5a90(spell, 0, 0)`), whose every rung may refuse it; the
-/// attempt raises the cursor for the item its word wants, and `BindTarget 0x6e5b40` binds the
-/// food to it and sends. Whether the bind sent, the answer `DropItemOnUnit` clears the cursor on.
-fn feed(cast: &mut crate::spell::ScriptCast, spell_id: u32, item_guid: u64) -> bool {
-    let crate::spell::ScriptCast { targeting, ladder } = cast;
-    ladder.send(spell_id, &targeting.context(), CastCommit::Spell);
+/// The food Feed Pet's attempt owes its bind (`0x6ea274` → `BindTarget 0x6e5b40`), which waits
+/// for the attempt's arm, its signal's listeners included (`0x6e5333`), and its cursor
+/// (`0x6e50ab`): its host binds it ([`bind_food`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FoodBind {
+    spell_id: u32,
+    item_guid: u64,
+}
+
+/// `BindTarget` of the food to the cursor Feed Pet's attempt raised, which signals and sends
+/// (`0x6e60cb`, `0x6e60d7`); whether it bound, the answer `DropItemOnUnit` clears the cursor on
+/// once the send is out (`0x48da8d`-`0x48da96`). An attempt a rung refused raised no cursor.
+pub(crate) fn bind_food(cast: &mut crate::spell::ScriptCast, owed: FoodBind) -> bool {
+    let FoodBind {
+        spell_id,
+        item_guid,
+    } = owed;
+    let ladder = &mut cast.ladder;
     let Some((pending, commit)) = ladder.ground.wanting_item() else {
         debug!("DropItemOnUnit — Feed Pet {spell_id} refused by the attempt; payload kept");
         return false;
@@ -343,47 +365,10 @@ fn ask(
     trade.initiate_send(guid, true, net, names, errors);
 }
 
-/// The world click's trade leg (`0x4925d0`) for a nameplate's left click (`0x7cb910` →
-/// `0x4949f0` action 1), ahead of the select that follows it in the same function (`0x49280c`)
-/// and so ahead of the targeting cursor's bind, whose state it reads (`0x492668`). The body click's
-/// is [`ClickTrade`], inside the click's call.
-pub(crate) fn trade_on_plate_click(
-    mut vm: crate::script_calls::VmWith<(
-        TradeLeg<'static, 'static>,
-        Res<'static, crate::spell::SpellTargeting>,
-    )>,
-    plate: Res<crate::vplates::PlateClicks>,
-    me: Query<&crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
-    guids: Query<&crate::net::Guid>,
-) {
-    if plate.left.is_empty() {
-        return;
-    }
-    vm.turn(|script, (mut trade, targeting)| {
-        let Some(script) = script else {
-            return;
-        };
-        // The active player (`0x4925f4`).
-        let Some(me) = me.iter().next() else {
-            return;
-        };
-        if targeting.active() {
-            return;
-        }
-        let dead = me.0.is_dead_or_ghost();
-        for (entity, guid) in plate
-            .left
-            .iter()
-            .filter_map(|&e| guids.get(e).ok().map(|g| (e, g.0)))
-        {
-            trade.click_on(script, entity, guid, dead);
-        }
-    })
-}
-
 /// The body click's trade leg (`0x4925d0`), on the press pick's unit, past the router's charmed
-/// return (`0x481f98`, in the click's call): the leg runs only with no spell awaiting a target
-/// (`0x492668`).
+/// return (`0x481f98`, in the click's call), and a nameplate's left click's on its unit
+/// (`0x7cb910` → `0x4949f0` → `0x4925d0`): the leg runs only with no spell awaiting a target
+/// (`0x492668`), ahead of the select's bind, which would empty the word.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct ClickTrade<'w, 's> {
     trade: TradeLeg<'w, 's>,
@@ -396,17 +381,30 @@ pub(crate) struct ClickTrade<'w, 's> {
 impl ClickTrade<'_, '_> {
     /// The leg on the left click's release.
     pub(crate) fn click(&mut self, script: &mut benilla_ui::script::UiScript) {
+        if self.inspect.enabled {
+            return;
+        }
+        if let (Some(entity), Some(guid)) = (self.press.hovered.target, self.press.hovered.guid) {
+            self.click_on(script, entity, guid);
+        }
+    }
+
+    /// The leg on the clicked object `entity`, `guid`.
+    pub(crate) fn click_on(
+        &mut self,
+        script: &mut benilla_ui::script::UiScript,
+        entity: Entity,
+        guid: u64,
+    ) {
         // The active player (`0x4925f4`).
         let Some(me) = self.me.iter().next() else {
             return;
         };
-        if self.targeting.active() || self.inspect.enabled {
+        if self.targeting.active() {
             return;
         }
         let dead = me.0.is_dead_or_ghost();
-        if let (Some(entity), Some(guid)) = (self.press.hovered.target, self.press.hovered.guid) {
-            self.trade.click_on(script, entity, guid, dead);
-        }
+        self.trade.click_on(script, entity, guid, dead);
     }
 }
 

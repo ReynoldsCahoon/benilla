@@ -25,6 +25,7 @@ pub(crate) mod glue_mgr;
 pub(crate) mod glue_scene;
 mod input;
 mod movie;
+pub(crate) mod raise_origin;
 mod records;
 /// The server alert's fetch and `LaunchURL`'s browser, for the stock glue screens.
 pub(crate) mod server_alert;
@@ -45,9 +46,6 @@ mod reference_ui;
 
 /// What the host remembers per VM, so a seed or change-memo never outlives the VM it was for.
 mod session;
-
-/// The feed gate: a UI feed's input-side early-out, audited by `WOW_FEED_GATE_CHECK=1`.
-pub(crate) mod gate;
 
 pub(crate) use session::{VmMemo, WindowMemo};
 
@@ -138,6 +136,9 @@ pub(crate) struct UiKeyboardCapture {
     /// The arrows fall through: the focused box is in alt-arrow mode and ALT is up, so the
     /// reference declines them at `0x77b1c4` and `CGWorldFrame` runs their bindings.
     pub(crate) arrows_fall_through: bool,
+    /// The focused EditBox's frame id, while it is shown: what the iOS soft keyboard compares a
+    /// tap's hover against, so it need not hold the VM.
+    pub(crate) focused_box: Option<u32>,
 }
 
 /// A left press the UI consumed without hitting a frame (a payload dropped on empty world), which
@@ -149,27 +150,9 @@ pub(crate) struct PlayerUiClickConsumed(pub(crate) bool);
 /// A press the UI consumed this frame, whatever is under the pointer: the layout drag's press
 /// returns at `0x766353`–`0x76635b`, and a right press with a payload held at the world input
 /// hook (`0x492b50`, `0x766370`), each before any frame, the world frame included, sees it, so
-/// the world latch takes no press this frame even with no UI frame hovered.
+/// the world frame's binding takes no press this frame even with no UI frame hovered.
 #[derive(Resource, Default)]
 pub(crate) struct PlayerUiPressConsumed(pub(crate) bool);
-
-/// Who this frame's button presses went to, as the records dispatched them: `(button, over_ui)`
-/// per press, `over_ui` when a frame was hovered, the interface consumed it or the dev overlay held
-/// the pointer. The world frame's binding and the world's mouse latch both read it, so they agree
-/// on who owns a press; a button no record pressed this frame is absent.
-#[derive(Resource, Default)]
-pub(crate) struct WorldPresses(pub(crate) Vec<(MouseButton, bool)>);
-
-impl WorldPresses {
-    /// Whether the frame's last press of `button` was the interface's, `None` with no press.
-    pub(crate) fn over_ui(&self, button: MouseButton) -> Option<bool> {
-        self.0
-            .iter()
-            .rev()
-            .find(|(b, _)| *b == button)
-            .map(|(_, over)| *over)
-    }
-}
 
 /// What [`extract::tick_script`] hands [`extract::paint_script`]; with `live` false (no VM or
 /// window) the paint does nothing.
@@ -420,7 +403,10 @@ pub(crate) fn window_to_ui(screen: UiScreen, cursor: Vec2) -> Vec2 {
 pub(crate) struct UiScriptPlugin;
 
 /// `uiScale`'s change callback: the dial's own `[0.5, 1.5]` clamp.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut scale: ResMut<UiScaleCvar>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut scale: bevy::prelude::Mut<'_, UiScaleCvar>,
+) {
     if ev.is("uiScale") {
         scale.0 = ev.num().clamp(0.5, 1.5);
     }
@@ -445,7 +431,7 @@ fn console_reload_ui(steps: &mut crate::console::ConsoleSteps, _args: &str) -> V
 impl Plugin for UiScriptPlugin {
     fn build(&self, app: &mut App) {
         use crate::console::ConsoleCommandApp;
-        app.add_observer(on_cvar);
+        crate::ui_script::raise_origin::arm_each_frame(app);
         // Category 1 with no help (`0x402ba6`-`0x402bb4`).
         app.console_command_in_call(
             "reloadUI",
@@ -473,7 +459,6 @@ impl Plugin for UiScriptPlugin {
             .init_resource::<UiKeyboardCapture>()
             .init_resource::<PlayerUiClickConsumed>()
             .init_resource::<PlayerUiPressConsumed>()
-            .init_resource::<WorldPresses>()
             .init_resource::<UiClock>()
             .init_resource::<HostClock>()
             .init_resource::<benilla_world::frame_pace::FrameStep>()
@@ -618,13 +603,7 @@ impl Plugin for UiScriptPlugin {
             // A scripted run's startup movie skipped before its first tick.
             .add_systems(Update, glue::skip_unattended_startup_movie.in_set(UiInput))
             // The movie audio's play times, a feed of the tick whose clock reads them.
-            // After the tutorial's selection judge, which reads the same VM.
-            .add_systems(
-                Update,
-                movie::feed_movie_audio
-                    .in_set(UiFeed)
-                    .after(crate::tutorial::judge_selections),
-            )
+            .add_systems(Update, movie::feed_movie_audio.in_set(UiFeed))
             // The movie pictures the tick showed, ahead of the paint that draws them.
             .init_resource::<movie::MovieScreen>()
             .add_systems(
@@ -725,8 +704,8 @@ fn arbitrate_pointer_over_ui(
 /// The session lifecycle: the VM's birth, identity, death and reload.
 mod lifecycle;
 pub(crate) use lifecycle::{
-    ingame_ui_up, run_pending_reload, setup_script, strings_vm, AddOnIdentity, PendingEntryUiLoad,
-    ReloadUiPending, SessionEnd,
+    ingame_ui_up, ingame_ui_up_in, run_pending_reload, setup_script, strings_vm, AddOnIdentity,
+    PendingEntryUiLoad, ReloadUiPending, SessionEnd,
 };
 /// The leave-world sweep `0x490a80`: its latch, its schedule and its legs' order.
 mod sweep;
@@ -848,7 +827,7 @@ pub(crate) fn demo_unit_feed(
             // stock `ActionButton_UpdateCount` shows only a consumable's count
             // (`ActionButton.lua:287`).
             script.set_bonus_bar_offset(1);
-            // A macro on button 4; a capture has no character for `ui_macro::load_macros` to read.
+            // A macro on button 4; a capture has no character for the macro reader to read.
             script.set_macros(benilla_ui::script::MacroState::from_scopes(
                 vec![benilla_ui::script::MacroView {
                     name: "spawn".into(),
@@ -1295,8 +1274,9 @@ mod durability_tests;
 #[cfg(test)]
 pub(crate) mod world_state_tests;
 
+// `pub(crate)` for `harness`, which `crate::screenshot`'s test uses.
 #[cfg(test)]
-mod screenshot_tests;
+pub(crate) mod screenshot_tests;
 
 #[cfg(test)]
 mod questlog_tests;

@@ -541,7 +541,7 @@ fn use_cleared(
     if let (UseArm::Item(UseFork::Equip), Some(item)) = (arm, equip) {
         // Without control the equip arm returns before it locks or sends, unless on a taxi
         // (`0x4fa3ce`-`0x4fa3ec`).
-        return cursor::equip::has_cursor_control(model).then_some(item);
+        return cursor::equip::has_cursor_control(lua, model).then_some(item);
     }
     // The use dispatcher's gates (`0x5d8d00`), each showing its line and ending the call before
     // the arm's lock (`0x5edcd9`): the requirement check ahead of the read, letter, open and
@@ -627,7 +627,7 @@ fn pickup_container_item(
 ) -> ContainerClick {
     // Without control and off a taxi the click ends before anything is read
     // (`0x4f9b87`-`0x4f9ba3`).
-    if !cursor::equip::has_cursor_control(model) {
+    if !cursor::equip::has_cursor_control(lua, model) {
         return ContainerClick::Done;
     }
     // The slot as the click finds it now, by its own place.
@@ -751,7 +751,7 @@ fn pickup_container_item(
         // `[0xb4d900] == 5`): `CMSG_BUY_ITEM_IN_SLOT` (0x1a3) with count 1, and the cursor clears
         // either way, the item the row names now; with no vendor open the row stays held
         // (`0x4f9f0f`). Deviation: a row index the list no longer holds buys nothing and drops,
-        // where this path reads through a null row (`0x4f9f35`).
+        // because this path reads through a null row in the reference (`0x4f9f35`).
         Some(CursorPayload::Merchant(_)) if !vendor.open => ContainerClick::Done,
         Some(CursorPayload::Merchant(_)) => {
             if let Some(entry) = vendor.held_entry {
@@ -1177,7 +1177,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, (bag, slot): (Value, Value)| {
             // The targeting and base-mode gates run before either argument is read
             // (`0x4fa469`-`0x4fa47a`).
-            if super::merchant::sell_cursor_shut(&lua.app_data_ref::<Model>().expect("model")) {
+            if super::merchant::sell_cursor_shut(lua) {
                 return Ok(());
             }
             // `is-number` on args 1 and 2 else `Usage: ShowContainerSellCursor(index, slot)`

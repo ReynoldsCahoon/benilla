@@ -2,12 +2,13 @@
 //! packet's handler writes its list and signals inside itself (`0x6e9460` adds its records, then
 //! `0x4b31b0` at `0x6e95b0`, and for the pet's list `0x4bce90` at `0x6e95b9`), and the getters
 //! query the list inside their calls (`0x6e2ea0` → `0x6e13e0`, the pet's through `0x4be03c`), so
-//! a listener reads its own packet's records. Here every handler of the frame writes the lists
-//! before any listener runs, so each write is logged with its stamp, as are the flushes' signals
-//! ([`Signal`]); each list's lane (`ui_action::cooldown_lane`) rewinds it to the frame's start and
-//! replays its log in stamp order among the other lanes, firing each signal at its place. A write made during the drain, a listener's cast arming its global cooldown, lands at
-//! its own place and is not logged; its signal is, stamped under the item firing, and fires
-//! straight after it.
+//! a listener reads its own packet's records. Here the lanes fire once a packet's handlers are
+//! done, over the span of packets since they last fired, and a handler's signals among its
+//! writes, so each write is logged with its stamp, as are the flushes' signals ([`Signal`]); each
+//! list's lane (`ui_action::cooldown_lane`) rewinds it to the span's start and replays its log in
+//! stamp order among the other lanes, firing each signal at its place. A write made during the
+//! drain, a listener's cast arming its global cooldown, lands at its own place and is not logged;
+//! its signal is, stamped under the item firing, and fires straight after it.
 
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -18,11 +19,10 @@ use crate::lanes::{Stamp, Until};
 /// One write to a list's records, replayable: each carries the time its handler read.
 #[derive(Clone, Debug)]
 pub(super) enum Write {
-    /// `AddCooldown 0x6e12c0` past its early-out: the records run out by the time dropped, then the
-    /// record appended.
-    Add(Instant, Record),
-    /// The records run out by the time dropped (the expiry sweep `0x6e1910`).
-    Prune(Instant),
+    /// `AddCooldown 0x6e12c0` past its early-out: the record appended, nothing swept.
+    Add(Record),
+    /// The expiry sweep `0x6e1910` at the time ([`expired`]).
+    Sweep(Instant),
     /// `ClearGlobalCooldown 0x6e1630` on a match: every record of the spell has its GCD category
     /// and time zeroed, then the sweep at the time.
     ClearGcd(u32, Instant),
@@ -34,24 +34,20 @@ pub(super) enum Write {
     Clear,
 }
 
-/// Whether a record has run out by `now`: unheld, with its recovery, category recovery and GCD
-/// over.
+/// Whether the sweep `0x6e1910` frees a record at `now`: unheld (`0x6e1946`), with its recovery and
+/// its category recovery over or of no time (`0x6e195d`, `0x6e1973`). It never reads the global
+/// cooldown, so a record with only a global cooldown goes at the first sweep.
 pub(super) fn expired(r: &Record, now: Instant) -> bool {
-    !r.on_hold
-        && r.recovery.remaining(now).is_zero()
-        && r.category_recovery.remaining(now).is_zero()
-        && r.gcd_remaining(now).is_zero()
+    let over = |t: &super::Timer| t.duration.is_zero() || t.remaining(now).is_zero();
+    !r.on_hold && over(&r.recovery) && over(&r.category_recovery)
 }
 
 impl Write {
     /// Make the write on `records`.
     pub(super) fn apply(&self, records: &mut Vec<Record>) {
         match self {
-            Self::Add(now, record) => {
-                records.retain(|r| !expired(r, *now));
-                records.push(record.clone());
-            }
-            Self::Prune(now) => records.retain(|r| !expired(r, *now)),
+            Self::Add(record) => records.push(record.clone()),
+            Self::Sweep(now) => records.retain(|r| !expired(r, *now)),
             Self::ClearGcd(spell, now) => {
                 for r in records.iter_mut().filter(|r| r.spell_id == *spell) {
                     r.gcd_category = 0;
@@ -96,7 +92,7 @@ enum Entry {
     Signal(Signal),
 }
 
-/// A list's log of the frame's writes and signals ([`super::Cooldowns`]), the player's and the
+/// A list's log of the span's writes and signals ([`super::Cooldowns`]), the player's and the
 /// pet's alike.
 #[derive(Debug, Default)]
 pub(crate) struct CooldownLog {
@@ -142,6 +138,13 @@ impl CooldownLog {
         }
     }
 
+    /// Whether the log holds a signal: its replay raises an event.
+    pub(super) fn raises(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|(_, entry)| matches!(entry, Entry::Signal(_)))
+    }
+
     /// Rewind `records` to the log's start, once per drain: whether it did so now.
     pub(super) fn rewind(&mut self, records: &mut Vec<Record>) -> bool {
         if self.replaying {
@@ -174,7 +177,7 @@ impl CooldownLog {
     }
 
     /// The drain's end, however it ended: what it did not replay is written onto `records`, so the
-    /// list stands as the frame left it, and its signals wait for the next drain, as every lane's
+    /// list stands as the span left it, and its signals wait for the next drain, as every lane's
     /// unfired items do; the next write opens a new log.
     pub(super) fn finish(&mut self, records: &mut Vec<Record>) {
         if !self.replaying {

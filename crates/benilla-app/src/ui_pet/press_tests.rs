@@ -194,15 +194,17 @@ impl Rig {
     /// The bar's feeds for one frame, then the lanes' drain, and the events they fired.
     pub(super) fn frame(&mut self) -> Vec<String> {
         self.feed.run(self.app.world_mut());
-        // The frame's clock pair, as the action feed hands it to the call host's cooldown reads.
+        // The frame's clock pair, as the tick hands it to the call host's cooldown reads.
         let clock = {
             let c = self.app.world().resource::<crate::ui_script::UiClock>();
-            (c.anchor, c.ui_now)
+            crate::ui_script::UiClock {
+                anchor: c.anchor,
+                ui_now: c.ui_now,
+            }
         };
         self.app
             .world_mut()
-            .resource_mut::<crate::ui_action::ActionStateMemory>()
-            .set_clock(clock);
+            .insert_resource(crate::ui_script::HostClock(clock));
         crate::lanes::fire_in_order(self.app.world_mut());
         let mut script = self
             .app
@@ -697,9 +699,10 @@ fn the_cursor_binds_a_unit_casters_spell_against_that_unit() {
         );
         let world = rig.app.world_mut();
         let pet = world.resource::<GuidIndex>().0[&PET];
-        world
-            .entity_mut(pet)
-            .insert(GlobalTransform::from_translation(pet_at));
+        world.entity_mut(pet).insert((
+            Transform::from_translation(pet_at),
+            GlobalTransform::from_translation(pet_at),
+        ));
         world.resource_mut::<Spells>().ranges = benilla_formats::SpellRangeCatalog::from_rows(
             [(
                 NEAR,

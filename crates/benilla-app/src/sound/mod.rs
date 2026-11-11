@@ -102,8 +102,8 @@ pub(crate) struct SoundConfig {
     /// preset (`0x45a75b`) and the per-channel wet send (`0x458f13`). Read by
     /// [`reverb::zone_reverb`].
     ///
-    /// Deviation: default off where the reference registers "1". Its reverb is FMOD 3's EAX API,
-    /// which renders only with hardware 3D mixing, so off is what the reference is heard to
+    /// Deviation: default off where the reference registers "1", because its reverb is FMOD 3's EAX
+    /// API, which renders only with hardware 3D mixing, so off is what the reference is heard to
     /// produce (inferred: `fmod.dll`'s render side is untraced).
     pub reverb: bool,
     /// Not a CVar: set while the loading cover is up ([`feed_world_hold`]). No new sound starts
@@ -120,9 +120,9 @@ pub(crate) struct SoundConfig {
     /// it would save music off for a player who quits mid-cinematic. So the reference's restore
     /// latch (`[0xb4e278]`), needed there because its flag is the CVar itself, is not carried.
     pub music_suppressed: bool,
-    /// Deviation: `SoundOutputLimiter`, not a 1.12 CVar, default on, so overlapping full-scale
-    /// kits are limited rather than clipped. The reference has no headroom mechanism and clips at
-    /// full scale, as kira's hard clamp would (see [`limiter`]).
+    /// Deviation: `SoundOutputLimiter`, not a 1.12 CVar, default on, because that way overlapping
+    /// full-scale kits are limited rather than clipped. The reference has no headroom mechanism and
+    /// clips at full scale, as kira's hard clamp would (see [`limiter`]).
     pub limiter: bool,
     /// `SoundListenerAtCharacter` (default "1", `0x457890`), read once per frame at `0x483125`.
     /// `1` puts the listener on the mover with the character's facing, `0` at the camera eye with
@@ -138,6 +138,11 @@ pub(crate) struct SoundConfig {
     /// `ZoneMusic.dbc` silence interval between plays of one zone's track
     /// ([`zone::next_track_time`], `0x4601f0`). A zone change is immediate either way.
     pub zone_music_no_delay: bool,
+    /// `MapWaterSounds` (default "1", `0x462ac9`): its handler `0x462af0` on 0 hard-stops all four
+    /// liquid-class loops (`0x462b10` → `0x462780(1)` → `Sound::Stop`, no fade), and the loop
+    /// driver `0x462b50` arms nothing while it is 0 (`0x462b59`-`0x462b67`). Read by
+    /// [`liquid_loop`].
+    pub liquid_sounds: bool,
 }
 
 impl SoundConfig {
@@ -176,6 +181,7 @@ impl Default for SoundConfig {
             listener_at_character: true,
             emote_sounds: true,
             zone_music_no_delay: false,
+            liquid_sounds: true,
         }
     }
 }
@@ -331,7 +337,10 @@ pub(crate) struct SoundPlugin;
 
 /// The sound CVars' change callback: volumes clamp to `[0, 1]`, enables are `!= 0` as the
 /// reference parses them (`0x4574d0`: `setne al`).
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut sound: ResMut<SoundConfig>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut sound: bevy::prelude::Mut<'_, SoundConfig>,
+) {
     let v = ev.num();
     match ev.key().as_str() {
         "mastervolume" => sound.master = v.clamp(0.0, 1.0),
@@ -348,6 +357,8 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut sound: ResMut<Sound
         "soundlisteneratcharacter" => sound.listener_at_character = v != 0.0,
         "emotesounds" => sound.emote_sounds = v != 0.0,
         "soundzonemusicnodelay" => sound.zone_music_no_delay = v != 0.0,
+        // The record's integer (`SStrToInt`, `0x462af6`), not its float: "0.5" is off.
+        "mapwatersounds" => sound.liquid_sounds = ev.flag(),
         _ => {}
     }
 }
@@ -355,7 +366,6 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut sound: ResMut<Sound
 impl Plugin for SoundPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
-        app.add_observer(on_cvar);
         // `$WOW_NOSOUND` (a silent unattended run), `$WOW_CAPTURE` and a test build open no device
         // at all, so they never hold the audio hardware against a session someone is listening to.
         let silent = ["WOW_NOSOUND", "WOW_CAPTURE"]
@@ -416,9 +426,11 @@ impl Plugin for SoundPlugin {
             (
                 // After Input writes the pose and camera, before Present's consumers read it.
                 update_audio_listener.in_set(WorldStage::Stream),
-                toggle_mute,
-                apply_master_volume.after(toggle_mute),
-                apply_focus_gate,
+                // The volumes are CVar knobs a call's callback writes: the mute key's write
+                // before the calls, which read it, and the apply after them.
+                toggle_mute.before(crate::vm_pass::VmPass::Start),
+                (apply_master_volume.after(toggle_mute), apply_focus_gate)
+                    .after(crate::vm_pass::VmPass::End),
                 poll_mix_health,
             ),
         );

@@ -3,9 +3,10 @@
 //! `0x50c089`) and the targeting and posture verbs of the main table `0x83de68` (loop
 //! `0x49027c`). A key and its Lua function share one path: a held command's Start and Stop are the
 //! key's press and release ([`HeldInput`]), a one-shot command fires as its key does
-//! ([`FiredInput`]), and the targeting and attack calls are script calls ([`ScriptCall`]),
-//! applied inside the verb, so a macro's `TargetNearestEnemy()` then `/cast` casts at the new
-//! target.
+//! ([`FiredInput`]), and each applies to the engine's input state inside the verb through the host
+//! lent ([`ScriptCall::Input`]), as `SetCommands` (`0x515090`) sets the bit, cancels the cast and
+//! runs the tick before the verb returns. The targeting and attack calls are script calls too,
+//! so a macro's `TargetNearestEnemy()` then `/cast` casts at the new target.
 //!
 //! Every movement function but the mouselook three opens on the protected-action gate `0x494a50`
 //! with tag 0 ([`protected`]), which is all twenty-three of its tag-0 callers. The four
@@ -16,6 +17,7 @@ use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::{bool_or_default, flag, flag_or_default};
 use super::calls::{NearestMode, ScriptCall};
+use super::live::LiveQuery;
 use super::protected::{self, Event, Tag};
 use super::{Model, UiScript};
 
@@ -132,6 +134,14 @@ pub enum ClickCall {
 
 /// The TurnOrAction bit of the input control's word, `0x1`.
 const TURN_OR_ACTION: u8 = 0x1;
+
+/// `IsMouselooking`'s question (`0x514270`): whether the TurnOrAction bit of the input control's
+/// word is held (`0x514278`), read off the bindings' state as of the call.
+pub struct MouselookingQuery;
+
+impl LiveQuery for MouselookingQuery {
+    type Answer = bool;
+}
 /// The CameraOrSelectOrMove bit, `0x2`.
 const CAMERA_OR_SELECT: u8 = 0x2;
 
@@ -152,13 +162,11 @@ pub enum BindingInput {
 pub(crate) struct InputState {
     /// The calls made since the app last drained them.
     queue: Vec<BindingInput>,
-    /// `[InputControl+4] & 1`, the TurnOrAction channel `IsMouselooking` tests (`0x514278`), as
-    /// the app pushed it or a `MouselookStart`/`Stop` since moved it.
-    turn_or_action: bool,
     /// The look-session calls since the app last drained them.
     look: Vec<LookCall>,
     /// The two primary bits of `[InputControl+4]` (`0x1`, `0x2`) as the mouse commands moved
-    /// them, which `ArmClick` and the release handler test (`0x51481a`, `0x514c35`).
+    /// them, which `ArmClick` and the release handler test (`0x51481a`, `0x514c35`); with no
+    /// host lent, `IsMouselooking` reads bit `0x1` here ([`MouselookingQuery`]).
     primaries: u8,
     /// The world click steps made with no host to apply them, since the app last drained them.
     clicks: Vec<ClickCall>,
@@ -182,7 +190,8 @@ pub struct ClickPress {
 }
 
 impl UiScript {
-    /// Take the binding calls queued since the last call, in call order.
+    /// Take the binding calls made with no host lent since the last call, in call order; with a
+    /// host lent each applies inside its call ([`ScriptCall::Input`]).
     pub fn take_binding_input(&mut self) -> Vec<BindingInput> {
         std::mem::take(&mut self.model_mut().input.queue)
     }
@@ -205,14 +214,9 @@ impl UiScript {
         })
     }
 
-    /// Push whether the TurnOrAction channel is held: the world holds the right mouse button, or
-    /// a `MouselookStart` holds it with none.
-    pub fn set_turn_or_action_held(&mut self, held: bool) {
-        self.model_mut().input.turn_or_action = held;
-    }
-
-    /// Take the look-session calls made since the last call, in call order, for the app's look
-    /// session.
+    /// Take the look-session calls made with no host lent since the last call, in call order, for
+    /// the app's look session; with a host lent each applies inside its call
+    /// ([`ScriptCall::Look`]).
     pub fn take_look_calls(&mut self) -> Vec<LookCall> {
         std::mem::take(&mut self.model_mut().input.look)
     }
@@ -277,15 +281,6 @@ impl UiScript {
     /// bits clear, and the app drops the click it armed.
     pub fn release_mouse_commands(&mut self) {
         self.model_mut().input.primaries = 0;
-    }
-
-    /// A right release no binding took, which in freelook still reaches the world frame and its
-    /// `TURNORACTION` up (`0x492b50` → `TurnOrActionStop 0x514160` → `0x515090(1, 0, …)`): the
-    /// TurnOrAction bit's release, as the command's.
-    pub fn release_turn_or_action(&mut self) {
-        if let Err(e) = release_primary(&self.lua, TURN_OR_ACTION) {
-            self.model_mut().record_lua_error(&e);
-        }
     }
 }
 
@@ -354,14 +349,26 @@ fn gate(lua: &Lua) -> bool {
     protected::gate(lua, Tag::MOVEMENT)
 }
 
-fn push(lua: &Lua, input: BindingInput) {
+/// A binding call, applied to the engine's input state inside the call through the host lent
+/// ([`ScriptCall::Input`]); with none lent it waits for the app ([`UiScript::take_binding_input`]).
+fn push(lua: &Lua, input: BindingInput) -> mlua::Result<()> {
+    if super::host::open(lua) {
+        return push_call(lua, ScriptCall::Input(input));
+    }
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     model.input.queue.push(input);
+    Ok(())
 }
 
-fn push_look(lua: &Lua, call: LookCall) {
+/// A look-session call, applied to the camera's mouse state inside the call through the host lent
+/// ([`ScriptCall::Look`]); with none lent it waits for the app ([`UiScript::take_look_calls`]).
+fn push_look(lua: &Lua, call: LookCall) -> mlua::Result<()> {
+    if super::host::open(lua) {
+        return push_call(lua, ScriptCall::Look(call));
+    }
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
     model.input.look.push(call);
+    Ok(())
 }
 
 fn push_call(lua: &Lua, call: ScriptCall) -> mlua::Result<()> {
@@ -439,7 +446,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     if let Some((bit, mode)) = primary {
                         press_primary(lua, bit, Some(mode))?;
                     }
-                    push(lua, BindingInput::Start(input));
+                    push(lua, BindingInput::Start(input))?;
                 }
                 Ok(())
             })?,
@@ -451,16 +458,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     if let Some((bit, _)) = primary {
                         release_primary(lua, bit)?;
                     }
-                    push(lua, BindingInput::Stop(input));
+                    push(lua, BindingInput::Stop(input))?;
                     // A mouse bit's release carries its fourth argument to the camera: the sticky
                     // flag through `0x6f1c10` with default 0 (`0x5141f6`), else 0 (`0x51417b`).
                     match input {
                         HeldInput::CameraOrSelectOrMove => {
                             let sticky = flag_or_default(args.front(), 0) != 0;
-                            push_look(lua, LookCall::MouseRelease { sticky });
+                            push_look(lua, LookCall::MouseRelease { sticky })?;
                         }
                         HeldInput::TurnOrAction => {
-                            push_look(lua, LookCall::MouseRelease { sticky: false });
+                            push_look(lua, LookCall::MouseRelease { sticky: false })?;
                         }
                         _ => {}
                     }
@@ -481,25 +488,29 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             name,
             lua.create_function(move |lua, _: MultiValue| {
                 if gate(lua) {
-                    push(lua, BindingInput::Fire(input));
+                    push(lua, BindingInput::Fire(input))?;
                 }
                 Ok(())
             })?,
         )?;
     }
     // `IsMouselooking()` (`0x514270`): `[InputControl+4] & 1`, the TurnOrAction channel, not the
-    // camera's freelook bit; 1 or nil (`0x514280`/`0x514293`).
+    // camera's freelook bit; 1 or nil (`0x514280`/`0x514293`). The word is the bindings' state,
+    // read through the lent host as of the call; with none lent, the bit as the commands moved it.
     g.set(
         "IsMouselooking",
         lua.create_function(|lua, _: MultiValue| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            Ok(flag(model.input.turn_or_action))
+            let held = super::live::ask(lua, &MouselookingQuery).unwrap_or_else(|| {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.input.primaries & TURN_OR_ACTION != 0
+            });
+            Ok(flag(held))
         })?,
     )?;
     // `MouselookStart`/`MouselookStop` (`0x514210`/`0x514240`) pass no gate: each disarms the
     // pending world click (`0x514810(0)`) and sets or clears the TurnOrAction channel
     // (`0x515090(1, set, now, 0)`), the bit the held right button drives. The bit moves at the
-    // call, so `IsMouselooking` answers it at once; the app's look session applies the call.
+    // call, so `IsMouselooking` answers it at once, and the host applies the rest in the call.
     for (name, on) in [("MouselookStart", true), ("MouselookStop", false)] {
         g.set(
             name,
@@ -511,10 +522,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     click(lua, ClickCall::Disarm)?;
                     release_primary(lua, TURN_OR_ACTION)?;
                 }
-                let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-                model.input.turn_or_action = on;
-                model.input.look.push(LookCall::Mouselook(on));
-                Ok(())
+                push_look(lua, LookCall::Mouselook(on))
             })?,
         )?;
     }
@@ -524,7 +532,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "CameraZoomIn",
         lua.create_function(|lua, v: Option<Value>| {
             if let Some(yards) = zoom_amount(lua, v) {
-                push(lua, BindingInput::Fire(FiredInput::CameraZoomIn(yards)));
+                push(lua, BindingInput::Fire(FiredInput::CameraZoomIn(yards)))?;
             }
             Ok(())
         })?,
@@ -533,7 +541,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "CameraZoomOut",
         lua.create_function(|lua, v: Option<Value>| {
             if let Some(yards) = zoom_amount(lua, v) {
-                push(lua, BindingInput::Fire(FiredInput::CameraZoomOut(yards)));
+                push(lua, BindingInput::Fire(FiredInput::CameraZoomOut(yards)))?;
             }
             Ok(())
         })?,
@@ -553,14 +561,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         g.set(
             start,
             lua.create_function(move |lua, _: MultiValue| {
-                push(lua, BindingInput::ViewStart(axis));
+                push(lua, BindingInput::ViewStart(axis))?;
                 Ok(())
             })?,
         )?;
         g.set(
             stop,
             lua.create_function(move |lua, _: MultiValue| {
-                push(lua, BindingInput::ViewStop(axis));
+                push(lua, BindingInput::ViewStop(axis))?;
                 Ok(())
             })?,
         )?;
@@ -568,10 +576,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // `ToggleMouseMove` (`0x50b5a0` → `0x50f910`): no gate, no argument, nothing returned.
     g.set(
         "ToggleMouseMove",
-        lua.create_function(|lua, _: MultiValue| {
-            push_look(lua, LookCall::ToggleMouseMove);
-            Ok(())
-        })?,
+        lua.create_function(|lua, _: MultiValue| push_look(lua, LookCall::ToggleMouseMove))?,
     )?;
 
     // ── The main table `0x83de68` ──────────────────────────────────────────────────────────
@@ -629,7 +634,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ToggleSheath",
         lua.create_function(move |lua, _: MultiValue| {
-            push(lua, BindingInput::Fire(FiredInput::ToggleSheath));
+            push(lua, BindingInput::Fire(FiredInput::ToggleSheath))?;
             Ok(())
         })?,
     )?;
@@ -843,20 +848,18 @@ mod tests {
         );
     }
 
-    /// `IsMouselooking` answers the pushed TurnOrAction channel as 1 or nil.
+    /// `IsMouselooking` answers the TurnOrAction channel as 1 or nil: with no host lent, the bit
+    /// as the commands moved it, a binding's `TurnOrActionStart` among them.
     #[test]
     fn is_mouselooking_answers_one_or_nil() {
-        let mut s = UiScript::new().unwrap();
+        let s = UiScript::new().unwrap();
         assert_eq!(s.arity("IsMouselooking()").unwrap(), 1);
-        assert!(s
-            .eval::<Option<i64>>("return IsMouselooking()")
-            .unwrap()
-            .is_none());
-        s.set_turn_or_action_held(true);
-        assert_eq!(
-            s.eval::<Option<i64>>("return IsMouselooking()").unwrap(),
-            Some(1)
-        );
+        let looking = |s: &UiScript| s.eval::<Option<i64>>("return IsMouselooking()").unwrap();
+        assert!(looking(&s).is_none());
+        s.run_binding("TurnOrActionStart()").unwrap();
+        assert_eq!(looking(&s), Some(1));
+        s.run_binding("TurnOrActionStop()").unwrap();
+        assert!(looking(&s).is_none());
     }
 
     /// `MouselookStart`/`Stop` pass no gate (`0x514210`/`0x514240`), queue for the look session in
@@ -886,9 +889,9 @@ mod tests {
             s.take_binding_input().is_empty(),
             "not a movement-binding call"
         );
-        // The app's push is the channel's truth from then on: a right release ended it.
+        // A key's stop ends it too.
         s.run("MouselookStart()").unwrap();
-        s.set_turn_or_action_held(false);
+        s.run_binding("TurnOrActionStop()").unwrap();
         assert_eq!(looking(&s), None);
     }
 
@@ -1015,6 +1018,56 @@ mod tests {
                 ScriptCall::ClearTarget,
             ]
         );
+    }
+
+    /// With a host lent, every movement and camera binding call applies inside its call, in call
+    /// order with the other calls (`0x515090` returns with the bit set and the cast cancelled), and
+    /// nothing waits for the app.
+    #[test]
+    fn the_binding_calls_apply_in_the_call_with_a_host_lent() {
+        let mut s = UiScript::new().unwrap();
+        let calls = crate::script::host::test_support::applied_in_call(
+            &mut s,
+            "MoveForwardStart() SitOrStand() Jump() MoveForwardStop() CameraZoomOut(2) \
+             MoveViewLeftStart() ToggleSheath() PitchUpStart()",
+        );
+        assert_eq!(
+            calls,
+            [
+                ScriptCall::Input(BindingInput::Start(HeldInput::MoveForward)),
+                ScriptCall::Posture(PostureCall::SitOrStand),
+                ScriptCall::Input(BindingInput::Fire(FiredInput::Jump)),
+                ScriptCall::Input(BindingInput::Stop(HeldInput::MoveForward)),
+                ScriptCall::Input(BindingInput::Fire(FiredInput::CameraZoomOut(2.0))),
+                ScriptCall::Input(BindingInput::ViewStart(ViewAxis::Left)),
+                ScriptCall::Input(BindingInput::Fire(FiredInput::ToggleSheath)),
+                ScriptCall::Input(BindingInput::Start(HeldInput::PitchUp)),
+            ]
+        );
+        assert!(s.take_binding_input().is_empty(), "nothing waits");
+    }
+
+    /// With a host lent, the look-session calls apply inside their calls too, each behind the
+    /// world click step its command makes first (`0x514223`, `0x51425b`), and nothing waits.
+    #[test]
+    fn the_look_calls_apply_in_the_call_with_a_host_lent() {
+        let mut s = UiScript::new().unwrap();
+        let calls = crate::script::host::test_support::applied_in_call(
+            &mut s,
+            "MouselookStart() ToggleMouseMove() MouselookStop()",
+        );
+        assert_eq!(
+            calls,
+            [
+                ScriptCall::WorldClick(ClickCall::Disarm),
+                ScriptCall::Look(LookCall::Mouselook(true)),
+                ScriptCall::Look(LookCall::ToggleMouseMove),
+                ScriptCall::WorldClick(ClickCall::Disarm),
+                ScriptCall::WorldClick(ClickCall::Release),
+                ScriptCall::Look(LookCall::Mouselook(false)),
+            ]
+        );
+        assert!(s.take_look_calls().is_empty(), "nothing waits");
     }
 
     /// The TAB cyclers, `TargetLastTarget` and `AttackTarget` apply inside their call with a host

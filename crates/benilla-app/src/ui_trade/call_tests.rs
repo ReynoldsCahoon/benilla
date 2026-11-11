@@ -26,8 +26,6 @@ const JERKY: u64 = 0x4000_0000_0000_0a02;
 struct Trade {
     app: App,
     rx: Receiver<ClientCommand>,
-    /// The drop's system, registered once so its memory persists.
-    drop: SystemId,
 }
 
 /// Our object with `extra` fields: `OBJECT_FIELD_TYPE` a player, alive, the human template,
@@ -53,6 +51,10 @@ fn me_fields(extra: &[(u16, u32)]) -> ObjectFields {
 /// selected, two items in our backpack and 1g in the purse.
 fn client() -> Trade {
     let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+    // In the world with the interface up, so the dispatch fires each packet's lanes.
+    app.insert_resource(bevy::prelude::State::new(
+        crate::client_state::ClientState::InWorld,
+    ));
     let (tx, rx) = crossbeam_channel::unbounded();
     app.insert_resource(NetCommands(tx));
     app.insert_resource(fixture::factions());
@@ -107,10 +109,7 @@ fn client() -> Trade {
         )
         .expect("the recorder installs");
     app.world_mut().insert_non_send_resource(script);
-    let drop = app
-        .world_mut()
-        .register_system(crate::ui_action::drop_item::drop_item_on_unit);
-    Trade { app, rx, drop }
+    Trade { app, rx }
 }
 
 /// A left click on `guid`'s model, through the world click's trade leg.
@@ -295,8 +294,6 @@ fn held_coins_stay_on_the_cursor_when_a_trade_opens_that_no_drop_started() {
 fn an_item_dropped_on_a_player_starts_and_fills_a_trade() {
     let mut t = client();
     run(&mut t, "PickupContainerItem(0, 1) DropItemOnUnit('target')");
-    let drop = t.drop;
-    run_system(&mut t, drop);
     assert!(
         matches!(
             sent(&t)[..],
@@ -323,8 +320,6 @@ fn an_item_dropped_on_a_player_starts_and_fills_a_trade() {
     let _ = heard(&mut t);
 
     run(&mut t, "PickupContainerItem(0, 2) DropItemOnUnit('target')");
-    let drop = t.drop;
-    run_system(&mut t, drop);
     assert!(
         sent(&t)
             .iter()
@@ -333,6 +328,42 @@ fn an_item_dropped_on_a_player_starts_and_fills_a_trade() {
     );
     assert_eq!(heard(&mut t), "TRADE_PLAYER_ITEM_CHANGED(2,nil) ");
     assert!(eval::<bool>(&mut t, "return CursorHasItem() == nil"));
+}
+
+/// `DropItemOnUnit` does its legs inside its call (`0x48d960`): on the open partner the held item
+/// is placed and the cursor cleared before the script's next line (`0x48da50` → `0x4bfc50`), and
+/// with no trade open `CMSG_INITIATE_TRADE` goes out ahead of a send the next line makes
+/// (`0x48da62`).
+#[test]
+fn a_drop_on_a_player_trades_inside_its_call() {
+    let mut t = client();
+    open_with_bob(&mut t);
+    assert_eq!(
+        eval::<(bool, Option<String>)>(
+            &mut t,
+            "PickupContainerItem(0, 1) DropItemOnUnit('target') \
+             return CursorHasItem() == nil, (GetTradePlayerItemInfo(1))"
+        ),
+        (true, Some("Linen Cloth".to_string())),
+        "the next line reads the item placed"
+    );
+    assert_eq!(heard(&mut t), "TRADE_PLAYER_ITEM_CHANGED(1,nil) ");
+
+    let mut t = client();
+    run(
+        &mut t,
+        "PickupContainerItem(0, 1) DropItemOnUnit('target') RandomRoll(1, 2)",
+    );
+    assert!(
+        matches!(
+            sent(&t)[..],
+            [
+                ClientCommand::InitiateTrade { target: BOB },
+                ClientCommand::RandomRoll { .. }
+            ]
+        ),
+        "the ask goes out in call order"
+    );
 }
 
 /// No sender tests the window (`0x5d4680`, `0x4bfa70`, `0x5d4380`, `0x5d4480`): money, a placement
@@ -771,6 +802,9 @@ fn an_accept_sends_the_partners_last_flag() {
         [ClientCommand::AcceptTrade { flag: 1 }]
     ));
     partner_slot_7(&mut t, 0);
+    // The offer drops our accept and sends the un-accept inside its dispatch (`0x4bf2b6` →
+    // `0x4bf230(0)`, the send at `0x4bf272`).
+    assert!(matches!(sent(&t)[..], [ClientCommand::UnacceptTrade]));
     run(&mut t, "AcceptTrade()");
     assert!(matches!(
         sent(&t)[..],
@@ -858,7 +892,7 @@ fn the_accept_signal_runs_before_its_packet() {
 fn a_refused_drop_placement_writes_nothing_and_keeps_the_cursor() {
     let mut t = client();
     open_with_bob(&mut t);
-    run(&mut t, "PickupContainerItem(0, 1) DropItemOnUnit('target')");
+    run(&mut t, "PickupContainerItem(0, 1)");
     let world = t.app.world_mut();
     if let Some(cloth) = world
         .resource_mut::<crate::net::GuidIndex>()
@@ -867,8 +901,7 @@ fn a_refused_drop_placement_writes_nothing_and_keeps_the_cursor() {
     {
         world.despawn(cloth);
     }
-    let drop = t.drop;
-    run_system(&mut t, drop);
+    run(&mut t, "DropItemOnUnit('target')");
     assert!(sent(&t).is_empty(), "nothing went out");
     assert_eq!(heard(&mut t), "", "no slot signal");
     assert_eq!(
@@ -988,16 +1021,17 @@ fn canceled_and_code_13_signal_the_purse_ahead_of_the_dispatcher() {
 }
 
 /// The open leg's item path asks for the held item's guid and its source container's
-/// (`0x4bf667`, `0x4bf674`): an item from bag 1 with no bag known in inventory slot 20 leaves the
-/// cursor and the offer alone, and the world click asks no trade for it; with the bag seated
-/// both go on. The bag is in the world either way; the doll's slot holds it only when seated.
+/// (`0x4bf667`, `0x4bf674`), the bag slot read at the call: an item from bag 1 whose bag has left
+/// inventory slot 20 since the pickup leaves the cursor and the offer alone, and the world click
+/// asks no trade for it; with the bag still seated both go on.
 #[test]
 fn the_open_leg_takes_no_item_whose_bag_has_no_guid() {
+    use benilla_protocol::field::{FIELD_CONTAINER_SLOT_1, FIELD_PLAYER_INV_SLOT_HEAD};
+    const BAG: u64 = 0x4000_0000_0000_0b01;
+    let seat = FIELD_PLAYER_INV_SLOT_HEAD + 2 * 19;
     for seated in [false, true] {
         let mut t = client();
         {
-            use benilla_protocol::field::{FIELD_CONTAINER_SLOT_1, FIELD_PLAYER_INV_SLOT_HEAD};
-            const BAG: u64 = 0x4000_0000_0000_0b01;
             let world = t.app.world_mut();
             crate::items::test_spawn_item(
                 world,
@@ -1013,7 +1047,6 @@ fn the_open_leg_takes_no_item_whose_bag_has_no_guid() {
                 true,
             );
             let me = world.resource::<crate::net::GuidIndex>().0[&ME];
-            let seat = FIELD_PLAYER_INV_SLOT_HEAD + 2 * 19;
             world
                 .get_mut::<crate::net::ObjectStore>(me)
                 .expect("our store")
@@ -1025,19 +1058,16 @@ fn the_open_leg_takes_no_item_whose_bag_has_no_guid() {
                     (seat + 1, (BAG >> 32) as u32),
                 ]));
         }
-        with_hosted_vm(t.app.world_mut(), |vm| {
-            let vm = vm.expect("a VM");
-            if seated {
-                let mut slots: benilla_ui::script::InventorySlots = Default::default();
-                slots[20] = Some(benilla_ui::script::InvSlotView {
-                    item_id: 4496,
-                    guid: 0x4000_0000_0000_0b01,
-                    ..Default::default()
-                });
-                vm.set_inventory_slots(slots);
-            }
-        });
         run(&mut t, "PickupContainerItem(1, 1)");
+        if !seated {
+            let world = t.app.world_mut();
+            let me = world.resource::<crate::net::GuidIndex>().0[&ME];
+            world
+                .get_mut::<crate::net::ObjectStore>(me)
+                .expect("our store")
+                .0
+                .merge(ObjectFields::from_pairs(&[(seat, 0), (seat + 1, 0)]));
+        }
         // The world click's trade leg asks the same of the payload (`0x49264d`).
         click_on(&mut t, BOB);
         assert_eq!(
@@ -1268,8 +1298,9 @@ fn the_getters_read_the_session_inside_the_calls_and_the_close() {
     );
 }
 
-/// A close core run by a handler while the lane still holds an earlier packet's signals waits
-/// behind them ([`super::lane::close_step`]): the accept, then the close and its line.
+/// A close core run by a handler fires behind the earlier packet's signals, which fired inside its
+/// own packet's dispatch (`0x537ae5`, `0x703e50`): the accept, then the close's two
+/// `TRADE_CLOSED`s, before the dispatch returns.
 #[test]
 fn a_close_fires_behind_the_lanes_earlier_items() {
     let mut t = client();
@@ -1292,12 +1323,12 @@ fn a_close_fires_behind_the_lanes_earlier_items() {
         ],
     );
     t.app.world_mut().flush();
-    assert_eq!(heard(&mut t), "", "nothing fired in the handlers");
-    drain(&mut t);
     assert_eq!(
         heard(&mut t),
         "TRADE_ACCEPT_UPDATE(0,1) TRADE_CLOSED TRADE_CLOSED "
     );
+    drain(&mut t);
+    assert_eq!(heard(&mut t), "", "nothing left for the drain");
 }
 
 /// One frame's `OPEN_WINDOW` then `CANCELED` on a trade a drop started: the open places the held
@@ -1410,4 +1441,52 @@ fn a_cached_initiate_prints_its_line_inside_the_call() {
         heard(&mut t),
         "CHAT_MSG_SYSTEM(Requested to trade with Bob.) next"
     );
+}
+
+/// Two traded items' destroys still queued at a close: each watcher run signals in its own
+/// handler (`0x4bfa70` per item: the clear `0x5d4480`, then `TRADE_PLAYER_ITEM_CHANGED`), so the
+/// first slot's listeners send before the second slot's clear, at the world's close core
+/// (`0x4bf4e0`, inside the destroys' span) and at `CloseTrade()` (`0x4bfdc0`) alike.
+#[test]
+fn each_queued_trade_halfs_listeners_send_before_the_next_clear() {
+    for local in [false, true] {
+        let mut t = client();
+        open_with_bob(&mut t);
+        run(
+            &mut t,
+            r#"PickupContainerItem(0, 1) ClickTradeButton(1)
+            PickupContainerItem(0, 2) ClickTradeButton(2)
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("TRADE_PLAYER_ITEM_CHANGED")
+            f:SetScript("OnEvent", function() RandomRoll(1, 2) end)"#,
+        );
+        let _ = sent(&t);
+        for (guid, entry) in [(CLOTH, 2589), (JERKY, 117)] {
+            t.app
+                .world_mut()
+                .resource_mut::<crate::item_lane::ItemLane>()
+                .push(crate::item_watch::Run {
+                    notice: Some(crate::item_watch::ItemNotice::Destroyed { guid, entry }),
+                    ..Default::default()
+                });
+        }
+        if local {
+            run(&mut t, "CloseTrade()");
+        } else {
+            super::close_core(t.app.world_mut());
+        }
+        let wire: Vec<String> = sent(&t)
+            .into_iter()
+            .filter_map(|c| match c {
+                ClientCommand::ClearTradeItem { trade_slot } => Some(format!("clear {trade_slot}")),
+                ClientCommand::RandomRoll { .. } => Some("roll".to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            wire,
+            ["clear 0", "roll", "clear 1", "roll"],
+            "local {local}"
+        );
+    }
 }

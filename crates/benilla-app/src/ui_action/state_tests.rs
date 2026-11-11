@@ -1,7 +1,9 @@
-//! [`super::feed_action_state`] through a real Lua VM, and its helpers.
+//! The slots' states as a real Lua VM's getters read them at the call, through the lent host
+//! ([`super::ActionStates`]), and their helpers.
 
 use super::*;
 use crate::creature_anim::Engaged;
+use crate::net::SelfPlayer;
 use crate::spell::AutoRepeatActive;
 use crate::target::Selection;
 use benilla_formats::SpellDisplay;
@@ -17,9 +19,9 @@ const MOB: &[(u16, u32)] = &[(2, 0x9), (22, 100)];
 /// The player's guid.
 const ME: u64 = 0x10;
 
-/// What the feed reads beside each test's own inputs: the field and item notices, the player's
-/// guid and the self-cast flag the cast targeting reads.
-fn feed_inputs(app: &mut App) {
+/// What the slot walk reads beside each test's own inputs: the field and item notices, the
+/// player's guid and the self-cast flag the cast targeting reads.
+fn walk_inputs(app: &mut App) {
     app.add_message::<crate::net::FieldChanged>()
         .init_resource::<crate::item_lane::ItemLane>()
         .insert_resource(crate::net::SelfGuid(Some(ME)))
@@ -29,20 +31,15 @@ fn feed_inputs(app: &mut App) {
         .init_resource::<crate::net::Reputations>();
 }
 
-/// The feed's two halves, as the plugin orders them.
-fn add_action_feed(app: &mut App) {
-    app.init_resource::<ActionEvents>()
-        .init_resource::<super::ActionStateMemory>()
-        .add_systems(
-            Update,
-            (
-                feed_action_state,
-                fire_action_events.in_set(crate::ui_action::CooldownEvents),
-                // The cooldown lane, after every feed, as the drain fires it.
-                crate::ui_action::fire_cooldown_lane,
-            )
-                .chain(),
-        );
+/// The bar's memory, and the cooldown lane each frame, as the drain fires it.
+fn add_bar(app: &mut App) {
+    app.init_resource::<super::ActionStateMemory>()
+        .add_systems(Update, crate::ui_action::fire_cooldown_lane);
+}
+
+/// `chunk`'s answer with the bar's live reads lent, as a getter's call reads them.
+fn live<T: benilla_ui::mlua::FromLuaMulti>(app: &mut App, chunk: &str) -> T {
+    crate::ui_action::eval_live(app.world_mut(), chunk)
 }
 
 /// A profession opener (`Effect[0]` 47) names the window `IsCurrentAction` checks it against
@@ -159,8 +156,8 @@ fn a_macro_slot_resolves_through_its_bound_spell() {
 }
 
 #[test]
-fn the_feed_pushes_a_bare_macro_as_usable() {
-    use crate::ui_macro::{BoundSpell, MacroBoundSpells};
+fn a_bare_macro_reads_as_usable() {
+    use crate::ui_macro::BoundSpell;
     use benilla_protocol::messages::{ActionButton, ACTION_KIND_MACRO};
 
     let (tx, _rx) = crossbeam_channel::unbounded();
@@ -177,12 +174,16 @@ fn the_feed_pushes_a_bare_macro_as_usable() {
         );
     }
     // Macro 1 is `.spawn 16032`, 2 an unknown `/cast Pyroblast`, and 3 does not exist.
-    let mut bound = MacroBoundSpells::default();
-    bound.0.insert(1, BoundSpell::None.into());
-    bound.0.insert(2, BoundSpell::Unresolved.into());
+    let mut script = UiScript::new().unwrap();
+    crate::ui_macro::bind_for_test(
+        &mut script,
+        &[
+            (1, BoundSpell::None.into()),
+            (2, BoundSpell::Unresolved.into()),
+        ],
+    );
     app.insert_resource(PlayerActions::default())
         .insert_resource(slots)
-        .insert_resource(bound)
         .init_resource::<Cooldowns>()
         .init_resource::<crate::spell::SpellModifiers>()
         .init_resource::<crate::ui_script::UiClock>()
@@ -199,18 +200,16 @@ fn the_feed_pushes_a_bare_macro_as_usable() {
         .init_resource::<crate::net::Reputations>()
         .init_resource::<Items>()
         .insert_resource(NetCommands(tx));
-    feed_inputs(&mut app);
-    app.insert_non_send_resource(UiScript::new().unwrap());
-    add_action_feed(&mut app);
-    app.update();
+    walk_inputs(&mut app);
+    app.insert_non_send_resource(script);
+    add_bar(&mut app);
+    write_all(&mut app);
 
-    let script = app.world().non_send_resource::<UiScript>();
-    let usable = |action: u32| {
-        script
-            .eval::<bool>(&format!(
-                "return (IsUsableAction({action})) and true or false"
-            ))
-            .unwrap()
+    let mut usable = |action: u32| {
+        live::<bool>(
+            &mut app,
+            &format!("return (IsUsableAction({action})) and true or false"),
+        )
     };
     assert!(usable(1), "a macro that casts nothing is a usable button");
     assert!(
@@ -219,9 +218,10 @@ fn the_feed_pushes_a_bare_macro_as_usable() {
     );
     assert!(!usable(3), "a slot whose macro no longer exists is grey");
     assert!(
-        !script
-            .eval::<bool>("local _, oom = IsUsableAction(2) return oom and true or false")
-            .unwrap(),
+        !live::<bool>(
+            &mut app,
+            "local _, oom = IsUsableAction(2) return oom and true or false"
+        ),
         "grey, not the out-of-power blue: notEnoughMana stays 0 on the spell-less leg"
     );
 }
@@ -267,7 +267,6 @@ fn a_ranged_button_pads_its_range_by_the_selected_target_alone() {
         };
         app.insert_resource(PlayerActions::default())
             .insert_resource(slots)
-            .insert_resource(crate::ui_macro::MacroBoundSpells::default())
             .insert_resource(Spells {
                 catalog: benilla_formats::SpellCatalog::from_displays(
                     [(FIREBALL, fireball)].into_iter().collect(),
@@ -295,7 +294,7 @@ fn a_ranged_button_pads_its_range_by_the_selected_target_alone() {
             .init_resource::<crate::net::Reputations>()
             .init_resource::<Items>()
             .insert_resource(NetCommands(tx));
-        feed_inputs(&mut app);
+        walk_inputs(&mut app);
         // The player swings at a 4.0-reach unit, close by.
         let swung_at = app
             .world_mut()
@@ -331,15 +330,9 @@ fn a_ranged_button_pads_its_range_by_the_selected_target_alone() {
             lit: None,
         });
         app.insert_non_send_resource(UiScript::new().unwrap());
-        add_action_feed(&mut app);
-        app.update();
-        let script = app.world().non_send_resource::<UiScript>();
-        assert!(script
-            .eval::<bool>("return ActionHasRange(1) == 1")
-            .unwrap());
-        script
-            .eval::<i64>("return IsActionInRange(1) or -1")
-            .unwrap()
+        add_bar(&mut app);
+        assert!(live::<bool>(&mut app, "return ActionHasRange(1) == 1"));
+        live::<i64>(&mut app, "return IsActionInRange(1) or -1")
     };
 
     // 35 + the caster's 1.5 + the selected unit's 1.5 = 38.
@@ -381,7 +374,6 @@ fn a_melee_button_reaches_the_moving_bonus_while_both_units_run() {
         };
         app.insert_resource(PlayerActions::default())
             .insert_resource(slots)
-            .insert_resource(crate::ui_macro::MacroBoundSpells::default())
             .insert_resource(Spells {
                 catalog: benilla_formats::SpellCatalog::from_displays(
                     [(
@@ -423,7 +415,7 @@ fn a_melee_button_reaches_the_moving_bonus_while_both_units_run() {
                 0
             }))
             .insert_resource(NetCommands(tx));
-        feed_inputs(&mut app);
+        walk_inputs(&mut app);
         let speeds = crate::net::UnitSpeeds(benilla_protocol::MoveSpeeds {
             walk: 2.5,
             run: 7.0,
@@ -471,12 +463,8 @@ fn a_melee_button_reaches_the_moving_bonus_while_both_units_run() {
             lit: None,
         });
         app.insert_non_send_resource(UiScript::new().unwrap());
-        add_action_feed(&mut app);
-        app.update();
-        let script = app.world().non_send_resource::<UiScript>();
-        script
-            .eval::<i64>("return IsActionInRange(1) or -1")
-            .unwrap()
+        add_bar(&mut app);
+        live::<i64>(&mut app, "return IsActionInRange(1) or -1")
     };
 
     // 1.5 + 1.5 + 1.3333 is under the 5.0 floor; the bonus goes on the floor: 7.667.
@@ -532,7 +520,6 @@ fn food_on_the_bar_greys_while_the_player_is_in_combat() {
         };
         app.insert_resource(PlayerActions::default())
             .insert_resource(slots)
-            .insert_resource(crate::ui_macro::MacroBoundSpells::default())
             .insert_resource(Spells {
                 catalog: benilla_formats::SpellCatalog::from_displays(
                     [(FOOD_SPELL, food)].into_iter().collect(),
@@ -559,7 +546,7 @@ fn food_on_the_bar_greys_while_the_player_is_in_combat() {
             .init_resource::<crate::net::Reputations>()
             .insert_resource(items)
             .insert_resource(NetCommands(tx));
-        feed_inputs(&mut app);
+        walk_inputs(&mut app);
         crate::items::test_spawn_item(
             app.world_mut(),
             0xF0,
@@ -583,7 +570,7 @@ fn food_on_the_bar_greys_while_the_player_is_in_combat() {
                 (PACK_SLOT_1, 0xF0),
             ])),
         ));
-        // The slot as the identity feed pushed it, with the ten muffins it counted.
+        // The slot as a recount left it, with the ten muffins it counted.
         let mut script = UiScript::new().unwrap();
         script.set_action(
             1,
@@ -595,12 +582,13 @@ fn food_on_the_bar_greys_while_the_player_is_in_combat() {
             }),
         );
         app.insert_non_send_resource(script);
-        add_action_feed(&mut app);
-        app.update();
-        app.world()
-            .non_send_resource::<UiScript>()
-            .eval::<bool>("return (IsUsableAction(1)) and true or false")
-            .unwrap()
+        add_bar(&mut app);
+        app.world_mut()
+            .resource_mut::<super::ActionStateMemory>()
+            .counts
+            .insert(1, 10);
+        write_all(&mut app);
+        live::<bool>(&mut app, "return (IsUsableAction(1)) and true or false")
     };
 
     assert!(lit(false), "out of combat the muffins are full-colour");
@@ -638,7 +626,6 @@ fn an_item_slot_is_held_by_its_stored_count_not_the_bags() {
         items.insert_template(ITEM, Some(crate::items::test_template("Rough Arrow")));
         app.insert_resource(PlayerActions::default())
             .insert_resource(slots)
-            .insert_resource(crate::ui_macro::MacroBoundSpells::default())
             .insert_resource(Spells::empty_for_tests())
             .init_resource::<Cooldowns>()
             .init_resource::<crate::spell::SpellModifiers>()
@@ -656,7 +643,7 @@ fn an_item_slot_is_held_by_its_stored_count_not_the_bags() {
             .init_resource::<crate::net::Reputations>()
             .insert_resource(items)
             .insert_resource(NetCommands(tx));
-        feed_inputs(&mut app);
+        walk_inputs(&mut app);
         crate::items::test_spawn_item(
             app.world_mut(),
             0xF0,
@@ -683,12 +670,13 @@ fn an_item_slot_is_held_by_its_stored_count_not_the_bags() {
             }),
         );
         app.insert_non_send_resource(script);
-        add_action_feed(&mut app);
-        app.update();
-        app.world()
-            .non_send_resource::<UiScript>()
-            .eval::<bool>("return (IsUsableAction(1)) and true or false")
-            .unwrap()
+        add_bar(&mut app);
+        app.world_mut()
+            .resource_mut::<super::ActionStateMemory>()
+            .counts
+            .insert(1, stored);
+        write_all(&mut app);
+        live::<bool>(&mut app, "return (IsUsableAction(1)) and true or false")
     };
 
     assert!(lit(3, false), "a stored count lights it, bags or none");
@@ -725,7 +713,6 @@ fn a_broken_worn_weapon_draws_no_equipped_border() {
         items.insert_template(SWORD, Some(crate::items::test_template("Sword")));
         app.insert_resource(PlayerActions::default())
             .insert_resource(slots)
-            .insert_resource(crate::ui_macro::MacroBoundSpells::default())
             .insert_resource(Spells::empty_for_tests())
             .init_resource::<Cooldowns>()
             .init_resource::<crate::spell::SpellModifiers>()
@@ -743,7 +730,7 @@ fn a_broken_worn_weapon_draws_no_equipped_border() {
             .init_resource::<crate::net::Reputations>()
             .insert_resource(items)
             .insert_resource(NetCommands(tx));
-        feed_inputs(&mut app);
+        walk_inputs(&mut app);
         // The sword: flags 0, durability, maximum 40.
         crate::items::test_spawn_item(
             app.world_mut(),
@@ -772,12 +759,8 @@ fn a_broken_worn_weapon_draws_no_equipped_border() {
             }),
         );
         app.insert_non_send_resource(script);
-        add_action_feed(&mut app);
-        app.update();
-        app.world()
-            .non_send_resource::<UiScript>()
-            .eval::<bool>("return (IsEquippedAction(1)) and true or false")
-            .unwrap()
+        add_bar(&mut app);
+        live::<bool>(&mut app, "return (IsEquippedAction(1)) and true or false")
     };
     // Player slot 15 is the main hand, 23 the first backpack seat.
     assert!(equipped(486 + 2 * 15, 12), "a whole worn sword");
@@ -807,7 +790,7 @@ fn the_bars_ammo_leg_reads_the_subclass_flags() {
             equipped_item_subclass_mask: 1 << 16,
             ..Default::default()
         };
-        let mut app = feed_app(
+        let mut app = bar_app(
             &[(0, THROW, ACTION_KIND_SPELL)],
             catalog(vec![(THROW, throw)], &[]),
             5.0,
@@ -849,13 +832,9 @@ fn the_bars_ammo_leg_reads_the_subclass_flags() {
                 ObjectFields::from_pairs(&[(INV_RANGED, KNIFE as u32)]),
                 |_, _, _| {},
             );
-        app.update();
         // The world entry's refresh stores the pair `IsUsableAction` reads (`0x490979`).
         enter_refresh(&mut app);
-        app.world()
-            .non_send_resource::<UiScript>()
-            .eval::<bool>("return (IsUsableAction(1)) and true or false")
-            .unwrap()
+        live::<bool>(&mut app, "return (IsUsableAction(1)) and true or false")
     };
     assert!(lit(0x10), "a subclass that fires no ammo");
     assert!(!lit(0), "the same weapon, needing its ammo");
@@ -901,11 +880,8 @@ fn lost_control_greys_the_bar_but_the_immunity_spell() {
             .buttons
             .insert(slot, ActionButton { slot, action, kind });
     }
-    let mut bound = crate::ui_macro::MacroBoundSpells::default();
-    bound.0.insert(1, crate::ui_macro::BoundSpell::None.into());
     app.insert_resource(PlayerActions::default())
         .insert_resource(slots)
-        .insert_resource(bound)
         .insert_resource(Spells {
             catalog: benilla_formats::SpellCatalog::from_displays(
                 [
@@ -936,7 +912,7 @@ fn lost_control_greys_the_bar_but_the_immunity_spell() {
         .init_resource::<crate::net::Reputations>()
         .init_resource::<Items>()
         .insert_resource(NetCommands(tx));
-    feed_inputs(&mut app);
+    walk_inputs(&mut app);
     app.world_mut().spawn((
         SelfPlayer,
         Transform::default(),
@@ -947,7 +923,11 @@ fn lost_control_greys_the_bar_but_the_immunity_spell() {
             (47, FEAR_AURA),
         ])),
     ));
-    let script = UiScript::new().unwrap();
+    let mut script = UiScript::new().unwrap();
+    crate::ui_macro::bind_for_test(
+        &mut script,
+        &[(1, crate::ui_macro::BoundSpell::None.into())],
+    );
     script
         .run(
             r#"
@@ -959,7 +939,7 @@ fn lost_control_greys_the_bar_but_the_immunity_spell() {
         )
         .unwrap();
     app.insert_non_send_resource(script);
-    add_action_feed(&mut app);
+    add_bar(&mut app);
     let events = |app: &mut App| -> i64 {
         let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
         s.resolve();
@@ -967,13 +947,13 @@ fn lost_control_greys_the_bar_but_the_immunity_spell() {
             .unwrap()
     };
 
-    let lit = |app: &App| -> Vec<bool> {
-        let script = app.world().non_send_resource::<UiScript>();
+    let lit = |app: &mut App| -> Vec<bool> {
         (1..=3)
             .map(|n| {
-                script
-                    .eval::<bool>(&format!("return (IsUsableAction({n})) and true or false"))
-                    .unwrap()
+                live::<bool>(
+                    app,
+                    &format!("return (IsUsableAction({n})) and true or false"),
+                )
             })
             .collect()
     };
@@ -982,16 +962,16 @@ fn lost_control_greys_the_bar_but_the_immunity_spell() {
     // The world entry's refresh stores the pairs `IsUsableAction` reads (`0x490979`).
     enter_refresh(&mut app);
     assert_eq!(
-        lit(&app),
+        lit(&mut app),
         [true, true, true],
         "in control, the whole bar is lit"
     );
-    events(&mut app); // the first push's own signal
+    events(&mut app);
 
     set_control_in_place(&mut app, true);
     app.update();
     assert_eq!(
-        lit(&app),
+        lit(&mut app),
         [false, true, false],
         "only the fear immunity stays lit"
     );
@@ -999,12 +979,16 @@ fn lost_control_greys_the_bar_but_the_immunity_spell() {
 
     set_control_in_place(&mut app, false);
     app.update();
-    assert_eq!(lit(&app), [true, true, true], "control back, all lit again");
+    assert_eq!(
+        lit(&mut app),
+        [true, true, true],
+        "control back, all lit again"
+    );
     assert_eq!(events(&mut app), 1);
 }
 
-/// A held action (Stealth) reaches the VM as the held marker, and `GetActionCooldown` answers
-/// the poll's own now (`0x6e1517`) with no feed change between polls.
+/// A held action (Stealth) reads as the held marker, and `GetActionCooldown` answers the poll's
+/// own now (`0x6e1517`), each poll at its own call.
 #[test]
 fn a_held_action_polls_answer_their_own_now() {
     use benilla_protocol::messages::ActionButton;
@@ -1029,7 +1013,6 @@ fn a_held_action_polls_answer_their_own_now() {
     );
     app.insert_resource(PlayerActions::default())
         .insert_resource(slots)
-        .insert_resource(crate::ui_macro::MacroBoundSpells::default())
         .insert_resource(Spells {
             catalog: benilla_formats::SpellCatalog::from_displays(
                 [(STEALTH, stealth())].into_iter().collect(),
@@ -1052,7 +1035,7 @@ fn a_held_action_polls_answer_their_own_now() {
         .init_resource::<crate::net::Reputations>()
         .init_resource::<Items>()
         .insert_resource(NetCommands(tx));
-    feed_inputs(&mut app);
+    walk_inputs(&mut app);
     app.world_mut().spawn((
         SelfPlayer,
         Transform::default(),
@@ -1066,23 +1049,21 @@ fn a_held_action_polls_answer_their_own_now() {
         None,
     );
     app.insert_non_send_resource(UiScript::new().unwrap());
-    add_action_feed(&mut app);
+    add_bar(&mut app);
 
-    let read = |app: &App| {
-        let script = app.world().non_send_resource::<UiScript>();
-        let (start, duration, enable) = script
-            .eval::<(f64, f64, i64)>("return GetActionCooldown(1)")
-            .unwrap();
-        (start, duration, enable, script.now())
+    let read = |app: &mut App| {
+        let (start, duration, enable) = live::<(f64, f64, i64)>(app, "return GetActionCooldown(1)");
+        let now = app.world().non_send_resource::<UiScript>().now();
+        (start, duration, enable, now)
     };
     app.update();
-    let first = read(&app);
+    let first = read(&mut app);
     assert_eq!((first.1, first.2), (0.001, 0), "(now, 0.001, 0)");
     assert_eq!(first.0, first.3);
     app.world_mut()
         .non_send_resource_mut::<UiScript>()
         .tick(0.02);
-    let second = read(&app);
+    let second = read(&mut app);
     assert_eq!(second.0, second.3, "the poll answers its own now");
     assert!((second.0 - first.0 - 0.02).abs() < 1e-9, "20 ms apart");
 }
@@ -1090,10 +1071,10 @@ fn a_held_action_polls_answer_their_own_now() {
 /// The second unit the producer and range tests stand around the player.
 const OTHER: u64 = 0xB2;
 
-/// The feed with `buttons` (wire slot, action, kind) on the bar and `spells` in the catalog: the
+/// The bar with `buttons` (wire slot, action, kind) on it and `spells` in the catalog: the
 /// player [`PLAYER`] at the origin, guid [`ME`], and [`OTHER`] a [`MOB`] `x` yards east, nobody
 /// selected.
-fn feed_app(buttons: &[(u8, u32, u8)], spells: Spells, x: f32) -> App {
+fn bar_app(buttons: &[(u8, u32, u8)], spells: Spells, x: f32) -> App {
     use benilla_protocol::messages::ActionButton;
     use benilla_protocol::ObjectFields;
     let (tx, _rx) = crossbeam_channel::unbounded();
@@ -1107,7 +1088,6 @@ fn feed_app(buttons: &[(u8, u32, u8)], spells: Spells, x: f32) -> App {
     app.insert_resource(PlayerActions::default())
         .insert_resource(slots)
         .insert_resource(spells)
-        .init_resource::<crate::ui_macro::MacroBoundSpells>()
         .init_resource::<Cooldowns>()
         .init_resource::<crate::spell::SpellModifiers>()
         .init_resource::<crate::ui_script::UiClock>()
@@ -1123,7 +1103,7 @@ fn feed_app(buttons: &[(u8, u32, u8)], spells: Spells, x: f32) -> App {
         .init_resource::<crate::player::OwnControlLost>()
         .init_resource::<Items>()
         .insert_resource(NetCommands(tx));
-    feed_inputs(&mut app);
+    walk_inputs(&mut app);
     let world = app.world_mut();
     let me = world
         .spawn((
@@ -1143,8 +1123,21 @@ fn feed_app(buttons: &[(u8, u32, u8)], spells: Spells, x: f32) -> App {
     let mut index = world.resource_mut::<crate::net::GuidIndex>();
     index.0.insert(ME, me);
     index.0.insert(OTHER, other);
-    app.insert_non_send_resource(UiScript::new().unwrap());
-    add_action_feed(&mut app);
+    // The VM's copy of each slot, as our player's arrival writes it.
+    let mut script = UiScript::new().unwrap();
+    for &(slot, action, kind) in buttons {
+        script.set_action(
+            u32::from(slot) + 1,
+            Some(benilla_ui::script::ActionSlot {
+                kind,
+                action,
+                ..Default::default()
+            }),
+        );
+    }
+    app.insert_non_send_resource(script);
+    add_bar(&mut app);
+    write_all(&mut app);
     app
 }
 
@@ -1194,7 +1187,7 @@ fn record(app: &mut App, events: &[&str]) {
         .unwrap();
 }
 
-/// One frame of the feed, and what the recorder heard in it.
+/// One frame, and what the recorder heard in it.
 fn frame(app: &mut App) -> Vec<String> {
     app.update();
     let script = app.world().non_send_resource::<UiScript>();
@@ -1241,7 +1234,7 @@ fn is_action_in_range_compares_only_where_a_relation_admits_the_target() {
             vec![(FIREBALL, spell(6)), (HEAL, spell(21)), (NOVA, spell(22))],
             &[(4, 0.0, 30.0)],
         );
-        let mut app = feed_app(
+        let mut app = bar_app(
             &[
                 (0, FIREBALL, ACTION_KIND_SPELL),
                 (1, HEAL, ACTION_KIND_SPELL),
@@ -1259,14 +1252,8 @@ fn is_action_in_range_compares_only_where_a_relation_admits_the_target() {
                 (46, flags),
             ])));
         select(&mut app, selected);
-        app.update();
-        let script = app.world().non_send_resource::<UiScript>();
         (1..=3)
-            .map(|n| {
-                script
-                    .eval::<Option<i64>>(&format!("return IsActionInRange({n})"))
-                    .unwrap()
-            })
+            .map(|n| live::<Option<i64>>(&mut app, &format!("return IsActionInRange({n})")))
             .collect::<Vec<_>>()
     };
     assert_eq!(
@@ -1307,7 +1294,7 @@ fn get_action_cooldown_enables_only_the_slots_that_reach_a_query() {
     const HEARTHSTONE: u32 = 6948;
     const LINEN: u32 = 2589;
     const UNCACHED: u32 = 4306;
-    let mut app = feed_app(
+    let mut app = bar_app(
         &[
             (0, 133, ACTION_KIND_SPELL),
             (1, 999_999, ACTION_KIND_SPELL),
@@ -1321,10 +1308,13 @@ fn get_action_cooldown_enables_only_the_slots_that_reach_a_query() {
         catalog(vec![(133, SpellDisplay::default())], &[]),
         5.0,
     );
-    let mut bound = crate::ui_macro::MacroBoundSpells::default();
-    bound.0.insert(1, BoundSpell::None.into());
-    bound.0.insert(2, BoundSpell::Unresolved.into());
-    app.insert_resource(bound);
+    crate::ui_macro::bind_for_test(
+        &mut app.world_mut().non_send_resource_mut::<UiScript>(),
+        &[
+            (1, BoundSpell::None.into()),
+            (2, BoundSpell::Unresolved.into()),
+        ],
+    );
     let mut items = app.world_mut().resource_mut::<Items>();
     items.insert_template(
         HEARTHSTONE,
@@ -1339,12 +1329,11 @@ fn get_action_cooldown_enables_only_the_slots_that_reach_a_query() {
         }),
     );
     items.insert_template(LINEN, Some(crate::items::test_template("Linen Cloth")));
-    app.update();
-    let script = app.world().non_send_resource::<UiScript>();
-    let enable = |n: u32| {
-        script
-            .eval::<i64>(&format!("local _, _, e = GetActionCooldown({n}) return e"))
-            .unwrap()
+    let mut enable = |n: u32| {
+        live::<i64>(
+            &mut app,
+            &format!("local _, _, e = GetActionCooldown({n}) return e"),
+        )
     };
     assert_eq!(enable(1), 1, "a spell");
     assert_eq!(
@@ -1361,26 +1350,24 @@ fn get_action_cooldown_enables_only_the_slots_that_reach_a_query() {
     assert_eq!(enable(9), 0, "an empty slot");
 }
 
-/// The feed seats an item slot's entry, which `IsCurrentAction`'s item arm holds against the
+/// An item slot's state names its entry, which `IsCurrentAction`'s item arm holds against the
 /// in-flight cast's item (`0x4e53fc`-`0x4e5428`).
 #[test]
 fn an_item_slot_is_current_while_its_items_cast_is_in_flight() {
     const HEARTHSTONE: u32 = 6948;
-    let mut app = feed_app(
+    let mut app = bar_app(
         &[(0, HEARTHSTONE, ACTION_KIND_ITEM)],
         Spells::empty_for_tests(),
         5.0,
     );
-    app.update();
-    let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
-    script.set_cast_view(benilla_ui::script::CastView {
-        slot: Some(8690),
-        item: Some(HEARTHSTONE),
-        ..Default::default()
-    });
-    assert!(script
-        .eval::<bool>("return IsCurrentAction(1) == 1")
-        .unwrap());
+    app.world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .set_cast_view(benilla_ui::script::CastView {
+            slot: Some(8690),
+            item: Some(HEARTHSTONE),
+            ..Default::default()
+        });
+    assert!(live::<bool>(&mut app, "return IsCurrentAction(1) == 1"));
 }
 
 /// Every caller of the usable refresh `0x4b31c0` signals `SPELL_UPDATE_USABLE` (`0x4b3246`),
@@ -1388,11 +1375,11 @@ fn an_item_slot_is_current_while_its_items_cast_is_in_flight() {
 /// cooldown's start (`0x6e2e85`) and the start or removal of a spell's records (`0x6e3076`), which
 /// the cooldown lane signals at each. The selection's select and clear refresh inside
 /// `SetSelection` (`0x493892`, `0x493a69`), and the field watchers and the control flag inside
-/// their packets (`crate::field_watch`), so a descriptor, a selection or a flag the feed sees
+/// their packets (`crate::field_watch`), so a descriptor, a selection or a flag a frame sees
 /// change signals nothing here.
 #[test]
 fn spell_update_usable_fires_from_every_usable_refresh_and_once_a_frame() {
-    let mut app = feed_app(&[], Spells::empty_for_tests(), 5.0);
+    let mut app = bar_app(&[], Spells::empty_for_tests(), 5.0);
     record(
         &mut app,
         &["ACTIONBAR_UPDATE_USABLE", "SPELL_UPDATE_USABLE"],
@@ -1402,7 +1389,7 @@ fn spell_update_usable_fires_from_every_usable_refresh_and_once_a_frame() {
     assert!(frame(&mut app).is_empty(), "nor a quiet frame");
 
     set_mana_quietly(&mut app, 480);
-    assert!(frame(&mut app).is_empty(), "a power change the feed sees");
+    assert!(frame(&mut app).is_empty(), "a power change a frame sees");
 
     select(&mut app, Some(OTHER));
     assert!(frame(&mut app).is_empty(), "the select its call refreshes");
@@ -1445,7 +1432,7 @@ fn spell_update_usable_fires_from_every_usable_refresh_and_once_a_frame() {
 /// `SPELL_UPDATE_USABLE` (`0x4b3246`), the pair `0x4b31c0` raises in that order.
 #[test]
 fn a_refresh_that_changes_a_slot_signals_the_bar_then_the_spells() {
-    let mut app = feed_app(
+    let mut app = bar_app(
         &[(0, 133, ACTION_KIND_SPELL)],
         catalog(vec![(133, SpellDisplay::default())], &[]),
         5.0,
@@ -1464,10 +1451,10 @@ fn a_refresh_that_changes_a_slot_signals_the_bar_then_the_spells() {
     );
 }
 
-/// The action feed beside the unit feed, with a recorder whose `SPELL_UPDATE_USABLE` line carries
+/// The bar beside the unit feed, with a recorder whose `SPELL_UPDATE_USABLE` line carries
 /// what its handler read: `HasFullControl()`, `UnitExists("target")` and `UnitHealth("player")`.
 fn usable_reader_app() -> App {
-    let mut app = feed_app(
+    let mut app = bar_app(
         &[(0, 133, ACTION_KIND_SPELL)],
         catalog(vec![(133, SpellDisplay::default())], &[]),
         5.0,
@@ -1527,14 +1514,14 @@ fn a_usable_handler_reads_this_frames_target_and_health() {
     );
 }
 
-/// A selection call's usable refresh (`0x4b31c0` at `0x493892`) that runs ahead of the feed's
-/// first pass on a new VM leaves that pass the new VM's: the cooldown list's refresh and flush
-/// counts an earlier VM ran up (`0x6e2e85`, `0x6e3076`) reach it as the state it meets, and it
-/// signals neither `SPELL_UPDATE_USABLE` nor `BAG_UPDATE_COOLDOWN`.
+/// A selection call's usable refresh (`0x4b31c0` at `0x493892`) that runs ahead of the cooldown
+/// lane's first firing on a new VM leaves that firing the new VM's: the cooldown list's refresh and
+/// flush counts an earlier VM ran up (`0x6e2e85`, `0x6e3076`) reach it as the state it meets, and
+/// it signals neither `SPELL_UPDATE_USABLE` nor `BAG_UPDATE_COOLDOWN`.
 #[test]
-fn a_calls_refresh_ahead_of_the_feed_leaves_the_new_vm_its_first_pass() {
+fn a_calls_refresh_ahead_of_the_lane_leaves_the_new_vm_its_first_firing() {
     use bevy::ecs::system::RunSystemOnce;
-    let mut app = feed_app(&[], Spells::empty_for_tests(), 5.0);
+    let mut app = bar_app(&[], Spells::empty_for_tests(), 5.0);
     {
         let mut cds = app.world_mut().resource_mut::<Cooldowns>();
         cds.usable_refreshes = 3;
@@ -1570,7 +1557,7 @@ fn a_calls_refresh_ahead_of_the_feed_leaves_the_new_vm_its_first_pass() {
 #[test]
 fn bag_update_cooldown_fires_from_the_item_legs_alone() {
     const PAIR: [&str; 2] = ["ACTIONBAR_UPDATE_COOLDOWN", "SPELL_UPDATE_COOLDOWN"];
-    let mut app = feed_app(&[], Spells::empty_for_tests(), 5.0);
+    let mut app = bar_app(&[], Spells::empty_for_tests(), 5.0);
     record(
         &mut app,
         &[
@@ -1654,7 +1641,7 @@ fn an_item_slots_record_landing_flushes_its_running_cooldown() {
     const HEARTHSTONE: u32 = 6948;
     const HEARTH: u32 = 8690;
     const LINEN: u32 = 2589;
-    let mut app = feed_app(
+    let mut app = bar_app(
         &[
             (0, HEARTHSTONE, ACTION_KIND_ITEM),
             (1, LINEN, ACTION_KIND_ITEM),
@@ -1674,6 +1661,9 @@ fn an_item_slots_record_landing_flushes_its_running_cooldown() {
         .resource_mut::<Cooldowns>()
         .apply_wire_item_cooldown(HEARTHSTONE, HEARTH, Instant::now());
     frame(&mut app);
+    // The buttons' cooldown reads (`ActionButton_UpdateCooldown`), whose query asks each missing
+    // record (`0x6e2ed0`).
+    live::<()>(&mut app, "GetActionCooldown(1) GetActionCooldown(2)");
     assert!(frame(&mut app).is_empty(), "the slot waits for its record");
     let hearthstone = benilla_protocol::messages::ItemInfo {
         use_spell: Some(ItemUseSpell {
@@ -1684,9 +1674,7 @@ fn an_item_slots_record_landing_flushes_its_running_cooldown() {
         }),
         ..crate::items::test_template("Hearthstone")
     };
-    app.world_mut()
-        .resource_mut::<Items>()
-        .insert_template(HEARTHSTONE, Some(hearthstone));
+    crate::net::answer_item(app.world_mut(), HEARTHSTONE, Some(hearthstone));
     assert_eq!(
         frame(&mut app),
         [
@@ -1697,9 +1685,11 @@ fn an_item_slots_record_landing_flushes_its_running_cooldown() {
         "the record lands on a running cooldown"
     );
     assert!(frame(&mut app).is_empty(), "once");
-    app.world_mut()
-        .resource_mut::<Items>()
-        .insert_template(LINEN, Some(crate::items::test_template("Linen Cloth")));
+    crate::net::answer_item(
+        app.world_mut(),
+        LINEN,
+        Some(crate::items::test_template("Linen Cloth")),
+    );
     assert!(
         frame(&mut app).is_empty(),
         "a record landing with nothing running"
@@ -1731,7 +1721,7 @@ fn hearthstone_record() -> benilla_protocol::messages::ItemInfo {
 #[test]
 fn a_record_landing_after_its_slot_was_cleared_still_flushes() {
     const HEARTHSTONE: u32 = 6948;
-    let mut app = feed_app(
+    let mut app = bar_app(
         &[(0, HEARTHSTONE, ACTION_KIND_ITEM)],
         Spells::empty_for_tests(),
         5.0,
@@ -1741,6 +1731,7 @@ fn a_record_landing_after_its_slot_was_cleared_still_flushes() {
         .resource_mut::<Cooldowns>()
         .apply_wire_item_cooldown(HEARTHSTONE, 8690, Instant::now());
     frame(&mut app);
+    live::<()>(&mut app, "GetActionCooldown(1)");
     app.world_mut()
         .resource_mut::<ActionSlots>()
         .buttons
@@ -1749,9 +1740,7 @@ fn a_record_landing_after_its_slot_was_cleared_still_flushes() {
         frame(&mut app).is_empty(),
         "the slot is gone, its ask is not"
     );
-    app.world_mut()
-        .resource_mut::<Items>()
-        .insert_template(HEARTHSTONE, Some(hearthstone_record()));
+    crate::net::answer_item(app.world_mut(), HEARTHSTONE, Some(hearthstone_record()));
     assert_eq!(frame(&mut app), RECORD_FLUSH);
 }
 
@@ -1762,7 +1751,7 @@ fn a_record_landing_after_its_slot_was_cleared_still_flushes() {
 fn a_bag_query_on_a_missing_record_flushes_when_the_record_lands() {
     use benilla_ui::script::{ContainerSlot, ContainerState};
     const HEARTHSTONE: u32 = 6948;
-    let mut app = feed_app(&[], Spells::empty_for_tests(), 5.0);
+    let mut app = bar_app(&[], Spells::empty_for_tests(), 5.0);
     record(&mut app, &RECORD_FLUSH);
     app.world_mut()
         .non_send_resource_mut::<UiScript>()
@@ -1791,79 +1780,21 @@ fn a_bag_query_on_a_missing_record_flushes_when_the_record_lands() {
         s.run("GetContainerItemCooldown(0, 1)").unwrap();
         s.take_cooldown_record_asks()
     };
-    // The lookup the host makes inside the call ([`Cooldowns::ask_item_record`]).
-    app.world_mut()
-        .resource_scope(|world, mut cooldowns: Mut<Cooldowns>| {
-            for entry in entries {
-                cooldowns.ask_item_record(
-                    world.resource::<Items>(),
-                    world.resource::<crate::net::NetCommands>(),
-                    entry,
-                    0,
-                );
-            }
-        });
-    assert!(frame(&mut app).is_empty(), "asked, and waiting");
-    app.world_mut()
-        .resource_mut::<Items>()
-        .insert_template(HEARTHSTONE, Some(hearthstone_record()));
-    assert_eq!(frame(&mut app), RECORD_FLUSH);
-    assert!(frame(&mut app).is_empty(), "once");
-}
-
-/// The feed's push half runs ahead of its fire half, whose signals come ahead of the events its
-/// producers precede: `UNIT_HEALTH` and `UNIT_MANA` (the type watchers ahead of the object's bridge at one field, `0x46544a`),
-/// `PLAYER_REGEN_DISABLED` (`0x5ff51b` ahead of `0x5ff533`), `PLAYER_COMBO_POINTS` (`0x5ddff0`)
-/// and the form's cast change (`0x5de011` ahead of `0x5de016`). Read off the declared graph; skips
-/// where bevy carries no system names.
-#[test]
-fn the_feed_pushes_then_signals_ahead_of_the_events_its_producers_precede() {
-    use crate::game_plugins::schedule_tests::{census, headless_client, SyncPoints};
-    use std::collections::HashSet;
-
-    let mut app = headless_client();
-    let c = census(&mut app, Update, SyncPoints::Declared);
-    let named = |needle: &str| {
-        let hits: Vec<_> = c
-            .systems
-            .iter()
-            .filter(|(_, s)| s.name.ends_with(needle))
-            .map(|(k, _)| *k)
-            .collect();
-        (!hits.is_empty()).then(|| {
-            assert_eq!(hits.len(), 1, "one system named {needle}");
-            hits[0]
-        })
-    };
-    let Some(push) = named("::feed_action_state") else {
-        eprintln!("skipped: this build carries no system names");
-        return;
-    };
-    let mut after: HashMap<_, Vec<_>> = HashMap::new();
-    for (a, b) in &c.dependencies {
-        after.entry(*a).or_default().push(*b);
-    }
-    let later_than = |from| {
-        let (mut seen, mut stack) = (HashSet::new(), vec![from]);
-        while let Some(n) = stack.pop() {
-            for m in after.get(&n).into_iter().flatten() {
-                if seen.insert(*m) {
-                    stack.push(*m);
-                }
-            }
-        }
-        seen
-    };
-    let key = |name: &str| named(name).unwrap_or_else(|| panic!("{name} is scheduled"));
-    let fire = key("::fire_action_events");
-    assert!(later_than(push).contains(&fire), "the push half runs first");
-    let seen = later_than(fire);
-    for later in ["::lanes::fire_in_order", "::ui_cast::feed_cast_reports"] {
-        assert!(
-            seen.contains(&key(later)),
-            "the fire half runs before {later}"
+    // The lookup the host makes inside the call ([`Cooldowns::query_record`]).
+    let world = app.world();
+    for entry in entries {
+        Cooldowns::query_record(
+            world.resource::<Items>(),
+            world.resource::<crate::net::NetCommands>(),
+            entry,
+            0,
+            true,
         );
     }
+    assert!(frame(&mut app).is_empty(), "asked, and waiting");
+    crate::net::answer_item(app.world_mut(), HEARTHSTONE, Some(hearthstone_record()));
+    assert_eq!(frame(&mut app), RECORD_FLUSH);
+    assert!(frame(&mut app).is_empty(), "once");
 }
 
 /// Sets the player's mana to `mana` with no values block, so no watcher runs.
@@ -1885,7 +1816,7 @@ fn set_mana_quietly(app: &mut App, mana: u32) {
 #[test]
 fn placing_or_clearing_a_slot_stores_its_pair_with_no_usable_event() {
     use benilla_protocol::messages::ActionButton;
-    let mut app = feed_app(
+    let mut app = bar_app(
         &[(0, 133, ACTION_KIND_SPELL)],
         catalog(
             vec![
@@ -1916,6 +1847,7 @@ fn placing_or_clearing_a_slot_stores_its_pair_with_no_usable_event() {
                 kind: ACTION_KIND_SPELL,
             },
         );
+    written(&mut app, 2);
     assert!(frame(&mut app).is_empty(), "a placed spell");
     super::super::run_watcher_refresh_once(app.world_mut());
     assert_eq!(
@@ -1927,24 +1859,27 @@ fn placing_or_clearing_a_slot_stores_its_pair_with_no_usable_event() {
         .resource_mut::<ActionSlots>()
         .buttons
         .remove(&1);
+    written(&mut app, 2);
     assert!(frame(&mut app).is_empty(), "a cleared slot");
 }
 
 /// `0x4e5c00` signals `ACTIONBAR_UPDATE_USABLE` alone for its callers other than `0x4b31c0`: a
 /// reload's world entry against the cache the last VM left (`0x4e4f90`; the cache is zeroed only
 /// by `InitializeGame`, `0x4e4f50`), which the enter cascade refreshes and signals inside itself
-/// (`0x490979`), each `BAG_UPDATE` (`0x4f9374`) and `EditMacro` (`0x4f132e`). A pair that changed
-/// with no refresh signals nothing, a new VM's feed included. Our player's arrival writes every
-/// slot before its enter cascade refreshes (`0x5deafc`, `0x5deb60`), so it signals nothing; a
-/// reload writes none (`0x495664` reaches no `0x5dea50`).
+/// (`0x490979`). A pair that changed with no refresh signals nothing, a new VM's first frame
+/// included.
+/// Our player's arrival writes every slot before its enter cascade refreshes (`0x5deafc`,
+/// `0x5deb60`), so it signals nothing; a reload writes none (`0x495664` reaches no `0x5dea50`).
+/// `EditMacro`'s and `RaiseBagUpdate`'s refreshes run in their places
+/// (`crate::lanes::action_live_tests`).
 #[test]
-fn the_cache_refreshes_alone_at_a_reload_a_bag_update_and_a_macro_edit() {
+fn the_cache_refreshes_alone_at_a_reload() {
     const FROSTBOLT: u32 = 116;
     let costly = SpellDisplay {
         mana_cost: 400,
         ..Default::default()
     };
-    let mut app = feed_app(
+    let mut app = bar_app(
         &[(0, FROSTBOLT, ACTION_KIND_SPELL)],
         catalog(vec![(FROSTBOLT, costly)], &[]),
         5.0,
@@ -1963,34 +1898,12 @@ fn the_cache_refreshes_alone_at_a_reload_a_bag_update_and_a_macro_edit() {
     record(&mut app, &USABLE);
     assert!(
         frame(&mut app).is_empty(),
-        "the new VM's feed refreshes nothing"
+        "the new VM's first frame refreshes nothing"
     );
     assert!(
         enter_refresh(&mut app),
         "a reload's world entry finds the pair the last VM's cache held changed"
     );
-
-    set_mana_quietly(&mut app, 500);
-    assert!(frame(&mut app).is_empty());
-    app.world_mut()
-        .resource_mut::<crate::item_lane::ItemLane>()
-        .push(crate::item_watch::Run {
-            bags: vec![crate::item_watch::BagEvent::Raise(None)],
-            ..Default::default()
-        });
-    assert_eq!(
-        frame(&mut app),
-        ["ACTIONBAR_UPDATE_USABLE"],
-        "a RaiseBagUpdate, even one that signals nothing (`0x4f9374`)"
-    );
-
-    set_mana_quietly(&mut app, 100);
-    assert!(frame(&mut app).is_empty());
-    app.world()
-        .non_send_resource::<UiScript>()
-        .run("CreateMacro('m', 1, '/say hi', 1) EditMacro(1, 'n')")
-        .unwrap();
-    assert_eq!(frame(&mut app), ["ACTIONBAR_UPDATE_USABLE"], "an EditMacro");
 
     set_mana_quietly(&mut app, 500);
     assert!(frame(&mut app).is_empty());
@@ -2009,13 +1922,15 @@ fn enter_refresh(app: &mut App) -> bool {
     app.world_mut()
         .run_system_once(
             |mut states: ActionStates, mut script: NonSendMut<UiScript>| {
-                states.enter_world_refresh(&mut script)
+                states.cache_refresh(&mut script)
             },
         )
         .expect("the refresh runs")
 }
 
-/// Our player created anew with `mana`, whose arrival's slot pass the next feed stores.
+/// Our player created anew with `mana`, and its arrival's load and slot pass over the bar's words
+/// as the server holds them, staged again by a worldport's `SMSG_ACTION_BUTTONS` (the bar is
+/// client-authoritative).
 fn arrive(app: &mut App, mana: u32) {
     let old = app.world().resource::<crate::net::GuidIndex>().0[&ME];
     app.world_mut().despawn(old);
@@ -2035,6 +1950,49 @@ fn arrive(app: &mut App, mana: u32) {
         .resource_mut::<crate::net::GuidIndex>()
         .0
         .insert(ME, me);
+    use bevy::ecs::system::RunSystemOnce;
+    let loaded = app
+        .world_mut()
+        .run_system_once(
+            |mut slots: ResMut<ActionSlots>, actions: Res<PlayerActions>| {
+                slots.staged = slots.buttons.clone();
+                slots.load_staged(|word| actions.spells.contains(&word))
+            },
+        )
+        .expect("the arrival's load runs");
+    app.world_mut()
+        .run_system_once(
+            move |mut states: ActionStates, mut script: NonSendMut<UiScript>| {
+                states.arrival_slots(&mut script, &loaded);
+            },
+        )
+        .expect("the arrival's slot pass runs");
+}
+
+/// `0x4e58e0` for the 1-based `action`: its pair stored, as a write stores it.
+fn written(app: &mut App, action: u32) {
+    use bevy::ecs::system::RunSystemOnce;
+    app.world_mut()
+        .run_system_once(
+            move |mut states: ActionStates, mut script: NonSendMut<UiScript>| {
+                states.slot_written(&mut script, action);
+            },
+        )
+        .expect("the write runs");
+}
+
+/// Each occupied slot written, as the bar's load stores its pairs.
+fn write_all(app: &mut App) {
+    let actions: Vec<u32> = app
+        .world()
+        .resource::<ActionSlots>()
+        .buttons
+        .keys()
+        .map(|&slot| u32::from(slot) + 1)
+        .collect();
+    for action in actions {
+        written(app, action);
+    }
 }
 
 /// The arrival's loop (`0x5deae2`-`0x5deb12`) writes each slot but a spell word the player does
@@ -2048,7 +2006,7 @@ fn an_arrival_skips_a_spell_the_player_does_not_know() {
         mana_cost: 400,
         ..Default::default()
     };
-    let mut app = feed_app(
+    let mut app = bar_app(
         &[
             (0, FROSTBOLT, ACTION_KIND_SPELL),
             (1, BLIZZARD, ACTION_KIND_SPELL),
@@ -2088,7 +2046,7 @@ fn an_arrival_skips_a_spell_the_player_does_not_know() {
 /// pet's history (`0x6e2ea0` with the pet selector), and no range at all (`0x4e5759`, `0x4e584d`).
 #[test]
 fn a_macro_bound_to_a_pet_spell_reads_the_pets_gate_power_and_history() {
-    use crate::ui_macro::{Bound, BoundSpell, MacroBoundSpells};
+    use crate::ui_macro::{Bound, BoundSpell};
     use crate::ui_pet::PetBar;
     use benilla_protocol::ObjectFields;
 
@@ -2112,22 +2070,25 @@ fn a_macro_bound_to_a_pet_spell_reads_the_pets_gate_power_and_history() {
         effect_implicit_target_a: [6, 0, 0],
         ..Default::default()
     };
-    // One fresh client per pet state, read after its first frame, which is a refresh of the usable
-    // cache (`0x4e5c00`, the new VM's). `IsUsableAction` answers that cache (`0x4e7403` into
-    // `0x4e5230`), and the power watch refreshes it only for the active player (`0x60486b`), so
-    // what this asserts is what a refresh finds, not that the button follows the pet's power.
+    // One fresh client per pet state, read after its slot is written, which stores its pair
+    // (`0x4e58e0`). `IsUsableAction` answers that cache (`0x4e7403` into `0x4e5230`), and the
+    // power watch refreshes it only for the active player (`0x60486b`), so what this asserts is
+    // what a write finds, not that the button follows the pet's power.
     let at_a_refresh = |power: u32, flags: u32| {
-        let mut app = feed_app(
+        let mut app = bar_app(
             &[(0, 1, MACRO_BAR)],
             catalog(vec![(SPELL_LOCK, lock())], &[(4, 0.0, 35.0)]),
             10.0,
         );
-        app.world_mut().resource_mut::<MacroBoundSpells>().0.insert(
-            1,
-            Bound {
-                spell: BoundSpell::Spell(SPELL_LOCK),
-                pet_book: true,
-            },
+        crate::ui_macro::bind_for_test(
+            &mut app.world_mut().non_send_resource_mut::<UiScript>(),
+            &[(
+                1,
+                Bound {
+                    spell: BoundSpell::Spell(SPELL_LOCK),
+                    pet_book: true,
+                },
+            )],
         );
         let pet = app
             .world_mut()
@@ -2148,15 +2109,13 @@ fn a_macro_bound_to_a_pet_spell_reads_the_pets_gate_power_and_history() {
         app.insert_resource(bar);
         // A hostile in range, where a player's own Spell Lock would read a range.
         select(&mut app, Some(OTHER));
-        app.update();
-        app.world()
-            .non_send_resource::<UiScript>()
-            .eval::<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, f64)>(
-                "local u, oom = IsUsableAction(1) \
-                 local _, d = GetActionCooldown(1) \
-                 return u, oom, ActionHasRange(1), IsActionInRange(1), d",
-            )
-            .unwrap()
+        write_all(&mut app);
+        live::<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, f64)>(
+            &mut app,
+            "local u, oom = IsUsableAction(1) \
+             local _, d = GetActionCooldown(1) \
+             return u, oom, ActionHasRange(1), IsActionInRange(1), d",
+        )
     };
 
     let (usable, oom, has_range, in_range, duration) = at_a_refresh(150, 0);
@@ -2180,52 +2139,4 @@ fn a_macro_bound_to_a_pet_spell_reads_the_pets_gate_power_and_history() {
     // Stunned (0x40000): the gate fails before the cost is read, so nothing is out of power.
     let (usable, oom, ..) = at_a_refresh(500, 0x4_0000);
     assert_eq!((usable, oom), (None, None));
-}
-
-/// `START_AUTOREPEAT_SPELL` and `STOP_AUTOREPEAT_SPELL` fire where the key changes, inside the send
-/// and the stop that change it (`0x6e5952`, `0x6ea170`), never off the frame's feed: a key the
-/// world entry zeroes (`0x6e730b`, which signals nothing) and a VM that arrives with one running
-/// see neither.
-#[test]
-fn the_feed_signals_no_auto_repeat_edge_of_its_own() {
-    let (tx, _rx) = crossbeam_channel::unbounded();
-    let mut app = App::new();
-    app.insert_resource(PlayerActions::default())
-        .init_resource::<crate::ui_action::ActionSlots>()
-        .insert_resource(crate::ui_macro::MacroBoundSpells::default())
-        .init_resource::<Cooldowns>()
-        .init_resource::<crate::spell::SpellModifiers>()
-        .init_resource::<crate::ui_script::UiClock>()
-        .insert_resource(AutoRepeatActive(Some(75)))
-        .init_resource::<crate::creature_anim::UnitEdits>()
-        .add_message::<crate::player::StandStateRequest>()
-        .init_resource::<crate::spell::PendingCast>()
-        .init_resource::<crate::spell::QueuedMeleeSpell>()
-        .init_resource::<crate::spell::ActiveChannel>()
-        .init_resource::<crate::spell::SpellTargeting>()
-        .init_resource::<crate::spell::HeldForPick>()
-        .init_resource::<Items>()
-        .insert_resource(NetCommands(tx));
-    feed_inputs(&mut app);
-    let script = UiScript::new().unwrap();
-    script
-        .run(
-            r#"SEEN = {}
-            local f = CreateFrame("Frame")
-            f:RegisterEvent("START_AUTOREPEAT_SPELL")
-            f:RegisterEvent("STOP_AUTOREPEAT_SPELL")
-            f:SetScript("OnEvent", function() table.insert(SEEN, event) end)"#,
-        )
-        .unwrap();
-    app.insert_non_send_resource(script);
-    add_action_feed(&mut app);
-    app.update();
-    app.world_mut().resource_mut::<AutoRepeatActive>().0 = None;
-    app.update();
-    let seen = app
-        .world()
-        .non_send_resource::<UiScript>()
-        .eval::<Vec<String>>("return SEEN")
-        .unwrap();
-    assert!(seen.is_empty(), "{seen:?}");
 }

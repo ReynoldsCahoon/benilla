@@ -285,6 +285,15 @@ impl WarmPass {
     pub(crate) fn anchors(&self, camera: Entity) -> bool {
         self.anchors.contains(&camera)
     }
+
+    /// A pass with its warm work done, for the cover's tests.
+    #[cfg(test)]
+    pub(crate) fn done_for_test() -> Self {
+        Self {
+            done: true,
+            ..Self::default()
+        }
+    }
 }
 
 /// How long after the last reveal `pending == 0` means drained: the counters cross worlds a frame

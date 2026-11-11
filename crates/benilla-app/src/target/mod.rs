@@ -13,11 +13,11 @@ use benilla_world::schedule::WorldStage;
 mod arm;
 #[cfg(test)]
 pub(crate) use crate::script_calls::{
-    error_lines, record_error_lines, release_click, take_error_lines,
+    click_plate, error_lines, record_error_lines, release_click, take_error_lines,
 };
 pub(crate) use arm::{
-    begin_records, plate_clicks_first, right_press_hook, run_world_clicks, world_steps, ArmTracer,
-    ClickArm, ClickLegs, WorldClickLegs,
+    begin_records, right_press_hook, run_world_clicks, world_steps, ArmTracer, ClickArm, ClickLegs,
+    WorldClickLegs,
 };
 mod by_name;
 // `pub(crate)` for the chest live probe, which drives the mouse's own `click::resolve_go_action`.
@@ -60,11 +60,7 @@ mod scan;
 mod script;
 pub(crate) use script::ScriptSelect;
 mod release;
-#[cfg(test)]
-pub(crate) use release::Releases;
-pub(crate) use release::{
-    drop_parked_releases, member as raid_member_or_pet, object_held, unit_released, OwedReleases,
-};
+pub(crate) use release::{member as raid_member_or_pet, object_held, unit_released, OwedReleases};
 #[cfg(test)]
 mod unheld_tests;
 
@@ -73,8 +69,9 @@ pub(crate) use cursor_mode::{
 };
 /// `GO_FLAG_LOCKED`, the bit the lock chain and the GameObject tooltip's "Locked" line read.
 pub(crate) use lock::GO_FLAG_LOCKED;
-// `OnDied`, which the update packet's field callbacks run on a unit's death edge.
-pub(crate) use died::died;
+// `OnDied`, which the update packet's field callbacks run on a unit's death edge, and the health
+// watcher's precast end after it.
+pub(crate) use died::{dead_selection_ends_precast, died};
 // This frame's combat-flash verdict, for the ring's material and the nameplate colour gate.
 pub(crate) use flash::CombatFlash;
 // The discount `0x612b80` the repair cost and the taxi fare take off their DBC prices.
@@ -92,12 +89,10 @@ pub(crate) use relations::{
 pub(crate) use scan::{fire_owed_selects_lane, take_owed_deselects, LastEnemy};
 pub(crate) use scan::{
     Acquire, AttackNearestRequest, AttackPick, CreatureTypes, Owed, OwedSelect, OwedSelects,
+    OwedWire,
 };
-// The chat layer's by-name asks (`/target`, `/assist`), and the typemask `TargetByName`'s
-// candidate feed shares.
-pub(crate) use by_name::{
-    assistable_alive, AssistRequest, Candidacy, NameSearch, PlayerLookup, TargetByNameRequest,
-};
+// The typemask `TargetByName`'s candidate feed shares.
+pub(crate) use by_name::{assistable_alive, Candidacy, NameSearch, PlayerLookup};
 // The one SetSelection path, for the loot response's select (`0x48f3a0`), and what a selecting
 // call owes after its signals.
 pub(crate) use by_name::{SelectCommit, SelectDebt};
@@ -111,7 +106,7 @@ pub(crate) use ring::{selection_variant, Factions, RingVariant};
 pub use click::Interact;
 pub(crate) use click::{
     clear_selection_on_world_teardown, clear_with_no_world, deselect_on_ui_shutdown,
-    signal_ui_shutdown_deselect,
+    signal_ui_shutdown_deselect, CursorLeg,
 };
 
 /// Our target, set the instant we click, as the 1.12 client does without waiting for the server.
@@ -216,8 +211,8 @@ pub(crate) struct PressPick {
     pub(crate) hovered: Hovered,
     pub(crate) object: HoveredObject,
     pub(crate) occlusion: PickOcclusion,
-    /// The context cursor as of the press, which the right-click ladder forks on; the reference's
-    /// new-target validation (`0x5ecb70`) also reads the press's pick, not a live one.
+    /// The context cursor as of the press, which the right-click ladder forks on. No select's
+    /// re-swing reads it: `Attack 0x5ecb70` judges the new unit itself (`scan::reswing_allowed`).
     pub(crate) cursor: cursor_mode::WorldCursor,
     /// The unit dispatcher's attack fork as of the press, which the sword alone cannot carry: the
     /// sword also needs the player's own legs, and a refused player still takes the attack arm.
@@ -230,11 +225,6 @@ impl PressPick {
     /// GameObject. Anything else is the ground or the sky.
     pub(crate) fn over_object(&self) -> bool {
         self.hovered.any().is_some() || self.hovered.refused || self.object.target.is_some()
-    }
-
-    /// Whether the press was an Attack-cursor press, for `0x5ecb70`'s new-target validation.
-    pub(crate) fn attack(&self) -> bool {
-        self.cursor.kind == cursor_mode::CursorKind::Attack
     }
 }
 
@@ -282,11 +272,33 @@ impl Default for ClickConfig {
 #[derive(Resource, Default)]
 pub(crate) struct AssistAttack(pub(crate) bool);
 
+/// `targetNearestDistance`, the TAB range in yards (`[0xb4e2a8]`, registered at `0x48fda4` with
+/// default "41.000000"): the record's float the collector squares at each press (`0x494350`,
+/// `0x49435d`).
+#[derive(Resource)]
+pub(crate) struct TabRange(pub(crate) f32);
+
+impl Default for TabRange {
+    fn default() -> Self {
+        Self(41.0)
+    }
+}
+
+/// `targetNearestDistance`'s change callback, past its range check (`0x490720`).
+pub(crate) fn on_tab_range(
+    ev: &crate::cvars::CvarChanged,
+    mut range: bevy::prelude::Mut<'_, TabRange>,
+) {
+    if ev.is("targetNearestDistance") {
+        range.0 = ev.num();
+    }
+}
+
 /// The targeting rows' change callback: two flags.
 pub(crate) fn on_cvar(
-    ev: On<crate::cvars::CvarChanged>,
-    mut click: ResMut<ClickConfig>,
-    mut assist: ResMut<AssistAttack>,
+    ev: &crate::cvars::CvarChanged,
+    mut click: bevy::prelude::Mut<'_, ClickConfig>,
+    mut assist: bevy::prelude::Mut<'_, AssistAttack>,
 ) {
     match ev.key().as_str() {
         "deselectonclick" => click.deselect_on_click = ev.flag(),
@@ -300,7 +312,6 @@ pub(crate) struct TargetPlugin;
 
 impl Plugin for TargetPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_cvar);
         // The update packet's field callbacks, a death's among them, after the net plugin's
         // update end, which writes their edges.
         crate::field_callbacks::register(app);
@@ -328,10 +339,8 @@ impl Plugin for TargetPlugin {
             .init_resource::<CombatFlash>()
             .init_resource::<scan::TabHistory>()
             .init_resource::<scan::LastEnemy>()
+            .init_resource::<TabRange>()
             .add_message::<AttackNearestRequest>()
-            .add_message::<TargetByNameRequest>()
-            .add_message::<AssistRequest>()
-            .add_message::<click::PlateRightClick>()
             .add_message::<Interact>()
             .add_systems(
                 Startup,
@@ -341,34 +350,17 @@ impl Plugin for TargetPlugin {
                     (ring::load_factions, scan::load_creature_types).after(AssetSet::Open),
                 ),
             )
-            // What no mouse command's call dispatches, where the frame's records begin and end,
-            // ahead of the packets, as the reference's world-frame handlers run in the window
-            // input (`0x423920` at `0x420d23`), in the dispatcher's order: a plate click's trade
-            // leg and select, the binds of the units the selects parked, the interacts, the drops
-            // and the casts the dispatchers queued.
+            // What no call dispatches, where the frame's records end, ahead of the packets, as
+            // the reference's world-frame handlers run in the window input (`0x423920` at
+            // `0x420d23`), in the dispatcher's order: a crate's interacts and the casts their
+            // dispatchers queued.
             .edit_schedule(WorldClickLegs, |legs| {
                 legs.set_executor_kind(bevy::ecs::schedule::ExecutorKind::SingleThreaded);
             })
             .add_systems(
                 WorldClickLegs,
                 (
-                    // A plate's left click's trade leg, ahead of the select in the same click
-                    // (`0x4925d0`), then the select.
-                    (
-                        crate::ui_action::drop_item::trade_on_plate_click,
-                        click::select_on_plate_click,
-                    )
-                        .chain(),
-                    // The units the plate selects parked with the targeting cursor up, bound to its
-                    // cast; then the unit interact of a nameplate's right-click and a crate's
-                    // `Interact`, so the cast goes out ahead of the interact it came with; then
-                    // `DropItemOnUnit`'s legs.
-                    (
-                        crate::script_calls::bind_parked_picks,
-                        click::act_on_interact,
-                        crate::ui_action::drop_item::drop_item_on_unit,
-                    )
-                        .chain(),
+                    click::act_on_interact,
                     // The casts the dispatchers queued (`0x5f35c0`, `0x5f06dc` → `0x6e5a90`).
                     crate::ui_action::drain_click_casts,
                 )
@@ -399,14 +391,6 @@ impl Plugin for TargetPlugin {
                         click::act_on_arrival,
                         crate::script_calls::bind_arrival_picks,
                         crate::ui_action::drain_arrival_casts,
-                    )
-                        .chain(),
-                    // The chat layer's by-name asks: `/target` and `/assist` commit through
-                    // `scan::commit`; `/follow` hands its subject to `crate::player`.
-                    (
-                        by_name::target_by_name_requests,
-                        by_name::assist_requests,
-                        by_name::follow_requests,
                     )
                         .chain(),
                     // The melee probe's press, the player's Attack; the TAB keys and ATTACKTARGET

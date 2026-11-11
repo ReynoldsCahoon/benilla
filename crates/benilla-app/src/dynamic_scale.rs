@@ -194,7 +194,13 @@ impl Plugin for DynamicScalePlugin {
         app.add_observer(on_cvar)
             .init_resource::<DynamicScaleConfig>()
             .init_resource::<DynamicScale>()
-            .add_systems(Update, hold_budget);
+            // After the frame's world stages, and before the render size reads the factor.
+            .add_systems(
+                Update,
+                hold_budget
+                    .after(benilla_world::schedule::WorldStage::Present)
+                    .before(crate::world_backdrop::track_render_size),
+            );
     }
 }
 

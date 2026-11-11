@@ -271,7 +271,7 @@ pub(crate) fn float_combat_text(
         let size_value = scale_value(t.category, life);
         let target_px = text_px(size_value, viewport);
         // Deviation: the reference stretches a raster of at most 32 px; each whole-pixel size is
-        // rasterized here, so the crit pop stays crisp.
+        // rasterized here because that way the crit pop stays crisp.
         let mut e = atlas.lock();
         let mut glyphs = layout_text_quads(
             &mut e,
@@ -467,7 +467,10 @@ fn melee_impact_text(
 pub(crate) struct CombatTextPlugin;
 
 /// The damage-text rows' change callback: three flags.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut gates: ResMut<DamageTextGates>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut gates: bevy::prelude::Mut<'_, DamageTextGates>,
+) {
     match ev.key().as_str() {
         "combatdamage" => gates.combat_damage = ev.flag(),
         "petmeleedamage" => gates.pet_melee = ev.flag(),
@@ -479,7 +482,6 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut gates: ResMut<Damag
 impl Plugin for CombatTextPlugin {
     fn build(&self, app: &mut App) {
         // The Update append window ([`UiQuadAppend`]), after the camera controller.
-        app.add_observer(on_cvar);
         app.init_resource::<WorldTexts>()
             .init_resource::<DamageTextFont>()
             .init_resource::<DamageTextGates>()

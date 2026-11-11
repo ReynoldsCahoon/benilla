@@ -24,15 +24,15 @@ use super::{SoundConfig, SoundOutput};
 use crate::query_cache::Ask;
 
 /// Drain the VM's queued `PlaySound` intents into the kit player; drained even with no catalog,
-/// so the queue cannot grow unbounded.
+/// so the queue cannot grow unbounded. Left at the frame: no script reads what a play does.
 fn drain_ui_sounds(
-    mut hosted_vm: crate::script_calls::HostedVm,
+    // With the volumes, a CVar knob the call host's callbacks write; the drain runs no Lua.
+    mut vm: crate::script_calls::VmWith<Res<'static, SoundConfig>>,
     kits: Option<ResMut<SoundKits>>,
     assets: Option<Res<WorldAssets>>,
     mut out: NonSendMut<SoundOutput>,
-    config: Res<SoundConfig>,
 ) {
-    hosted_vm.run(|script| {
+    vm.turn(|script, config| {
         let Some(script) = script else {
             return;
         };
@@ -271,9 +271,9 @@ fn play_item_gesture(
     }
 }
 
-/// A looted row's pickup sound, written by [`crate::ui_loot::drain_loot`]. The client plays it at
-/// the loot-slot click (`0x4c2790`); `SMSG_ITEM_PUSH` itself is silent, so a purchase makes no
-/// pickup sound.
+/// A looted row's pickup sound, written by the take ([`crate::ui_loot::LootSteps`]). The client
+/// plays it at the loot-slot click (`0x4c2790`); `SMSG_ITEM_PUSH` itself is silent, so a purchase
+/// makes no pickup sound.
 #[derive(Message, Clone, Copy)]
 pub(crate) struct LootPickupSound {
     pub(crate) display_id: u32,

@@ -26,6 +26,9 @@ pub(crate) mod io;
 pub(crate) mod motion;
 mod objects;
 #[cfg(test)]
+pub(crate) use objects::answer_item;
+pub(crate) use objects::continue_refusal_walk;
+#[cfg(test)]
 pub(crate) use objects::wire;
 pub(crate) use objects::Listed;
 pub(crate) use objects::{release_unheld, ReleasePending};
@@ -52,8 +55,8 @@ use motion::{
 // `pub(crate)`: `creature_anim` reads the shuffle latch it produces, and a test runs both.
 pub(crate) use motion::drive_display_facing;
 pub(crate) use motion::{
-    grounded_y, jump_seed, CreatureSwimming, FacingStep, RemoteMotion, Spline, SplineStopped,
-    UnitMoveModes,
+    grounded_y, jump_seed, CreatureSwimming, FacingStep, MoveTick, RemoteMotion, Spline,
+    SplineStopped, UnitMoveModes,
 };
 
 /// The net subsystem: spawns the background IO threads and drives the per-frame event drain.
@@ -106,6 +109,7 @@ impl Plugin for NetPlugin {
             .add_message::<TeleportMessage>()
             .add_message::<FieldChanged>()
             .add_message::<AuraFieldsChanged>()
+            .add_message::<crate::entities::DisplayRebuilt>()
             .init_resource::<crate::item_lane::ItemLane>()
             .init_resource::<crate::item_watch::BagCache>()
             .init_resource::<crate::field_watch::NoticeLane>()
@@ -130,6 +134,7 @@ impl Plugin for NetPlugin {
             .add_message::<CharacterLoginFailedMessage>()
             .add_message::<EnteredWorldMessage>()
             .init_resource::<MoverClaim>()
+            .init_resource::<MoveTick>()
             .add_message::<CinematicTriggeredMessage>()
             .add_message::<ServerSaidMessage>()
             .add_message::<LoggedOutMessage>()
@@ -436,6 +441,13 @@ pub(crate) struct Embodied;
 #[derive(Component)]
 pub(crate) struct ActiveMover;
 
+/// `IsClientControlled` (`0x5fa5f0`): bit 0x400 of the unit's `+0xc58`, which the control update
+/// sets or clears on its unit (`0x5fa62a`, `0x5fa631`, stored at `0x5fa636`) and only the
+/// constructor clears besides (`0x5fae7a`), so it outlives a release. Our own character's is read
+/// off [`crate::player::OwnControlLost`], which the same update writes beside it.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub(crate) struct ClientControlled;
+
 /// The active-mover global (`0xc4da98`/`0xc4da9c`) as the claims read it: the guid the last
 /// `SetActiveMover` (`0x6006e0`) stored, or none. A claim of the guid it holds returns at once
 /// (`0x6006ee`-`0x6006fb` → `0x600852`), so `CMSG_SET_ACTIVE_MOVER` goes out only on a change.
@@ -461,6 +473,16 @@ impl MoverClaim {
             let _ = net.0.send(ClientCommand::SetActiveMover { guid });
         }
         true
+    }
+
+    /// The guid the global names.
+    pub(crate) fn get(&self) -> Option<u64> {
+        self.0
+    }
+
+    /// Whether the global names `guid` (`0x6103a0`'s first test).
+    pub(crate) fn holds(&self, guid: u64) -> bool {
+        self.0 == Some(guid)
     }
 
     /// The unit `guid` gone or stopped: the global is zeroed when it names it.
@@ -601,6 +623,10 @@ pub(crate) enum CharRequest {
     /// Fetch the roster again (`CMSG_CHAR_ENUM`) on the parked session, then stay parked with
     /// the fresh roster: `GetCharacterListUpdate`, which the stock screen calls whenever it shows.
     Enumerate,
+    /// Ask for a guild's record (`CMSG_GUILD_QUERY`) on the parked session and stay parked: the
+    /// select build's emblem lookup (`0x472cde` → `0x6d6d20` → `0x560e30`). The answer comes when
+    /// the server sends it, as any session's `SMSG_GUILD_QUERY_RESPONSE` does.
+    GuildQuery(u32),
 }
 
 /// The realm channel: the answer to each [`RealmListMessage`]. Two parks listen, the login-side
@@ -1627,6 +1653,12 @@ pub(crate) enum ClientCommand {
         spell_id: u32,
         slot: u8,
     },
+    /// `CMSG_CAST_SPELL` with the targets block a held record gathered over more than one bind
+    /// ([`benilla_protocol::messages::HeldTargets`]).
+    CastSpellTargets {
+        spell_id: u32,
+        target: benilla_protocol::messages::UseItemTarget,
+    },
     /// `CMSG_LOOT` on a unit; the server rejects a GameObject guid, which loots by `GameObjUse`.
     Loot {
         guid: u64,
@@ -1761,10 +1793,11 @@ pub(crate) enum ClientCommand {
         mail_id: u32,
         template_id: u32,
     },
-    /// `CMSG_ITEM_TEXT_QUERY`, once per mail with a nonzero `item_text_id`.
+    /// `CMSG_ITEM_TEXT_QUERY`, once per text: `key` is the mail-body key, the item's guid or 0
+    /// (`benilla_protocol::messages::item_text_query`).
     ItemTextQuery {
         text_id: u32,
-        mail_id: u32,
+        key: u64,
     },
     /// `MSG_QUERY_NEXT_MAIL_TIME`, on entering the world, to seed `HasNewMail()`.
     QueryNextMailTime,
@@ -2303,11 +2336,13 @@ pub(crate) enum ClientCommand {
 }
 
 /// The realm list (`CMD_REALM_LIST`); the IO thread waits for a [`RealmRequest`]. `failed` is a
-/// query that got no answer (`REALM_LIST_FAILED`), `realms` then the list last held.
+/// query that got no answer (`REALM_LIST_FAILED`), `realms` then the list last held, and `emptied`
+/// a query that empties the holder ([`benilla_protocol::SessionEvent::RealmList`]).
 #[derive(Message)]
 pub(crate) struct RealmListMessage {
     pub(crate) realms: Vec<benilla_protocol::RealmInfo>,
     pub(crate) failed: bool,
+    pub(crate) emptied: Option<benilla_protocol::RealmListEmptied>,
 }
 
 /// The character roster (`SMSG_CHAR_ENUM`); the IO thread waits for the select screen to pick. `realm` is the realm this session connected to.
@@ -2333,10 +2368,12 @@ pub(crate) struct WorldAuthMessage {
     pub(crate) generation: u64,
 }
 
-/// A roster ask on the world session `epoch` failed on the stream.
+/// A roster ask on the world session `epoch` failed: on the stream, or with `emptied` in a reply
+/// that failed the list itself (`0x5b4539`-`0x5b455d`).
 #[derive(Message)]
 pub(crate) struct RosterFailedMessage {
     pub(crate) epoch: u64,
+    pub(crate) emptied: bool,
 }
 
 /// The world session read `SMSG_ADDON_INFO` (the handler `0x5b4260`): the addons it hid from the

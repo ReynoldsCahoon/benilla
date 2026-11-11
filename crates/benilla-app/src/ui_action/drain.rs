@@ -121,10 +121,31 @@ impl AttackPress<'_, '_> {
         seam.toggle(guid);
     }
 
-    /// A stand state change's attack stop inside its call, `0x5ecac0` at `0x5f07e7` while we
-    /// attack (`0x60ecb0`).
+    /// A stand state change's attack stop, `0x5ecac0` at `0x5f07e7` while we attack (`0x60ecb0`),
+    /// for a probe line's emote, which signals nothing between its steps.
     pub(crate) fn stop_for_stand(&mut self) {
         self.seam.stop();
+    }
+
+    /// Whether the toggle at the validated target stops: we attack, with control (`0x6131ce`).
+    pub(crate) fn toggles_off(&self) -> bool {
+        let seam = &self.seam;
+        seam.me.single().is_ok() && seam.engaged() && seam.start_gate().has_control()
+    }
+
+    /// StopAttack's head ([`crate::creature_anim::AttackSeam::stop_head`]).
+    pub(crate) fn stop_head(&mut self) -> Option<crate::creature_anim::StopTail> {
+        self.seam.stop_head()
+    }
+
+    /// StopAttack's send and next-swing cancel ([`crate::creature_anim::AttackSeam::stop_send`]).
+    pub(crate) fn stop_send(&mut self, stop: crate::creature_anim::StopTail) -> bool {
+        self.seam.stop_send(stop)
+    }
+
+    /// StopAttack's save leg ([`crate::creature_anim::AttackSeam::stop_save`]).
+    pub(crate) fn stop_save(&mut self) {
+        self.seam.stop_save();
     }
 
     /// The validator `0x612df0` up to its selection's re-read, for the call host, which runs the
@@ -132,13 +153,30 @@ impl AttackPress<'_, '_> {
     /// actor checks, then the pick ([`crate::target::AttackPick::pick`]), what its commit owes;
     /// `None` once an actor check refused. Its `SelectTarget` calls (`0x613100`, `0x4941e6`) may
     /// hand a unit to the targeting cursor, which binds it before the swing goes out, so a caller
-    /// that owns the cursor binds between the halves.
-    pub(crate) fn pick_attack(&mut self, may_pick: bool) -> Option<crate::target::Owed> {
-        self.begin_validate(None, may_pick)
+    /// that owns the cursor binds between the halves. The candidate is `passed`, else the
+    /// selection: `AttackTarget` passes none, a go's deferred start its first hit (`0x6e8402` →
+    /// `0x6131a0`).
+    pub(crate) fn pick_attack_at(
+        &mut self,
+        passed: Option<u64>,
+        may_pick: bool,
+    ) -> Option<crate::target::Owed> {
+        self.begin_validate(passed, may_pick)
+    }
+
+    /// Whether the validator keeps `guid` as its candidate (`0x6130a3`) rather than dropping it to
+    /// the nearest-enemy cycle (`0x6130b5`).
+    pub(crate) fn keeps(&self, guid: u64) -> bool {
+        self.pick.keeps(guid)
+    }
+
+    /// Pay what the pick's commit owes now, for a caller with no listeners to run first.
+    pub(crate) fn pay(&mut self, owed: crate::target::Owed) {
+        crate::target::SelectDebt::from(owed).pay(&mut self.selection, &mut self.seam);
     }
 
     /// TryCast's attack pick (`0x6e4efb`) for a spell press held there
-    /// ([`crate::spell::HeldForPick`]), [`Self::pick_attack`] with the caster as the candidate
+    /// ([`crate::spell::HeldForPick`]), [`Self::pick_attack_at`] with the caster as the candidate
     /// for a self-cast press (`0x4e610e`): the validator alone, with no swing after it. The cast
     /// goes on, at the unit the pick left selected, when [`Self::settle_attack`] passes.
     pub(crate) fn pick_for_cast(
@@ -183,9 +221,9 @@ pub(crate) fn drain_arrival_casts(
     drain_click_casts(vm);
 }
 
-/// Sends the casts a dispatcher outside the world click queued (a nameplate's right-click, a
-/// crate's `Interact`) through the cast ladder, as an engine turn among the frame's input records.
-/// The world click's own are drained inside its call ([`ClickCastDrain::drain`]).
+/// Sends the casts a dispatcher outside any call queued (a crate's `Interact`) through the cast
+/// ladder, as an engine turn among the frame's input records. The world click's and a nameplate
+/// click's own are drained inside their calls ([`ClickCastDrain::drain`]).
 pub(crate) fn drain_click_casts(
     mut vm: crate::script_calls::VmWith<ClickCastDrain<'static, 'static>>,
 ) {
@@ -212,58 +250,77 @@ pub(crate) struct ClickCastDrain<'w, 's> {
 impl ClickCastDrain<'_, '_> {
     /// Send every queued cast, in the order queued.
     pub(crate) fn drain(&mut self, mut script: Option<&mut UiScript>) {
-        if self.queue.0.is_empty() {
-            return;
+        while let Some(then) = self.next(script.as_deref_mut()) {
+            self.then(script.as_deref_mut(), then);
         }
+    }
+
+    /// Send the next queued cast; what its dispatcher does once the cast has run, for a caller
+    /// that resumes a cast parked at its signals first ([`crate::spell::CastPark`]). `None` with
+    /// nothing queued.
+    pub(crate) fn next(&mut self, script: Option<&mut UiScript>) -> Option<ClickCastThen> {
+        if self.queue.0.is_empty() {
+            return None;
+        }
+        let cast = self.queue.0.remove(0);
         let ctx = self.targeting.context();
-        for cast in std::mem::take(&mut self.queue.0) {
-            match cast {
-                super::ClickCast::AtObject { spell_id, go_guid } => {
-                    debug!("ui_action: gameobject opener casts {spell_id} at {go_guid:#x}");
-                    self.ladder.send_at_object(spell_id, &ctx, go_guid);
-                }
-                super::ClickCast::AtUnit {
-                    spell_id,
-                    entity,
-                    guid,
-                    auto_loot,
-                } => {
-                    debug!("ui_action: right-click casts {spell_id} at {guid:#x}");
-                    self.ladder.send(
-                        spell_id,
-                        &self.targeting.context_at(entity, guid),
-                        crate::spell::CastCommit::Spell,
-                    );
-                    // Then the store, whatever the attempt answered (`0x5f06e1`-`0x5f06ef`).
-                    if let (Some(byte), Some(script)) = (auto_loot, script.as_deref_mut()) {
-                        script.set_auto_loot(byte);
-                    }
-                }
-                // The key goes through the shared `CGItem::Use` fork, as a bag click does.
-                super::ClickCast::Key(it) => {
-                    let Some(script) = script.as_deref_mut() else {
-                        continue;
-                    };
-                    // The use's requirement gate (`0x5d8e0e`) reads the player as of here.
-                    self.requirements.seat(script);
-                    debug!(
-                        "ui_action: gameobject opener uses the key at wire {}/{} on {:?}",
-                        it.bag_index, it.slot, it.on_object
-                    );
-                    crate::ui_items::send_item_use(
-                        it,
-                        &ctx,
-                        &mut self.ladder,
-                        script,
-                        &mut self.gate,
-                        false,
-                        &self.ui_errors,
-                    );
-                }
+        match cast {
+            super::ClickCast::AtObject { spell_id, go_guid } => {
+                debug!("ui_action: gameobject opener casts {spell_id} at {go_guid:#x}");
+                self.ladder.send_at_object(spell_id, &ctx, go_guid);
             }
+            super::ClickCast::AtUnit {
+                spell_id,
+                entity,
+                guid,
+                auto_loot,
+            } => {
+                debug!("ui_action: right-click casts {spell_id} at {guid:#x}");
+                self.ladder.send(
+                    spell_id,
+                    &self.targeting.context_at(entity, guid),
+                    crate::spell::CastCommit::Spell,
+                );
+                return Some(ClickCastThen(auto_loot));
+            }
+            // The key goes through the shared `CGItem::Use` fork, as a bag click does.
+            super::ClickCast::Key(it) => {
+                let Some(script) = script else {
+                    return Some(ClickCastThen(None));
+                };
+                // The use's requirement gate (`0x5d8e0e`) reads the player as of here.
+                self.requirements.seat(script);
+                debug!(
+                    "ui_action: gameobject opener uses the key at wire {}/{} on {:?}",
+                    it.bag_index, it.slot, it.on_object
+                );
+                crate::ui_items::send_item_use(
+                    it,
+                    &ctx,
+                    &mut self.ladder,
+                    script,
+                    &mut self.gate,
+                    false,
+                    &self.ui_errors,
+                );
+            }
+        }
+        Some(ClickCastThen(None))
+    }
+
+    /// What a cast's dispatcher does past it: `InteractWithSpell`'s store, whatever the attempt
+    /// answered (`0x5f06e1`-`0x5f06ef`).
+    pub(crate) fn then(&mut self, script: Option<&mut UiScript>, then: ClickCastThen) {
+        if let (Some(byte), Some(script)) = (then.0, script) {
+            script.set_auto_loot(byte);
         }
     }
 }
+
+/// What a click cast's dispatcher owes past the cast ([`ClickCastDrain::then`]): the auto-loot
+/// byte `InteractWithSpell` stores, if it stores one.
+#[must_use]
+pub(crate) struct ClickCastThen(Option<bool>);
 
 /// What a `UseAction` press reads and writes.
 #[derive(bevy::ecs::system::SystemParam)]
@@ -537,6 +594,12 @@ impl ActionBarSteps<'_> {
         self.slots.iter().flat_map(|s| s.buttons.values())
     }
 
+    /// The word the 1-based `lua_id` holds.
+    pub(crate) fn button(&self, lua_id: u32) -> Option<&ActionButton> {
+        let slot = u8::try_from(lua_id.checked_sub(1)?).ok()?;
+        self.slots.as_deref()?.buttons.get(&slot)
+    }
+
     /// `call` inside its verb.
     pub(crate) fn apply(&mut self, call: benilla_ui::script::ActionBarCall) {
         use benilla_ui::script::ActionBarCall;
@@ -549,12 +612,29 @@ impl ActionBarSteps<'_> {
                     .send(ClientCommand::SetActionBarToggles { toggles });
             }
             ActionBarCall::Set { id, packed } => self.set(id, packed),
+            // The host's own, with the action states ([`crate::script_calls`]).
+            ActionBarCall::RefreshUsable | ActionBarCall::Notify { .. } => {}
         }
+    }
+
+    /// Whether our player's arrival has loaded this login's bar ([`ActionSlots::loaded`]); never
+    /// in a harness without the store.
+    pub(crate) fn loaded(&self) -> bool {
+        self.slots.as_deref().is_some_and(ActionSlots::loaded)
+    }
+
+    /// Our player's arrival's load of the staged words ([`ActionSlots::load_staged`]); nothing in
+    /// a harness without the store.
+    pub(crate) fn load_staged(&mut self, knows: impl Fn(u32) -> bool) -> Vec<u32> {
+        self.slots
+            .as_deref_mut()
+            .map(|slots| slots.load_staged(knows))
+            .unwrap_or_default()
     }
 
     /// The slot write `0x4e58e0` for the 1-based `lua_id` (`packed == 0` clears), which the VM
     /// already mirrors: `CMSG_SET_ACTION_BUTTON` sent, ahead of the `ACTIONBAR_SLOT_CHANGED` the
-    /// VM signals after it, and the slot stored (`0x4e590a`), marking the bar for the feed.
+    /// VM signals after it, and the slot stored (`0x4e590a`).
     pub(crate) fn set(&mut self, lua_id: u32, packed: u32) {
         let Ok(slot) = u8::try_from(lua_id.saturating_sub(1)) else {
             debug!("ui_action: set_action_button lua id {lua_id} out of range — ignored");
@@ -582,6 +662,5 @@ impl ActionBarSteps<'_> {
                 },
             );
         }
-        slots.dirty = true;
     }
 }

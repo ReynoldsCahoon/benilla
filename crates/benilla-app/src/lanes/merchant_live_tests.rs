@@ -247,20 +247,18 @@ fn the_merchant_events_fire_at_their_packets() {
     );
 }
 
-/// The list's `MERCHANT_SHOW` sits on the merchant lane at its handler's stamp, between the
-/// stamps of the handlers before and after it.
+/// The list's `MERCHANT_SHOW` fires inside its packet's dispatch, with no frame after it: the
+/// handler's signal runs every listener before the next packet's handler (`0x537ae5`, `0x703e50`).
 #[test]
-fn the_show_is_stamped_at_its_handler() {
+fn the_show_fires_inside_its_dispatch() {
     let mut c = client();
-    let before = crate::lanes::stamp();
     c.handle(vec![list(vec![row(1, 159)])]);
-    let after = crate::lanes::stamp();
     let lane = c.app.world().resource::<crate::ui_merchant::MerchantLane>();
-    let stamped = lane.stamped();
-    assert_eq!(stamped.len(), 1);
-    let (at, event) = stamped[0];
-    assert_eq!(event, crate::ui_merchant::MerchantEvent::Show);
-    assert!(before < at && at < after, "stamped inside the handler");
+    assert!(lane.stamped().is_empty(), "nothing left on the lane");
+    assert!(
+        c.seen().iter().any(|s| s == "MERCHANT_SHOW:nil"),
+        "the show fired inside the dispatch"
+    );
 }
 
 /// A row's missing record is asked by the getter's call with its callback, one wait per call
@@ -305,6 +303,62 @@ fn a_records_answer_and_the_buyback_watch_signal_at_their_packets() {
         ["CHAT_MSG_MONSTER_SAY:b", "MERCHANT_UPDATE:nil"],
         "the watch signals with no vendor open"
     );
+}
+
+/// A refusal's `MERCHANT_UPDATE` fires inside its walk, while the dying node stands: a listener's
+/// getter that asks the row again links its callback to the node and sends nothing. Raised by the
+/// last callback, the walk ends there and the node's destroy frees it uncalled (`0x55be9c`,
+/// `0x55bed2`); raised by one with a next, the walk reaches it, and its run with status 0 signals
+/// again, whose re-ask is then the last's. A later call asks again.
+#[test]
+fn a_getter_inside_a_refusals_walk_asks_nothing() {
+    refusal_walk(false);
+    refusal_walk(true);
+}
+
+/// [`a_getter_inside_a_refusals_walk_asks_nothing`], with a trade getter's wait after the row's
+/// when `behind`.
+fn refusal_walk(behind: bool) {
+    let mut c = client();
+    c.handle(vec![list(vec![row(1, UNCACHED)])]);
+    c.frame(vec![]);
+    c.seen();
+    c.eval::<()>(
+        true,
+        r#"
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("MERCHANT_UPDATE")
+        f:SetScript("OnEvent", function() ReAsked = (GetMerchantItemInfo(1)) or "none" end)
+        GetMerchantItemInfo(1)
+        "#,
+    );
+    assert_eq!(c.item_queries(), 1);
+    if behind {
+        c.app
+            .world()
+            .resource::<crate::items::Items>()
+            .wait_for_trade_record(UNCACHED);
+    }
+    c.frame(vec![vec![SessionEvent::ItemTemplate {
+        entry: UNCACHED,
+        info: None,
+    }]]);
+    let updates: &[&str] = if behind {
+        &["MERCHANT_UPDATE:nil", "MERCHANT_UPDATE:nil"]
+    } else {
+        &["MERCHANT_UPDATE:nil"]
+    };
+    assert_eq!(c.seen(), updates, "the re-ask's run signals when reached");
+    assert_eq!(c.eval::<String>(false, "return ReAsked"), "none");
+    assert_eq!(c.item_queries(), 0, "nothing sent inside the walk");
+    let waits = c
+        .app
+        .world_mut()
+        .resource_mut::<crate::items::Items>()
+        .take_waiters(UNCACHED, crate::items::RecordCallback::Merchant);
+    assert_eq!(waits, 0, "nothing kept");
+    c.eval::<()>(true, "GetMerchantItemInfo(1)");
+    assert_eq!(c.item_queries(), 1, "a later call asks again");
 }
 
 /// The item queries sent since the last call, as their bodies go out.
@@ -557,5 +611,20 @@ fn a_repair_cost_reads_as_of_each_packet() {
     assert_eq!(
         c.eval::<Vec<i64>>(false, "return Costs"),
         [i64::from(discounted), i64::from(full)]
+    );
+}
+
+/// A verb's `"npc"` is the interaction latch as the handlers leave it (`0x515c00`), with no frame
+/// between: the list's handler latches the vendor (`0x4930d0`), and `TargetUnit("npc")` selects
+/// it before any feed runs.
+#[test]
+fn a_verbs_npc_token_reads_the_latch_at_the_call() {
+    let mut c = client();
+    c.handle(vec![list(vec![row(1, 159)])]);
+    c.eval::<()>(true, "TargetUnit('npc')");
+    assert_eq!(
+        c.app.world().resource::<crate::target::Selection>().guid,
+        Some(VENDOR),
+        "the latch the list's handler set, read as the verb runs"
     );
 }

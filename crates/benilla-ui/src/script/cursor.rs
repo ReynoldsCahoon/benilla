@@ -355,10 +355,10 @@ pub(crate) enum CursorOp {
     Put(CursorPayload),
 }
 
-/// One cursor write as made: the operation, the cursor state it found, and what it raised. Made
-/// while something waits for the host, the take puts that state back ([`CursorWrite::rewind`])
-/// and the operation runs again in its place, against the cursor as it is then, as the
-/// reference's runs after what came ahead of it: never its recorded result.
+/// One cursor write as made inside a verb segment: the operation, the cursor state it found, and
+/// what it raised. Held for the host with its segment, the take puts that state back
+/// ([`CursorWrite::rewind`]) and the operation runs again in its place, against the cursor as it
+/// is then, as the reference's runs after what came ahead of it: never its recorded result.
 #[derive(Clone, Debug)]
 pub(crate) struct CursorWrite {
     pub(crate) op: CursorOp,
@@ -374,15 +374,21 @@ impl CursorWrite {
     }
 }
 
-/// Make cursor write `op`, recorded whole ([`CursorWrite`]): inside a verb segment as one record,
-/// which its fan-out shows and its replay for the host makes again ([`super::tick::fan_out`]);
-/// outside one while something waits for the host, captured and queued behind it, its events
-/// raised when it is made again. With nothing waiting outside a segment it is just made.
+/// Make cursor write `op`: inside a verb segment as one record ([`CursorWrite`]), which its
+/// fan-out shows and its replay for the host makes again ([`super::tick::fan_out`]); outside one
+/// at once, and while something waits for the host its records wait behind it, held as a segment
+/// of their own ([`super::Model::hold_behind`]); one made ahead of the point of a held handler or
+/// of a signal queued on a lane is the census's to refuse ([`super::census::vm_write`]). With
+/// nothing waiting outside a segment it is just made.
 pub(crate) fn write(model: &mut Model, op: CursorOp) {
     let before = model.cursor_state();
     let start = model.verb_events.as_ref().map(Vec::len);
-    let queued = start.is_none() && !model.script_calls.is_empty();
-    if queued {
+    #[cfg(debug_assertions)]
+    if start.is_none() {
+        super::census::vm_write("cursor");
+    }
+    let behind = start.is_none() && !model.script_calls.is_empty();
+    if behind {
         model.verb_events = Some(Vec::new());
     }
     match op.clone() {
@@ -393,15 +399,15 @@ pub(crate) fn write(model: &mut Model, op: CursorOp) {
         return;
     };
     let raised = segment.split_off(start.unwrap_or(0));
-    let write = Box::new(CursorWrite { op, before, raised });
-    if queued {
+    if behind {
         model.verb_events = None;
-        model.push_waiting(super::calls::Waiting::Cursor {
-            write,
-            shown: false,
-        });
+        model.hold_behind(raised);
     } else {
-        segment.push(super::tick::Raised::CursorWrite(write));
+        segment.push(super::tick::Raised::CursorWrite(Box::new(CursorWrite {
+            op,
+            before,
+            raised,
+        })));
     }
 }
 
@@ -548,9 +554,9 @@ impl Setter {
     }
 
     /// Whether the setter runs, by the player-control flag `[0xb4b3e4]`.
-    fn admits(self, model: &Model) -> bool {
+    fn admits(self, lua: &Lua, model: &Model) -> bool {
         match self {
-            Setter::Item => equip::has_cursor_control(model),
+            Setter::Item => equip::has_cursor_control(lua, model),
             Setter::Controlled => model.player_control,
             Setter::Free => true,
         }
@@ -571,7 +577,7 @@ pub(crate) fn set_cursor(
     payload: impl FnOnce(&Model) -> Option<CursorPayload>,
 ) -> bool {
     let admitted = verb(lua, |model| {
-        if !setter.admits(model) {
+        if !setter.admits(lua, model) {
             return false;
         }
         clear(
@@ -693,9 +699,9 @@ pub(super) fn item_link_name(link: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-/// The sell fork's clear, `SetCursorItem(0, …)` with a zero guid, so its inner `ClearCursor(0,1)`
-/// alone (`0x4fb7ac`, `0x5df5fc`): `PickupMerchantItem` (`0x4fb760`) and the interact ladder's
-/// vendor arm (`0x5df5d0`). Unlike [`clear_cursor`] it lifts no lock, so the source slot stays
+/// The sell fork's clear, `ClearCursor(0,1)`: `PickupMerchantItem`'s own (`0x4fb7b3`) and the
+/// interact ladder's vendor arm's, inside `SetCursorItem(0, …)` with a zero guid (`0x5df5fc`),
+/// past that setter's control gate ([`super::UiScript::take_cursor_item_for_sale`]). Unlike [`clear_cursor`] it lifts no lock, so the source slot stays
 /// grey until the server removes the item. Any other payload is no sale and stays held
 /// (`GetCursorItem`, `0x494c60`).
 pub(crate) fn take_cursor_item_for_sale(model: &mut Model) -> Option<CursorItem> {
@@ -801,7 +807,7 @@ pub(crate) fn split_container_item(
     let item = {
         let model = lua.app_data_ref::<Model>().expect("model app_data");
         // Without control and off a taxi the split ends first (`0x4f9fdb`-`0x4f9ff7`).
-        if !equip::has_cursor_control(&model) {
+        if !equip::has_cursor_control(lua, &model) {
             return Ok(false);
         }
         // The slot resolver (`0x4fa00a`), through the bag lookup `0x4f93e0`.
@@ -831,12 +837,9 @@ pub(crate) fn split_container_item(
             equip_slots: s.equip_slots.clone(),
         }
     };
-    let targeting = verb(lua, |model| {
-        clear_cursor(model);
-        model.spell_targeting
-    });
+    verb(lua, clear_cursor);
     // `StopTargeting` ends an armed spell's targeting, as `SpellStopTargeting` does.
-    if targeting {
+    if super::action::spell_targeting(lua) {
         super::calls::submit(lua, super::ScriptCall::SpellStopTargeting)?;
     }
     pick_up_item(lua, item);
@@ -950,10 +953,10 @@ impl super::UiScript {
     /// The unlock-all (`0x495460`), on the revive edge (`0x5fefae`): the player array's items
     /// unlock, then one `ITEM_LOCK_CHANGED` (`0x49557d`).
     ///
-    /// Deviation: every lock lifts here, bag contents included. The reference's walk of a bag's
-    /// contents indexes the bag by its own player-array index (`0x495528`, `0x495535`), at least
-    /// 19, past a bag's slots in every case but the biggest bags, so it normally unlocks none of
-    /// them; a lock it strands lasts until the item's seat or stack moves, which this does not
+    /// Deviation: every lock lifts here, bag contents included, because the reference's walk of a
+    /// bag's contents indexes the bag by its own player-array index (`0x495528`, `0x495535`), at
+    /// least 19, past a bag's slots in every case but the biggest bags, so it normally unlocks none
+    /// of them; a lock it strands lasts until the item's seat or stack moves, which this does not
     /// copy.
     pub fn unlock_all_items(&mut self) {
         for guid in self.item_locks() {
@@ -970,11 +973,19 @@ impl super::UiScript {
         out
     }
 
-    /// Forget item `guid`'s lock with no event: its item object is gone, and the next object
+    /// Forget item `guid`'s lock with no event: its item object was freed, and the next object
     /// with that guid starts unlocked, as the item constructor zeroes the bit (`0x5d821f`,
     /// `0x5d823e`).
     pub fn forget_item_lock(&mut self, guid: u64) {
         self.model_mut().set_item_lock(guid, false);
+    }
+
+    /// Forget every lock with no event: every object was freed (`0x467800`), and each new one
+    /// starts unlocked ([`Self::forget_item_lock`]).
+    pub fn forget_all_item_locks(&mut self) {
+        for guid in self.item_locks() {
+            self.model_mut().set_item_lock(guid, false);
+        }
     }
 
     /// Seat a fresh VM's locks before anything runs on it, with no event.
@@ -1079,9 +1090,16 @@ impl super::UiScript {
         hooked
     }
 
-    /// [`take_cursor_item_for_sale`], for the app's interact ladder.
+    /// [`take_cursor_item_for_sale`], for the app's interact ladder: the vendor arm's
+    /// `SetCursorItem(0, …)` (`0x5df600` → `0x494b60`), whose `ClearCursor(0, 1)` (`0x494bb6`)
+    /// signals before the call returns, inside the click. Without control of the character and off
+    /// a taxi the setter returns before its clear (`0x494b8d`-`0x494ba9`): the item stays held and
+    /// nothing is taken.
     pub fn take_cursor_item_for_sale(&mut self) -> Option<CursorItem> {
-        take_cursor_item_for_sale(&mut self.model_mut())
+        if !equip::has_cursor_control(&self.lua, &self.model_ref()) {
+            return None;
+        }
+        super::tick::verb(&self.lua, take_cursor_item_for_sale)
     }
 
     /// `ClearCursor(1, 1)` (`0x495190`) from Rust, its events signalled as it runs, as an engine
@@ -1239,9 +1257,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             Ok(flag(matches!(model.cursor, Some(CursorPayload::Spell(_)))))
         })?,
     )?;
-    // Deviation: returns nothing. The handler ends `mov eax,1` with nothing pushed (`0x4895bc`), so
-    // Lua 5.0 hands back the stack top, the last argument or the function itself: an accident of
-    // the handler, not an API, and copying a stack-top leak would copy a bug.
+    // Deviation: returns nothing because the handler ends `mov eax,1` with nothing pushed
+    // (`0x4895bc`), so Lua 5.0 hands back the stack top, the last argument or the function itself:
+    // an accident of the handler, not an API, and copying a stack-top leak would copy a bug.
     g.set(
         "ClearCursor",
         lua.create_function(|lua, ()| {
@@ -1403,6 +1421,33 @@ mod tests {
         }
     }
 
+    /// The vendor arm's `SetCursorItem(0, …)` returns before its clear without control of the
+    /// character and off a taxi (`0x494b8d`-`0x494ba9`): the sold item stays held and nothing
+    /// signals; with control back the same call clears it.
+    #[test]
+    fn the_sell_clear_waits_for_control() {
+        let mut s = UiScript::new().unwrap();
+        s.set_container(0, Some(one_item_backpack()));
+        s.eval::<()>("PickupContainerItem(0, 1)").unwrap();
+        s.run(
+            r#"heard = 0
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("CURSOR_UPDATE")
+            f:SetScript("OnEvent", function() heard = heard + 1 end)"#,
+        )
+        .unwrap();
+        s.set_player_control(false);
+        assert!(
+            s.take_cursor_item_for_sale().is_none(),
+            "no control, no clear"
+        );
+        assert!(s.cursor_item().is_some(), "the item stays held");
+        assert_eq!(s.eval::<i64>("return heard").unwrap(), 0);
+        s.set_player_control(true);
+        assert!(s.take_cursor_item_for_sale().is_some());
+        assert_eq!(s.eval::<i64>("return heard").unwrap(), 1);
+    }
+
     /// `SetCursorItem(0, …)` (`0x494b60`) skips `ClearCursor`'s unlock (`0x495420`) and takes only
     /// a held item.
     #[test]
@@ -1410,24 +1455,31 @@ mod tests {
         let mut s = UiScript::new().unwrap();
         s.set_container(0, Some(one_item_backpack()));
 
-        // The pickup's events fire inside it, so the queue holds only the host's sell clear.
+        // The pickup's events fire inside it.
         s.eval::<()>("PickupContainerItem(0, 1)").unwrap();
         assert!(s.cursor_item().is_some(), "the pickup did not take");
         assert!(s.model_ref().pending_events.is_empty());
 
+        s.run(
+            r#"heard = {}
+            local f = CreateFrame("Frame")
+            f:RegisterEvent("CURSOR_UPDATE")
+            f:RegisterEvent("ITEM_LOCK_CHANGED")
+            f:SetScript("OnEvent", function() table.insert(heard, event) end)"#,
+        )
+        .unwrap();
         let sold = s.take_cursor_item_for_sale().expect("mode 1 is a sale");
         assert_eq!((sold.bag, sold.slot), (0, 1));
         assert!(
             s.cursor_payload().is_none(),
             "the cursor kept the sold item"
         );
+        assert!(
+            s.model_ref().pending_events.is_empty(),
+            "the clear signals in its call, queueing nothing for the tick"
+        );
 
-        let fired: Vec<String> = s
-            .model_ref()
-            .pending_events
-            .iter()
-            .map(|(e, _)| e.clone())
-            .collect();
+        let fired: Vec<String> = s.eval("return heard").unwrap();
         assert!(
             fired.iter().any(|e| e == "CURSOR_UPDATE"),
             "the sell clear must fire CURSOR_UPDATE — got {fired:?}"

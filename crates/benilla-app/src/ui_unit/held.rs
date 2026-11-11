@@ -215,8 +215,7 @@ mod tests {
     /// The world: we target `MOB`, which targets party1 (`A`), who targets `BOSS`, which targets
     /// `GONE`; raid2 (`B`) targets `ADD`, our pet `FOE`, and `C` nobody. `LONER` is held and
     /// targets `EXTRA`. The group is a raid of us, `A`, `B` and `C`, all in our subgroup, so the
-    /// three are also party slots 1 to 3. The resolver feed, whose inputs the chain feed reads,
-    /// and the chain feed run.
+    /// three are also party slots 1 to 3. The getters read it through the lent host.
     fn app() -> App {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
@@ -336,10 +335,10 @@ mod tests {
         lent(app, &format!("return {expr}"))
     }
 
-    /// The getters answer for a chain through the feeds that run in the client: the resolver
-    /// feed's inputs name the guid, and this feed's snapshot of it answers, so `party1target`,
-    /// `raid2target` and `pettarget` read the unit at the end of the chain and any break in the
-    /// chain reads nobody. No token names `ADD` or `FOE` but a chain.
+    /// The getters answer for a chain through the lent host: the resolver names the guid at the
+    /// call, and the host builds the unit it names, so `party1target`, `raid2target` and
+    /// `pettarget` read the unit at the end of the chain and any break in the chain reads nobody.
+    /// No token names `ADD` or `FOE` but a chain.
     #[test]
     fn the_getters_answer_for_the_unit_a_chain_ends_on() {
         let mut app = app();
@@ -391,10 +390,9 @@ mod tests {
                 "UnitExists({token})"
             );
         }
-        // A group token reads its own push and nothing else: this world pushes none, so `raid1`
-        // answers nil though a chain ends on it. `target` reads the unit live, as a chain does,
-        // past a push of its own; with no host lent, the push answers.
-        assert_eq!(name(&mut app, "raid1"), None);
+        // A group token reads the unit its row names at the call, as a chain does. `target` reads
+        // the unit live too, past a push of its own; with no host lent, the push answers.
+        assert_eq!(name(&mut app, "raid1").as_deref(), Some("Alia"));
         assert_eq!(name(&mut app, "target").as_deref(), Some("Mob"));
         app.world_mut()
             .non_send_resource_mut::<UiScript>()
@@ -482,8 +480,6 @@ mod tests {
         app.init_resource::<crate::ui_chat::ChatLog>()
             .init_resource::<crate::sound::MessageSounds>();
         benilla_world::world_point::init_world_point_resources(app.world_mut());
-        app.init_resource::<crate::ui_party::PartyLane>()
-            .add_systems(Update, crate::ui_party::feed_party);
         {
             let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
             script.keep_calls();
@@ -580,6 +576,10 @@ mod tests {
         let mut entries: Vec<GroupMemberEntry> =
             [A, B, C, D].into_iter().map(group_entry).collect();
         entries[3].name = "Dara".into();
+        // The name the list's lookup asked for, answered (`0x4e8477`).
+        app.world_mut()
+            .resource_mut::<NameCache>()
+            .insert_player(D, "Dara".into(), None);
         {
             let mut group = app.world_mut().resource_mut::<GroupState>();
             group.apply_list(GROUPTYPE_RAID, 0, entries, ME, None, Some(ME));

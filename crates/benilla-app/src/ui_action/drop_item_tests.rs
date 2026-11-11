@@ -7,7 +7,6 @@ use benilla_formats::{SpellCatalog, SpellDisplay};
 use benilla_protocol::messages::ObjectType;
 use benilla_protocol::ObjectFields;
 use benilla_ui::script::{ContainerSlot, ContainerState, CursorPayload, UiScript, UnitGuids};
-use bevy::ecs::system::SystemId;
 use bevy::prelude::*;
 use crossbeam_channel::Receiver;
 
@@ -27,7 +26,6 @@ const HEALTH: u16 = 22;
 struct Feed {
     app: App,
     rx: Receiver<ClientCommand>,
-    drop: SystemId,
 }
 
 /// Us, alive or not, a hunter who knows Feed Pet, with Tough Jerky in the backpack and our pet
@@ -149,16 +147,11 @@ fn client_with(alive: bool, pet_number: u32, charmed: bool) -> Feed {
     );
     script.set_container(0, Some(bag));
     app.world_mut().insert_non_send_resource(script);
-    let drop = app
-        .world_mut()
-        .register_system(super::drop_item::drop_item_on_unit);
-    Feed { app, rx, drop }
+    Feed { app, rx }
 }
 
 fn run(f: &mut Feed, lua: &str) {
     with_hosted_vm(f.app.world_mut(), |vm| vm.expect("a VM").run(lua)).expect("the chunk runs");
-    let drop = f.drop;
-    f.app.world_mut().run_system(drop).expect("the drop runs");
 }
 
 /// The casts sent since the last read, as their debug lines.
@@ -201,6 +194,41 @@ fn food_dropped_on_our_targeted_pet_feeds_it() {
         held(&f).is_none(),
         "the feed cleared the cursor (`0x48da96`)"
     );
+}
+
+/// Feed Pet's attempt signals inside the drop (`0x6e5026`, `0x6e5333`), and so does its bind of the
+/// food (`0x6e60cb`); the drop clears the cursor only once the bind has sent (`0x48da8d`), so their
+/// listeners see the food still held.
+#[test]
+fn feed_pets_signals_see_the_food_still_held() {
+    let mut f = client(true, 55);
+    run(
+        &mut f,
+        r#"local r = CreateFrame("Frame")
+        r:RegisterEvent("CURRENT_SPELL_CAST_CHANGED")
+        r:SetScript("OnEvent", function()
+            if HELD == nil then HELD = CursorHasItem() and 1 or 0 end
+        end)"#,
+    );
+    run(&mut f, "PickupContainerItem(0, 1) DropItemOnUnit('target')");
+    assert_eq!(
+        casts(&f),
+        vec![format!(
+            "{:?}",
+            ClientCommand::CastSpellItem {
+                spell_id: FEED_PET,
+                item_guid: JERKY,
+            }
+        )]
+    );
+    let held_then = f
+        .app
+        .world_mut()
+        .non_send_resource_mut::<UiScript>()
+        .eval::<Option<i64>>("return HELD")
+        .expect("the global reads");
+    assert_eq!(held_then, Some(1));
+    assert!(held(&f).is_none(), "the feed cleared the cursor after");
 }
 
 /// The feed runs the attempt's rungs before it binds the food (`0x6ea266`): dead, Feed Pet is
@@ -289,6 +317,86 @@ fn a_charmed_players_world_click_feeds_trades_and_selects_nothing() {
     assert!(
         matches!(held(&f), Some(CursorPayload::Item(_))),
         "the food is still held"
+    );
+    assert_eq!(selected(&f), Some(PET), "the target stands");
+}
+
+/// A plate on each unit of `guids`, the world frame's children in that order.
+fn plates(f: &mut Feed, guids: &[u64]) {
+    let mut script = f.app.world_mut().non_send_resource_mut::<UiScript>();
+    crate::vplates::plates_for_test(&mut script, guids);
+}
+
+/// A nameplate's left click is the body click's object leg (`0x7cb910` → `0x4949f0` action 1 →
+/// `0x4925d0`), inside the click: with the food held it feeds our pet (`0x4927e8`), and asks
+/// another player to trade (`0x49278e`) ahead of the select that follows it (`0x49280c`), each
+/// sent before `Click` returns.
+#[test]
+fn a_plate_click_with_the_food_held_feeds_the_pet_and_trades_ahead_of_its_select() {
+    let mut f = client_with(true, 55, false);
+    plates(&mut f, &[PET, OTHER]);
+    run(
+        &mut f,
+        "PickupContainerItem(0, 1) local pet = WorldFrame:GetChildren() pet:Click()",
+    );
+    assert_eq!(
+        casts(&f),
+        vec![format!(
+            "{:?}",
+            ClientCommand::CastSpellItem {
+                spell_id: FEED_PET,
+                item_guid: JERKY,
+            }
+        )],
+        "the plate's click feeds the pet"
+    );
+    assert!(held(&f).is_none(), "the feed cleared the cursor");
+    run(
+        &mut f,
+        "PickupContainerItem(0, 1) local _, other = WorldFrame:GetChildren() other:Click()",
+    );
+    let sent = sent(&f);
+    let trade = format!("{:?}", ClientCommand::InitiateTrade { target: OTHER });
+    let select = format!("{:?}", ClientCommand::SetSelection { guid: OTHER });
+    let at = |line: &str| sent.iter().position(|s| s == line);
+    assert!(
+        matches!((at(&trade), at(&select)), (Some(t), Some(s)) if t < s),
+        "the trade's ask, then the select: {sent:?}"
+    );
+    assert_eq!(selected(&f), Some(OTHER));
+}
+
+/// The trade leg tests the targeting cursor (`0x492668`) ahead of the select's bind
+/// (`0x49280c` → `0x4935d5`), so with the cursor up a plate's click asks no trade, and the bind
+/// gives the cast the player instead of selecting them.
+#[test]
+fn a_plate_click_under_the_cursor_asks_no_trade_and_binds_the_player() {
+    let mut f = client_with(true, 55, false);
+    plates(&mut f, &[OTHER]);
+    f.app
+        .world_mut()
+        .resource_mut::<crate::spell::SpellTargeting>()
+        .enter(2050, crate::spell::CastCommit::Spell, 0x0002);
+    // A key's body, an input event, so the bind's tag 2 passes (`0x6e5ba5`).
+    with_hosted_vm(f.app.world_mut(), |vm| {
+        vm.expect("a VM")
+            .run_binding("PickupContainerItem(0, 1) WorldFrame:GetChildren():Click()")
+    })
+    .expect("the chunk runs");
+    let sent = sent(&f);
+    assert!(
+        !sent.iter().any(|s| s.starts_with("InitiateTrade")),
+        "no trade under the cursor: {sent:?}"
+    );
+    assert!(
+        sent.contains(&format!(
+            "{:?}",
+            ClientCommand::CastSpell {
+                spell_id: 2050,
+                target: Some(OTHER),
+            }
+        )),
+        "the bind casts at the player: {sent:?}"
     );
     assert_eq!(selected(&f), Some(PET), "the target stands");
 }

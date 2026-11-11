@@ -25,9 +25,9 @@ pub(crate) use emote::EmoteDoer;
 #[cfg(test)]
 pub(super) use parse::lua_quoted_string;
 pub(super) use parse::{parse_line, ParsedChat};
-pub(crate) use send::ChatSender;
 #[cfg(test)]
 pub(crate) use send::{chat_world, run_chat};
+pub(crate) use send::{ChatSender, ChatStep};
 
 use crate::creature_anim::MovementState;
 use crate::net::{ClientCommand, NetCommands, SelfPlayer};
@@ -95,12 +95,9 @@ pub(super) struct ChatProbes<'w, 's> {
 }
 
 /// What the drain hands to another subsystem's setter, bundled for the same ceiling. Chat never
-/// writes [`Selection`]: [`crate::target`]'s resolver commits through the click's path.
+/// writes [`Selection`]: a line's selection runs the stock verb, whose call commits it.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct ChatOut<'w> {
-    target: MessageWriter<'w, crate::target::TargetByNameRequest>,
-    assist: MessageWriter<'w, crate::target::AssistRequest>,
-    follow: MessageWriter<'w, crate::player::FollowRequest>,
     /// `/partytest ping` stores and signals a group member's ping as the wire's handler does.
     ping: ResMut<'w, crate::minimap::MinimapPing>,
     /// The red error line by GlobalStrings key. The system's only `UiErrorKeys` access: a second
@@ -580,32 +577,38 @@ pub(super) fn drain_chat_input(
                 ParsedChat::Forfeit => {
                     script.duel_call(benilla_ui::script::DuelRequest::Cancel);
                 }
-                // `crate::target`'s resolver (the reference's `0x493aa0`) commits through the one
-                // SetSelection path. A bare `/target` takes `GetSlashCmdTarget`'s fallback: a no-op
-                // re-select of a player target, nothing for a creature.
+                // The stock handler's verb (`ChatFrame.lua:748-751`), `TargetByName` (`0x489d60`),
+                // which selects inside its call, before the next line is taken. A bare `/target`
+                // takes `GetSlashCmdTarget`'s fallback: a no-op re-select of a player target,
+                // nothing for a creature.
                 ParsedChat::Target { name } => {
                     if let Some(name) =
                         name.or_else(|| target_player_name(&selection, &names, &commands))
                     {
-                        chat_out
-                            .target
-                            .write(crate::target::TargetByNameRequest { name });
+                        return Some(LineWork::Lua(LineLua::Handler(format!(
+                            "TargetByName({})",
+                            parse::lua_quoted_string(&name)
+                        ))));
                     }
                 }
-                // Deviation: a probe's bare `/assist` assists the live selection, where the stock
-                // handler (`ChatFrame.lua:740`) resolves a selected player's name through
-                // `AssistByName`, because a name resolve can land on a different player.
+                // Deviation: a probe's bare `/assist` assists the live selection, `AssistByName("")`
+                // (`0x489c89`), where the stock handler (`ChatFrame.lua:740`) resolves a selected
+                // player's name through `AssistByName`, because a name resolve can land on a
+                // different player.
                 ParsedChat::Assist { name } => {
-                    chat_out.assist.write(crate::target::AssistRequest { name });
+                    return Some(LineWork::Lua(LineLua::Handler(format!(
+                        "AssistByName({})",
+                        parse::lua_quoted_string(name.as_deref().unwrap_or_default())
+                    ))));
                 }
                 // Bare is `FollowUnit("target")`, where the stock handler (`ChatFrame.lua:754`)
                 // first tries a selected player's name; named is `FollowByName(name)` with no exact
-                // flag, so prefix matching.
+                // flag, so prefix matching. Each starts the follow inside its call (`0x60fed0`).
                 ParsedChat::Follow { name } => {
-                    chat_out.follow.write(match name {
-                        Some(name) => crate::player::FollowRequest::Name { name, exact: false },
-                        None => crate::player::FollowRequest::Unit("target".into()),
-                    });
+                    return Some(LineWork::Lua(LineLua::Handler(match name {
+                        Some(name) => format!("FollowByName({})", parse::lua_quoted_string(&name)),
+                        None => "FollowUnit(\"target\")".to_string(),
+                    })));
                 }
                 // `SlashCmdList["PVP"]` is `TogglePVP()`, the same call.
                 ParsedChat::Pvp => script.toggle_pvp(),
@@ -666,9 +669,8 @@ pub(super) fn drain_chat_input(
                                 entity,
                                 spell_id,
                                 kind,
-                                cast_flags: 0,
-                                item_cast: false,
                                 seq: play_seq.next(),
+                                at: None,
                             });
                             // A selected caster's GO hits us, so a missile flies end to end; a
                             // self-cast has no target. `ground` sends the pure dest shape instead,
@@ -690,6 +692,7 @@ pub(super) fn drain_chat_input(
                                         target_mask: 0x40,
                                         ammo_display_id: None,
                                         seq: play_seq.next(),
+                                        at: None,
                                     });
                                 } else if let Some(me) = me.filter(|&m| m != entity) {
                                     go_targets.write(crate::creature_anim::SpellGoTargets {
@@ -704,6 +707,7 @@ pub(super) fn drain_chat_input(
                                         // Rough Arrow, display id 5996.
                                         ammo_display_id: Some(5996),
                                         seq: play_seq.next(),
+                                        at: None,
                                     });
                                 }
                             }

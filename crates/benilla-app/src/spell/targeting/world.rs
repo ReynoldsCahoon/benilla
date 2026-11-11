@@ -266,7 +266,8 @@ mod tests {
 
     /// A unit word's terrain click binds nothing here: it sends nothing and keeps the cursor, and
     /// its `BindLocation` signal (`0x6e615d`) and the deselect it falls to are the select's
-    /// ([`crate::target::click::ClickSelect::select`]), so the commit adds no pair; a sky click (the
+    /// ([`crate::target::click::ClickSelect::cursor_leg`], then
+    /// [`crate::target::click::ClickSelect::select`]), so the commit adds no pair; a sky click (the
     /// nothing leg) and a click on a unit the press picked (the object leg) never reach it.
     #[test]
     fn a_terrain_click_that_binds_nothing_leaves_the_rest_to_the_select() {
@@ -444,9 +445,12 @@ mod tests {
             },
         )]));
         world.insert_resource(spells);
-        world.spawn((crate::net::SelfPlayer, GlobalTransform::default()));
+        world.spawn((crate::net::SelfPlayer, Transform::default()));
         let ally = world
-            .spawn(GlobalTransform::from_translation(Vec3::new(40.0, 0.0, 0.0)))
+            .spawn((
+                Transform::from_translation(Vec3::new(40.0, 0.0, 0.0)),
+                GlobalTransform::from_translation(Vec3::new(40.0, 0.0, 0.0)),
+            ))
             .id();
         world.resource_mut::<super::super::SpellTargeting>().enter(
             HEAL,
@@ -474,9 +478,10 @@ mod tests {
             "the cursor stays armed"
         );
 
-        world
-            .entity_mut(ally)
-            .insert(GlobalTransform::from_translation(Vec3::new(10.0, 0.0, 0.0)));
+        world.entity_mut(ally).insert((
+            Transform::from_translation(Vec3::new(10.0, 0.0, 0.0)),
+            GlobalTransform::from_translation(Vec3::new(10.0, 0.0, 0.0)),
+        ));
         click(&mut world, id);
         assert!(matches!(
             rx.try_recv(),
@@ -512,11 +517,12 @@ mod tests {
             world.insert_resource(fx::factions());
             world.spawn((
                 crate::net::SelfPlayer,
-                GlobalTransform::default(),
+                Transform::default(),
                 fx::caster(1.5),
             ));
             let body = world
                 .spawn((
+                    Transform::from_translation(Vec3::new(distance, 0.0, 0.0)),
                     GlobalTransform::from_translation(Vec3::new(distance, 0.0, 0.0)),
                     corpse,
                 ))
@@ -604,6 +610,105 @@ mod tests {
                 })
             ),
             "{sent:?}"
+        );
+    }
+
+    /// The unit [`held_clicks`] binds.
+    const HELD_UNIT: u64 = 0xF130_0000_0000_0001;
+
+    /// Under `0x8002`, a click on a friend's corpse and one on a live unit, both in range, the
+    /// corpse first or the unit: what the first sent, the word it left, and what the second sent.
+    fn held_clicks(
+        corpse_first: bool,
+    ) -> (Option<ClientCommand>, Option<u16>, Option<ClientCommand>) {
+        use super::super::corpse_fixture as fx;
+        let at = |x: f32| {
+            (
+                Transform::from_translation(Vec3::new(x, 0.0, 0.0)),
+                GlobalTransform::from_translation(Vec3::new(x, 0.0, 0.0)),
+            )
+        };
+        let (mut world, rx, id) = fixture();
+        world.insert_resource(fx::spells());
+        world.insert_resource(fx::factions());
+        world.spawn((
+            crate::net::SelfPlayer,
+            Transform::default(),
+            fx::caster(1.5),
+        ));
+        let body = world.spawn((at(10.0), fx::corpse(fx::HUMAN, false))).id();
+        let unit = world.spawn(at(10.0)).id();
+        world.resource_mut::<super::super::SpellTargeting>().enter(
+            fx::RESURRECTION,
+            crate::spell::cast_send::CastCommit::Spell,
+            0x8002,
+        );
+        let corpse = Hovered {
+            corpse: Some(body),
+            corpse_guid: Some(fx::CORPSE),
+            distance: 5.0,
+            ..Hovered::default()
+        };
+        let unit = Hovered {
+            target: Some(unit),
+            guid: Some(HELD_UNIT),
+            distance: 5.0,
+            ..Hovered::default()
+        };
+        let (first, second) = if corpse_first {
+            (corpse, unit)
+        } else {
+            (unit, corpse)
+        };
+        world.resource_mut::<crate::target::PressPick>().hovered = first;
+        click(&mut world, id);
+        let first_sent = rx.try_recv().ok();
+        let word = world
+            .resource::<super::super::SpellTargeting>()
+            .pending()
+            .map(|(_, _, word)| word);
+        world.resource_mut::<crate::target::PressPick>().hovered = second;
+        click(&mut world, id);
+        (first_sent, word, rx.try_recv().ok())
+    }
+
+    /// Whether `sent` is the cast at `object` under the gathered mask `0x8002`.
+    fn sent_held(sent: &Option<ClientCommand>, object: u64) -> bool {
+        use benilla_protocol::messages::{HeldTargets, UseItemTarget};
+        matches!(
+            sent,
+            Some(ClientCommand::CastSpellTargets {
+                spell_id: super::super::corpse_fixture::RESURRECTION,
+                target,
+            }) if *target == UseItemTarget::Held(HeldTargets {
+                mask: 0x8002,
+                object,
+                ..Default::default()
+            })
+        )
+    }
+
+    /// The corpse arm holds a word its bit does not empty, as the unit arm does (`0x6e5fda`,
+    /// `0x6e60c1`): nothing sent, the corpse's bit cleared, and the unit after it sends both bits.
+    #[test]
+    fn a_corpse_holds_a_word_its_bit_does_not_empty() {
+        let (first, word, second) = held_clicks(true);
+        assert!(first.is_none(), "the corpse holds: {first:?}");
+        assert_eq!(word, Some(0x0002), "its bit cleared");
+        assert!(sent_held(&second, HELD_UNIT), "{second:?}");
+    }
+
+    /// A held spell's send writes every bit the record's mask gathered, with the last object bound
+    /// (`0x6e5e13`, `0x6e5fc7`, `0x7e4e10`): a unit that held `0x8002` on its `0x2` arm, then a
+    /// friend's corpse, goes out as `0x8002` at the corpse.
+    #[test]
+    fn a_held_word_sends_the_mask_its_binds_gathered() {
+        let (first, word, second) = held_clicks(false);
+        assert!(first.is_none(), "the unit holds: {first:?}");
+        assert_eq!(word, Some(0x8000));
+        assert!(
+            sent_held(&second, super::super::corpse_fixture::CORPSE),
+            "{second:?}"
         );
     }
 

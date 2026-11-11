@@ -9,7 +9,7 @@ use benilla_protocol::messages::{member_status, GroupMemberEntry, PartyMemberSta
 use benilla_protocol::SessionEvent;
 
 use super::front_tests::{fix, Fix, ME, OLD};
-use super::{by_name, scan, Selection};
+use super::{scan, Selection};
 use crate::net::{ClientCommand, GuidIndex, ObjectStore};
 use crate::ui_action::{UiError, UiErrorKeys};
 use crate::ui_party::{GroupState, GROUPTYPE_RAID};
@@ -179,11 +179,37 @@ fn target_unit_selects_a_party_member_out_of_range_by_guid() {
     assert_eq!(selection(&f), (Some(MEMBER), None));
 }
 
+/// The store's token flag goes on the object it finds as a unit, and on nothing without one
+/// (`0x4936ee`-`0x49372a`); the release's comes off one alike (`0x493999`-`0x4939cc`): a party
+/// member selected out of range takes no flag, and its deselect takes none off.
+#[test]
+fn a_selection_with_no_object_takes_no_token_flag() {
+    let mut f = grouped();
+    let flags = |f: &Fix| {
+        f.app
+            .world()
+            .non_send_resource::<benilla_ui::script::UiScript>()
+            .token_flags_of(MEMBER)
+    };
+    run(&mut f, r#"TargetUnit("party1")"#);
+    assert_eq!(selection(&f), (Some(MEMBER), None));
+    assert_eq!(flags(&f), 0, "no object, no flag");
+    run(&mut f, "ClearTarget()");
+    assert_eq!(selection(&f), (None, None));
+    assert_eq!(flags(&f), 0);
+}
+
 /// The call's own chunk reads the new target at once: a party member selected out of range reads as
-/// its guid does, the party row's (`0x515970`, `0x496400`), not the old target's snapshot.
+/// its guid does, its name off the name cache (`0x515970`, `0x5171eb`), not the old target's
+/// snapshot.
 #[test]
 fn the_chunk_that_selects_a_party_member_out_of_range_reads_them() {
     let mut f = grouped();
+    // The name the list's lookup asked for, answered (`0x4e8477`).
+    f.app
+        .world_mut()
+        .resource_mut::<crate::names::NameCache>()
+        .insert_player(MEMBER, MEMBER_NAME.into(), None);
     let mut script = benilla_ui::script::UiScript::new().expect("a VM");
     script.set_unit_guids(&benilla_ui::script::UnitGuids {
         player: ME,
@@ -200,7 +226,6 @@ fn the_chunk_that_selects_a_party_member_out_of_range_reads_them() {
         ..Default::default()
     };
     script.set_unit("target", Some(unit(OLD, "Old", true)));
-    script.set_unit("party1", Some(unit(MEMBER, MEMBER_NAME, false)));
     f.app.world_mut().insert_non_send_resource(script);
     run(&mut f, r#"TargetUnit("party1") SEEN = UnitName("target")"#);
     let seen = crate::script_calls::with_hosted_vm(f.app.world_mut(), |s| {
@@ -237,7 +262,7 @@ fn assist_selects_the_bases_target_out_of_range_by_guid() {
 /// holds (`0x489c0e`); `AssistByName` shows `ERR_UNIT_NOT_FOUND` for a name whose pick is no held
 /// unit (`0x489d17`), a party member out of range included (`0x489c9b`), and
 /// `ERR_GENERIC_NO_TARGET` for an empty name with nothing selected (`0x489d2b`). A call's line is
-/// signalled inside it; the stock `/assist`, which no call carries, queues the same lines.
+/// signalled inside it, the stock `/assist`'s included.
 #[test]
 fn an_assist_that_finds_no_unit_says_so() {
     let mut f = grouped();
@@ -283,33 +308,6 @@ fn an_assist_that_finds_no_unit_says_so() {
         "an empty name assists the selection"
     );
 
-    let assist = |f: &mut Fix, name: Option<&str>| {
-        let world = f.app.world_mut();
-        world
-            .resource_mut::<Messages<by_name::AssistRequest>>()
-            .write(by_name::AssistRequest {
-                name: name.map(str::to_string),
-            });
-        world
-            .run_system_once(by_name::assist_requests)
-            .expect("the /assist reader runs");
-        // A one-shot reader starts at the oldest message, as the frame's reader does not.
-        world
-            .resource_mut::<Messages<by_name::AssistRequest>>()
-            .clear();
-    };
-    assist(&mut f, None);
-    assert_eq!(
-        errors(&f),
-        vec![UiError::key("ERR_GENERIC_NO_TARGET")],
-        "a bare /assist"
-    );
-    assist(&mut f, Some("Nobody"));
-    assert_eq!(
-        errors(&f),
-        vec![UiError::key("ERR_UNIT_NOT_FOUND")],
-        "/assist Nobody"
-    );
     assert_eq!(selection(&f), (None, None), "no miss moves the selection");
 }
 
@@ -668,11 +666,103 @@ fn a_far_spell_at_a_selection_with_no_object_sends_with_no_target() {
                 _ => None,
             })
             .collect();
-        (sent, f.cursor_is_up())
+        let targeting = f.app.world().resource::<crate::spell::SpellTargeting>();
+        (sent, targeting.active(), targeting.shown())
     };
-    assert_eq!(cast(MIND_VISION_2), (vec![None], false), "Mind Vision 2");
-    assert_eq!(cast(EAGLE_EYE), (vec![None], false), "Eagle Eye");
-    assert_eq!(cast(MIND_VISION_1), (vec![], true), "Mind Vision 1");
+    // The send leaves the word standing (`0x6e5467`) and lowers only the cursor (`0x6e5547`).
+    assert_eq!(
+        cast(MIND_VISION_2),
+        (vec![None], true, false),
+        "Mind Vision 2"
+    );
+    assert_eq!(cast(EAGLE_EYE), (vec![None], true, false), "Eagle Eye");
+    assert_eq!(cast(MIND_VISION_1), (vec![], true, true), "Mind Vision 1");
+}
+
+/// The far send leaves the arm's word standing (`0x6e5454`-`0x6e5467`), so the script reads
+/// targeting up after it (`0x6e48a0`), and the next press cancels it as a cursor (`0x6e4d71`):
+/// the far cast's `SPELLCAST_FAILED`, with no packet, and no "Another action is in progress".
+#[test]
+fn a_far_send_leaves_targeting_up() {
+    const MIND_VISION_2: u32 = 10909;
+    const HEAL: u32 = 2050;
+    let mut f = grouped();
+    select_unheld(&mut f, MEMBER);
+    let mut spells = crate::ui_action::Spells::empty_for_tests();
+    spells.catalog = benilla_formats::SpellCatalog::from_displays(
+        [
+            (
+                MIND_VISION_2,
+                benilla_formats::SpellDisplay {
+                    name: "Mind Vision".into(),
+                    implicit_target_a1: 25,
+                    range_index: 13,
+                    ..Default::default()
+                },
+            ),
+            (
+                HEAL,
+                benilla_formats::SpellDisplay {
+                    name: "Heal".into(),
+                    ..Default::default()
+                },
+            ),
+        ]
+        .into(),
+    );
+    spells.ranges = benilla_formats::SpellRangeCatalog::from_rows(
+        [(
+            13,
+            benilla_formats::SpellRange {
+                min: 0.0,
+                max: 50_000.0,
+                flags: 0,
+            },
+        )]
+        .into(),
+    );
+    let world = f.app.world_mut();
+    world.insert_resource(spells);
+    world.init_resource::<crate::ui_action::PlayerActions>();
+    world
+        .resource_mut::<crate::ui_action::PlayerActions>()
+        .spells
+        .extend([MIND_VISION_2, HEAL]);
+    run(
+        &mut f,
+        r#"SEEN = {}
+        local r = CreateFrame("Frame")
+        r:RegisterEvent("SPELLCAST_FAILED")
+        r:RegisterEvent("UI_ERROR_MESSAGE")
+        r:SetScript("OnEvent", function() table.insert(SEEN, arg1 or event) end)
+        CastSpellByName("Mind Vision")
+        UP = SpellIsTargeting() and 1 or 0"#,
+    );
+    let up = f
+        .app
+        .world_mut()
+        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .eval::<Option<i64>>("return UP")
+        .expect("the global reads");
+    assert_eq!(up, Some(1));
+    f.rx.try_iter().for_each(drop);
+    run(
+        &mut f,
+        r#"SEEN = {} CastSpellByName("Heal") SEEN = table.concat(SEEN, ",")"#,
+    );
+    let seen = f
+        .app
+        .world_mut()
+        .non_send_resource_mut::<benilla_ui::script::UiScript>()
+        .eval::<String>("return SEEN")
+        .expect("the global reads");
+    assert!(!seen.contains("SPELL_FAILED_SPELL_IN_PROGRESS"), "{seen}");
+    assert!(
+        !f.rx
+            .try_iter()
+            .any(|c| matches!(c, ClientCommand::CancelCast { .. })),
+        "the word's cancel sends nothing"
+    );
 }
 
 /// A transfer releases no target (`~CGUnit_C 0x5fb5e0` never reaches `0x493910`): a groupmate

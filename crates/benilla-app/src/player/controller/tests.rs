@@ -281,6 +281,7 @@ fn a_water_walk_or_hover_ack_ends_the_precast_and_a_root_or_feather_fall_ack_doe
         (MoveMode::Root, false, false),
         (MoveMode::FeatherFall, true, false),
     ] {
+        const CORPSE: u64 = 0xF130_0000_0000_0042;
         let mut client = Client::new(Body::Own, |_| {});
         let world = client.app.world_mut();
         let me = world.resource::<GuidIndex>().0[&ME];
@@ -288,6 +289,16 @@ fn a_water_walk_or_hover_ack_ends_the_precast_and_a_root_or_feather_fall_ack_doe
             spell_id: 133,
             busy: true,
         });
+        let mut loot = world.resource_mut::<crate::ui_loot::LootState>();
+        loot.open(
+            CORPSE,
+            benilla_protocol::messages::loot_type::CORPSE,
+            5,
+            vec![],
+        );
+        // Open long ago: its `LOOT_OPENED` has fired.
+        loot.signals_fired();
+        world.resource_mut::<crate::ui_loot::LootLatch>().0 = Some(CORPSE);
         world.write_message(crate::net::MoveModeMessage {
             guid: ME,
             counter: 1,
@@ -303,11 +314,19 @@ fn a_water_walk_or_hover_ack_ends_the_precast_and_a_root_or_feather_fall_ack_doe
             "{mode:?} {}",
             if apply { "on" } else { "off" }
         );
-        // The end's tail releases our loot (`0x60d10b`), precast or not: the move-start close
-        // while the body falls through this empty world, the full one at rest.
-        let released = std::mem::take(&mut world.resource_mut::<crate::ui_loot::LootMoveStart>().0)
-            | std::mem::take(&mut world.resource_mut::<crate::ui_loot::LootCloseAtRest>().0);
-        assert_eq!(released, ends, "{mode:?}: the loot release");
+        // The end's tail releases our loot (`0x60d10b`), precast or not, as the ack's end applies:
+        // the move-start close while the body falls through this empty world, the full one at
+        // rest, either of which takes a corpse's window.
+        let closed = world
+            .resource::<crate::ui_loot::LootState>()
+            .source()
+            .is_none();
+        assert_eq!(closed, ends, "{mode:?}: the loot release");
+        let released = client
+            .sent
+            .try_iter()
+            .any(|c| matches!(c, ClientCommand::LootRelease { guid } if guid == CORPSE));
+        assert_eq!(released, ends, "{mode:?}: released as it closes");
     }
 }
 
@@ -399,10 +418,13 @@ fn a_late_mouselook_start_over_a_left_drag_hands_the_facing_and_pitch_off() {
         .single_mut(world)
         .expect("the camera")
         .yaw = 1.0;
-    world
-        .resource_mut::<CameraControl>()
-        .world_mouse
-        .late_mouselook_start_over_a_left_drag();
+    world.resource_scope(|world, mut binds: Mut<BindingsState>| {
+        use benilla_ui::script::LookCall;
+        binds.apply_unhosted(Start(HeldInput::CameraOrSelectOrMove));
+        let mut rig = world.resource_mut::<CameraControl>();
+        rig.world_mouse
+            .late_call_for_test(LookCall::Mouselook(true), &mut binds);
+    });
     world.run_system(embody).expect("the embodiment runs");
     world.run_system(drive).expect("the controller runs");
     let player = client.player();
@@ -732,6 +754,82 @@ fn following(client: &mut Client) -> bool {
         .is_some()
 }
 
+/// Far sight on, its object gone: the render's update (`0x483054` → `0x5ee290`) finds the field
+/// naming no held object, puts the camera back on the player and returns with the bit still set
+/// (`0x5ee324`-`0x5ee360`), so the input tick's precondition still refuses (`0x514540`): a forward
+/// press starts nothing, though the camera is home.
+#[test]
+fn a_lost_far_sight_object_keeps_the_input_torn_down() {
+    use crate::player::{FarSight, ViewSubject};
+    use benilla_protocol::field::FIELD_UNIT_HEALTH;
+    /// `PLAYER_FARSIGHT`, the guid's low word.
+    const FARSIGHT: u16 = 712;
+    const EYE: u64 = 0xF130_0000_0000_0043;
+    let mut client = Client::standing(Body::Own);
+    let world = client.app.world_mut();
+    let me = world.resource::<GuidIndex>().0[&ME];
+    world.entity_mut(me).insert(crate::net::ObjectStore(
+        benilla_protocol::ObjectFields::from_pairs(&[
+            (FIELD_UNIT_HEALTH, 100),
+            (FARSIGHT, EYE as u32),
+            (FARSIGHT + 1, (EYE >> 32) as u32),
+        ]),
+    ));
+    let eye = world.spawn(Transform::from_xyz(30.0, 0.0, 0.0)).id();
+    world.resource_mut::<GuidIndex>().0.insert(EYE, eye);
+    let index = world.resource::<GuidIndex>();
+    world.resource::<FarSight>().start(
+        Some(EYE),
+        |g| index.0.contains_key(&g),
+        world.resource::<NetCommands>(),
+    );
+    world.resource_mut::<GuidIndex>().0.remove(&EYE);
+    world
+        .run_system_once(super::super::view_subject::publish_view_subject)
+        .expect("the render's update runs");
+    let far_sight = world.resource::<FarSight>();
+    assert!(far_sight.on() && far_sight.camera().is_none());
+    assert!(
+        world.resource::<ViewSubject>().remote.is_none(),
+        "the camera is home"
+    );
+    let sent = client.traced(vec![], forward(), |_| {});
+    assert!(
+        !sent
+            .iter()
+            .any(|(_, s)| matches!(s, Sent::Move(crate::net::MoveKind::StartForward, _))),
+        "{sent:?}"
+    );
+}
+
+/// A stun that lands before its root: the stun's tick finds the mover free to translate, and the
+/// root's ack runs the tick again (`0x60e33d` → `0x60e347`), which now takes the teardown leg
+/// (`0x5146d6`): the follow ends and autorun clears at the ack.
+#[test]
+fn a_root_ack_after_a_stun_ends_the_follow_at_the_ack() {
+    use benilla_protocol::field::{FIELD_UNIT_FLAGS, FIELD_UNIT_HEALTH};
+    let mut client = Client::new(Body::Own, |_| {});
+    let world = client.app.world_mut();
+    let me = world.resource::<GuidIndex>().0[&ME];
+    world.entity_mut(me).insert(crate::net::ObjectStore(
+        benilla_protocol::ObjectFields::from_pairs(&[
+            (FIELD_UNIT_HEALTH, 100),
+            (FIELD_UNIT_FLAGS, crate::player::UNIT_FLAG_STUNNED),
+        ]),
+    ));
+    follow(&mut client);
+    client.frame(vec![], vec![]);
+    assert!(
+        following(&mut client),
+        "a stun alone leaves the mover free to translate"
+    );
+    client.player().autorun = true;
+    root(client.app.world_mut());
+    client.frame(vec![], vec![]);
+    assert!(!following(&mut client), "the root's ack ends it");
+    assert!(!client.player().autorun, "and releases autorun at once");
+}
+
 /// `ToggleAutoRun`'s on press starts the move through `0x60dc60`, whose guard `0x60e990` ends a
 /// follow; its off press stops through `0x60dc90`, which has no guard, so the follow goes on.
 #[test]
@@ -797,6 +895,96 @@ fn a_strafe_press_while_following_stops_then_strafes() {
     );
 }
 
+/// A `ToggleMouseMove` during a right drag leaves freelook (`0x50f910` → `0x50f940`) and keeps bit
+/// 0x1 held, so a turn key strafes (`0x514e98`-`0x514eb1`) and starts no turn (`0x514f6d`): the
+/// split reads the command bit, not the look.
+#[test]
+fn a_turn_key_strafes_under_bit_one_after_a_toggle_left_the_drag() {
+    use crate::creature_anim::move_flags::STRAFE_LEFT;
+    use crate::net::MoveKind::StartStrafeLeft;
+    let mut client = Client::standing(Body::Own);
+    let right = || vec![Start(HeldInput::TurnOrAction)];
+    client.traced(vec![], right(), |_| {});
+    assert!(client.app.world().resource::<CameraControl>().is_looking());
+    // The toggle as a call with no host lent hands it to the session.
+    client
+        .app
+        .world_mut()
+        .resource_scope(|world, mut rig: Mut<CameraControl>| {
+            let mut binds = world.resource_mut::<BindingsState>();
+            rig.world_mouse
+                .late_call_for_test(benilla_ui::script::LookCall::ToggleMouseMove, &mut binds);
+        });
+    let sent = client.traced(right(), vec![Start(HeldInput::TurnLeft)], |_| {});
+    assert!(
+        !client.app.world().resource::<CameraControl>().is_looking(),
+        "the toggle left freelook"
+    );
+    assert_eq!(
+        sent,
+        vec![(When::Input, Sent::Move(StartStrafeLeft, STRAFE_LEFT))]
+    );
+}
+
+/// A follow ends at the mouse's hand-off to the body, whose facing write reaches the move guard
+/// (`0x5103e0` → `0x5152e0` → `0x60de30` → `0x60e990(1, 1)`), behind bit 0x1 (`0x5145fa`): a
+/// right press that has not moved the mouse hands nothing off and keeps it, and the first motion
+/// ends it.
+#[test]
+fn a_right_drag_ends_a_follow_at_its_first_motion() {
+    use bevy::input::mouse::AccumulatedMouseMotion;
+    let mut client = Client::standing(Body::Own);
+    let leader = client.app.world_mut().spawn(Transform::default()).id();
+    client
+        .app
+        .world_mut()
+        .resource_mut::<GuidIndex>()
+        .0
+        .insert(0xCC, leader);
+    follow(&mut client);
+    let steer = |client: &mut Client| {
+        client
+            .app
+            .world_mut()
+            .run_system_once(super::super::follow::steer_follow)
+            .expect("the follow steers");
+    };
+    let right = || vec![Start(HeldInput::TurnOrAction)];
+    client.traced(vec![], right(), |_| {});
+    steer(&mut client);
+    assert!(following(&mut client), "a still press hands nothing off");
+    client
+        .app
+        .world_mut()
+        .resource_mut::<AccumulatedMouseMotion>()
+        .delta = Vec2::new(10.0, 0.0);
+    client.traced(right(), vec![], |_| {});
+    steer(&mut client);
+    assert!(!following(&mut client), "the motion's hand-off ended it");
+}
+
+/// The pitch latch a call left yields to the frame's own writes of it: the mouse hand-off clears
+/// the latch (`0x515378`) in a frame whose word did not change, where the press's tick, which takes
+/// the calls' latch over only past its changed-word gate, never runs, so the next call reads the
+/// cleared latch, not the call's.
+#[test]
+fn the_mouse_hand_off_supersedes_the_pitch_latch_a_call_left() {
+    use super::super::press::CallPitch;
+    use bevy::input::mouse::AccumulatedMouseMotion;
+    let mut client = Client::standing(Body::Own);
+    let right = || vec![Start(HeldInput::TurnOrAction)];
+    client.traced(vec![], right(), |_| {});
+    let world = client.app.world_mut();
+    world.resource_mut::<CallPitch>().set_for_test(true);
+    world.resource_mut::<AccumulatedMouseMotion>().delta = Vec2::new(10.0, 0.0);
+    client.traced(right(), vec![], |_| {});
+    assert_eq!(
+        client.app.world().resource::<CallPitch>().called(),
+        None,
+        "the hand-off's clear is the latch the calls read"
+    );
+}
+
 /// A move key while seated: the forward emitter stands the body (`0x514e0c` → `0x5ed430`, sent at
 /// once) before it queues the start (`0x514e6e`).
 #[test]
@@ -815,6 +1003,51 @@ fn a_move_key_while_seated_stands_before_it_starts() {
             (When::Input, Sent::Move(StartForward, FORWARD)),
         ]
     );
+}
+
+/// The tick runs in the air: its translate predicate tests root alone (`0x514560` tests `0x1200`,
+/// not the fall bit `0x2000`), so a key pressed while falling runs its emitter's start, whose
+/// `0x60e990` closes the loot at the press (`0x60dc6a`) and ends a follow, before the frame time.
+#[test]
+fn a_move_key_in_the_air_closes_the_loot_and_ends_a_follow_at_the_press() {
+    let mut client = Client::new(Body::Own, |_| {});
+    client.frame(vec![], vec![]);
+    assert!(
+        client.player().move_flags & crate::creature_anim::move_flags::FALLING != 0,
+        "falling through the empty world"
+    );
+    follow(&mut client);
+    const CORPSE: u64 = 0xF130_0000_0000_0042;
+    let world = client.app.world_mut();
+    let mut loot = world.resource_mut::<crate::ui_loot::LootState>();
+    loot.open(
+        CORPSE,
+        benilla_protocol::messages::loot_type::CORPSE,
+        5,
+        vec![],
+    );
+    // Open long ago: its `LOOT_OPENED` has fired.
+    loot.signals_fired();
+    world.resource_mut::<crate::ui_loot::LootLatch>().0 = Some(CORPSE);
+    let _ = client.sent.try_iter().count();
+    let world = client.app.world_mut();
+    *world.resource_mut::<BindingsState>() = BindingsState::after_calls(vec![], forward());
+    for system in [client.sample, client.commands, client.cancel, client.press] {
+        world.run_system(system).expect("the press runs");
+    }
+    assert_eq!(
+        world.resource::<crate::ui_loot::LootState>().source(),
+        None,
+        "the loot closes at the press"
+    );
+    assert!(
+        client
+            .sent
+            .try_iter()
+            .any(|c| matches!(c, ClientCommand::LootRelease { guid } if guid == CORPSE)),
+        "released there"
+    );
+    assert!(!following(&mut client), "and the follow ends there");
 }
 
 /// The press cancels a cast that movement interrupts at once (`0x51512a` → `0x6e4940`, sent at
@@ -892,4 +1125,43 @@ fn a_standing_jump_keeps_its_air_nudge_for_a_key_pressed_mid_arc() {
         (speed - crate::player::AIR_NUDGE_SPEED).abs() < 1e-4,
         "the forward press nudges the arc: {speed}"
     );
+}
+
+/// One frame with the spyglass's aura as `zoom` leaves it.
+fn scope_frame(client: &mut Client, zoom: Option<f32>) {
+    let world = client.app.world_mut();
+    world.resource_mut::<scoped_view::ScopedView>().zoom = zoom;
+    client.frame(vec![], vec![]);
+}
+
+/// The aura's start and end reach the camera in the frame's controller (`0x5ff462`, `0x61236e` →
+/// `0x50d320`): view 0 at once and the bit, then the bit cleared and view 1 at once, which takes
+/// the camera back out with no zoom asked.
+#[test]
+fn the_spyglass_selects_its_views_at_its_start_and_end() {
+    let mut client = Client::new(Body::Own, |_| {});
+    scope_frame(&mut client, Some(1.0 / 6.0));
+    let world = client.app.world();
+    let rig = world.resource::<CameraControl>();
+    assert!(rig.scoped);
+    assert_eq!(rig.distance, 0.0);
+    assert!(world.resource::<camera_view::CameraViews>().owes_active());
+
+    scope_frame(&mut client, None);
+    let rig = client.app.world().resource::<CameraControl>();
+    assert!(!rig.scoped);
+    assert_eq!((rig.distance, rig.target_distance), (5.55, 5.55));
+}
+
+/// Our arrival ends the scope its create's `PostInit` started under a standing aura, which selects
+/// view 1 at once (`0x5fbb3c`, `0x5deb44`).
+#[test]
+fn an_arrival_under_the_aura_selects_view_one() {
+    let mut client = Client::new(Body::Own, |_| {});
+    let world = client.app.world_mut();
+    world.resource_mut::<scoped_view::ScopedView>().arrival_end = true;
+    client.frame(vec![], vec![]);
+    let rig = client.app.world().resource::<CameraControl>();
+    assert!(!rig.scoped);
+    assert_eq!((rig.distance, rig.target_distance), (5.55, 5.55));
 }

@@ -126,6 +126,8 @@ pub fn spawn_model_entities(
     let mat_frozen = crate::dev_state::deterministic_run();
     let animated = host.is_some();
     let rig_root = host.as_ref().map(|h| h.root);
+    // Every M2 batch, with whether it is a card, for the transparent order's instance.
+    let mut sorted: Vec<(Entity, bool)> = Vec::new();
     if let Some(h) = &host {
         out.push(h.root);
     }
@@ -149,9 +151,9 @@ pub fn spawn_model_entities(
         let Some((stat_mesh, stat_aabb)) = forms.stat.get(batch_idx) else {
             continue;
         };
-        // The authored order biases the transparent sort, so coplanar layers draw in file order;
-        // a WMO batch also takes it into the clip-z nudge, as the reference draws MOBA batches in
-        // strict file order (`0x6b4f10`/`0x6b5190`).
+        // The authored order keys the batch's material; a WMO batch also takes it into its sort
+        // bias and the clip-z nudge, as the reference draws MOBA batches in strict file order
+        // (`0x6b4f10`/`0x6b5190`). An M2 batch sorts by the transparent order's keys.
         let batch_order = u16::try_from(batch_idx + 1).unwrap_or(u16::MAX);
         let interior = sub.interior || interior_slot.is_some();
         // A billboard card culls by its `0x04` flag like any batch: the bone turns +X to the
@@ -165,7 +167,14 @@ pub fn spawn_model_entities(
         // A batch whose UV or tint loop differs by sequence gets a material keyed by this
         // placement's host, since placements re-roll their variations independently. Without a
         // host it shares and stays at the built seed.
-        let per_seq = sub.uv_seq.is_some() || sub.rgb_seq.is_some();
+        let stage1_moves = crate::doodad_anim::Stage1Loops::of(&sub.geometry).any();
+        let per_seq = sub.uv_seq.is_some()
+            || sub.rgb_seq.is_some()
+            || sub
+                .geometry
+                .stage1
+                .as_ref()
+                .is_some_and(|s| s.uv_seq.is_some());
         let seq_owner = per_seq.then_some(rig_root).flatten();
         let cutout = model_material(
             mat_cache,
@@ -186,6 +195,7 @@ pub fn spawn_model_entities(
             sub.combine,
             shade,
             batch_order,
+            sub.geometry.order,
             sub.uv_anim.as_ref(),
             sub.rgb_anim.as_ref(),
             sub.wmo_batch,
@@ -225,6 +235,7 @@ pub fn spawn_model_entities(
                 sub.combine,
                 shade,
                 batch_order,
+                sub.geometry.order,
                 sub.uv_anim.as_ref(),
                 sub.rgb_anim.as_ref(),
                 sub.wmo_batch,
@@ -242,6 +253,7 @@ pub fn spawn_model_entities(
                 || sub.alpha_anim.is_some()
                 || seq_owner.is_some()
                 || sub.uv_anim.is_some()
+                || stage1_moves
                 || sub.rgb_anim.is_some(),
             interior_prop: interior_probe,
             order_free: matches!(sub.blend, ModelBlend::Opaque | ModelBlend::AlphaTest)
@@ -377,7 +389,7 @@ pub fn spawn_model_entities(
                     two_sided,
                     unlit: sub.emissive,
                     fog_policy: sub.fog_policy,
-                    // The retained pass bakes neither stage-0 nor stage-1 generated coordinates.
+                    // The retained pass draws no second stage and bakes no generated coordinate.
                     env_map: sub.env_map || sub.stage1.is_some(),
                     no_depth_write: sub.no_depth_write,
                     no_depth_test: sub.no_depth_test,
@@ -416,32 +428,14 @@ pub fn spawn_model_entities(
                 continue;
             }
         }
-        // Register both materials for the UV scroll (idempotent per material). A per-sequence set
-        // replaces the shared loop when there is a host to read; a period-0 loop is a constant the
-        // seed already wrote, so it stays out.
-        if let (Some(seqs), Some(host)) = (sub.uv_seq.as_ref(), seq_owner) {
-            for id in [cutout.id(), blend.id()] {
-                crate::doodad_anim::register_uv(
-                    uv_reg,
-                    anim_table,
-                    materials,
-                    id,
-                    crate::doodad_anim::UvLoop::PerSeq {
-                        seqs: seqs.clone(),
-                        host,
-                    },
-                );
-            }
-        } else if let Some(anim) = sub.uv_anim.as_ref().filter(|a| a.period > 0.0) {
-            for id in [cutout.id(), blend.id()] {
-                crate::doodad_anim::register_uv(
-                    uv_reg,
-                    anim_table,
-                    materials,
-                    id,
-                    crate::doodad_anim::UvLoop::Shared(Some(anim.clone())),
-                );
-            }
+        // Register both materials for the UV scroll of either stage (idempotent per material). A
+        // per-sequence set replaces the shared loop when there is a host to read; a period-0 loop
+        // is a constant the seed already wrote, so it stays out.
+        let loops = crate::doodad_anim::UvLoops::of(sub).translation_only();
+        for id in [cutout.id(), blend.id()] {
+            crate::doodad_anim::register_entity_uv(
+                uv_reg, anim_table, materials, id, &loops, seq_owner,
+            );
         }
         // Likewise for the animated M2Color RGB tint.
         if let (Some(seqs), Some(host)) = (sub.rgb_seq.as_ref(), seq_owner) {
@@ -570,6 +564,9 @@ pub fn spawn_model_entities(
                 .entity(entity)
                 .insert(crate::mesh_tag::InteriorProbePayload);
         }
+        if !is_wmo {
+            sorted.push((entity, sub.billboard.is_some()));
+        }
         // On the entity-hosted lane the batch is lit by its own doodad def, not its host; set
         // here as only this site reaches every batch, cards included.
         if entity_hosted {
@@ -609,6 +606,18 @@ pub fn spawn_model_entities(
         // A following card despawns with its owner and must stay a world root: keep it out.
         if sub.billboard.is_none() || card_owner.is_none() {
             out.push(entity);
+        }
+    }
+    // One instance for the transparent order, keyed at the placement's origin: a placement's
+    // batches are separate world roots, so each names it.
+    if let Some(key) = crate::model_render::order::placement_instance(
+        rig_root,
+        &sorted,
+        card_owner,
+        transform.translation,
+    ) {
+        for &(entity, _) in &sorted {
+            commands.entity(entity).insert(key);
         }
     }
     // Animation runs while a submesh is drawn or, for a meshless host, while its gate admits it.

@@ -4,19 +4,19 @@
 //! 0x64a4c0`, first at `0x5159b4`).
 //!
 //! What it reads splits in two, and [`resolve_unit_in`] is the one derivation over both. The
-//! client's own state ([`UnitTokenGlobals`]): the target, mouseover and interaction globals and
-//! the group tables, which the VM holds as the app pushes them ([`UnitGuids`]) and moves itself
-//! where a call does, and which a getter reads through the lent host where it answers: the target
-//! and the interaction globals ([`super::selection_read`]) and the group rows. The objects ([`UnitTokenObjects`]): the active player's, our pet off our
-//! descriptor, a member's pet off its, the mouseover's, and each hop's `UNIT_FIELD_TARGET`, which
-//! a getter reads through the lent host as of the place it runs ([`resolve_token`]), and off the
-//! snapshot with no host to ask.
+//! client's own state ([`UnitTokenGlobals`]): the target and interaction globals
+//! ([`super::selection_read`]) and the group rows, which a getter reads through the lent host, and
+//! the mouseover global, the VM's own, which its publisher writes. The objects
+//! ([`UnitTokenObjects`]): the active player's, our pet off our descriptor, a member's pet off its,
+//! the mouseover's, and each hop's `UNIT_FIELD_TARGET`, which a getter reads through the lent host
+//! as of the place it runs ([`resolve_token`]). With no host to ask, both come off the VM's
+//! stand-in ([`UnitGuids`]).
 
 use std::collections::HashMap;
 
 use mlua::Lua;
 
-use super::super::roster_read::{GroupRow, RowQuery};
+use super::super::roster_read::{GroupRow, GroupRows, GroupRowsQuery, RowQuery};
 use super::selection_read::{live_selection, SelectionGlobals};
 
 /// What `0x515970` reads of the client's own state, no object's field: the reference keeps each in
@@ -82,8 +82,8 @@ pub fn resolve_unit_in(
         },
         UnitBase::Target => globals.target(),
         UnitBase::Npc => globals.npc(),
-        // Deviation: `0x4e81d0` has no bound and reads past its four-entry table, which is
-        // stale memory, not a mechanism; past it, nobody.
+        // Deviation: `0x4e81d0` has no bound and reads past its four-entry table; past it, nobody,
+        // because what it reads there is stale memory, not a mechanism.
         UnitBase::PartyPet(row) => pet(globals.party(row), &|| globals.party_pet_record(row)),
         // Capped at 4 (`0x4e81b0`).
         UnitBase::Party(row) => globals.party(row),
@@ -250,6 +250,56 @@ pub fn field_watchers_in(
         })
 }
 
+/// `UpdateUnitTokenFlags`' read of `guid`'s flags (`0x60c520`): the active player 0x1
+/// (`0x5fa6d0`), its pet 0x2 (`0x60c59d`), else a party member 0x10 (`0x4e7f70`), else a party
+/// pet 0x20 (`0x4e7fc0`), a raid member 0x100 (`0x4baee0`) and its pet 0x200 (`0x4baf30`), and
+/// the selection 0x1000 (`0x60c642`).
+pub(crate) fn token_flags_in(
+    globals: &dyn UnitTokenGlobals,
+    objects: &dyn UnitTokenObjects,
+    guid: u64,
+) -> u32 {
+    use super::super::unit_watch::*;
+    if guid == 0 {
+        return 0;
+    }
+    let me = objects.active_player();
+    let mut flags = 0;
+    if guid == me {
+        flags |= TOKEN_PLAYER;
+    }
+    if me != 0 && objects.pet_of(me) == Some(guid) {
+        flags |= TOKEN_PET;
+    }
+    let member_in = |n: u32, member: &dyn Fn(u32) -> u64| (0..n).any(|row| member(row) == guid);
+    let pet_in = |n: u32, member: &dyn Fn(u32) -> u64, record: &dyn Fn(u32) -> u64| {
+        (0..n).any(|row| {
+            let m = member(row);
+            m != 0 && row_pet(objects, m, || record(row)) == guid
+        })
+    };
+    let party = |r| globals.party(r);
+    let party_pet = |r| globals.party_pet_record(r);
+    let raid = |r| globals.raid(r);
+    let raid_pet = |r| globals.raid_pet_record(r);
+    if flags & TOKEN_PLAYER == 0 && member_in(PARTY_ROWS, &party) {
+        flags |= TOKEN_PARTY;
+    }
+    if flags & TOKEN_PET == 0 && pet_in(PARTY_ROWS, &party, &party_pet) {
+        flags |= TOKEN_PARTY_PET;
+    }
+    if member_in(RAID_ROWS, &raid) {
+        flags |= TOKEN_RAID;
+    }
+    if pet_in(RAID_ROWS, &raid, &raid_pet) {
+        flags |= TOKEN_RAID_PET;
+    }
+    if globals.target() == guid {
+        flags |= TOKEN_TARGET;
+    }
+    flags
+}
+
 /// `f` over the objects as the lent host reads them now ([`crate::script::CallHost::read_unit_tokens`]),
 /// `None` with no host free to ask or one that reads none.
 pub(crate) fn with_live_objects<T>(
@@ -313,6 +363,7 @@ pub(crate) fn live_parsed(
     let globals = LiveGlobals {
         guids,
         row,
+        rows: None,
         selection,
     };
     if reads_objects(base, hops) {
@@ -329,22 +380,41 @@ pub(crate) fn live_parsed(
 }
 
 /// The client's globals, each read live where the lent host answered for it: the selection's and
-/// the interaction's ([`super::SelectionQuery`]) and one group row, the row its base names
-/// ([`RowQuery`]); every other global as `guids` holds it.
+/// the interaction's ([`super::SelectionQuery`]), and one group row, the row its base names
+/// ([`RowQuery`]), or every row ([`GroupRowsQuery`]); the mouseover, and any the host did not
+/// answer, as `guids` holds it.
 pub(crate) struct LiveGlobals<'a> {
     guids: &'a UnitGuids,
     row: Option<(UnitBase, GroupRow)>,
+    rows: Option<GroupRows>,
     selection: Option<SelectionGlobals>,
 }
 
 impl<'a> LiveGlobals<'a> {
-    /// `guids` with the selection's and the interaction's globals asked of the lent host.
+    /// `guids` with the selection's and the interaction's globals and every group row asked of
+    /// the lent host, for the walks over all the tokens (`0x515c50`).
     pub(crate) fn asked(lua: &Lua, guids: &'a UnitGuids) -> Self {
         Self {
             guids,
             row: None,
+            rows: crate::script::live::ask(lua, &GroupRowsQuery),
             selection: live_selection(lua),
         }
+    }
+
+    /// Row `row` of the party's or the raid's rows asked, `None` where none was.
+    fn asked_row(&self, raid: bool, row: u32) -> Option<GroupRow> {
+        let rows = self.rows.as_ref()?;
+        let row = usize::try_from(row).ok()?;
+        Some(
+            if raid {
+                rows.raid.get(row)
+            } else {
+                rows.party.get(row)
+            }
+            .copied()
+            .unwrap_or_default(),
+        )
     }
 }
 
@@ -352,6 +422,8 @@ impl UnitTokenGlobals for LiveGlobals<'_> {
     fn target(&self) -> u64 {
         self.selection.map_or(self.guids.target, |s| s.target)
     }
+    /// The VM's own global: only the publisher writes it, at the pick (`0x492890`), and a token
+    /// tests it against the objects as it resolves (`0x515bd2`, `0x515e14`).
     fn mouseover(&self) -> u64 {
         self.guids.mouseover
     }
@@ -361,25 +433,33 @@ impl UnitTokenGlobals for LiveGlobals<'_> {
     fn party(&self, row: u32) -> u64 {
         match self.row {
             Some((UnitBase::Party(r) | UnitBase::PartyPet(r), live)) if r == row => live.member,
-            _ => self.guids.party(row),
+            _ => self
+                .asked_row(false, row)
+                .map_or_else(|| self.guids.party(row), |r| r.member),
         }
     }
     fn raid(&self, row: u32) -> u64 {
         match self.row {
             Some((UnitBase::Raid(r) | UnitBase::RaidPet(r), live)) if r == row => live.member,
-            _ => self.guids.raid(row),
+            _ => self
+                .asked_row(true, row)
+                .map_or_else(|| self.guids.raid(row), |r| r.member),
         }
     }
     fn party_pet_record(&self, row: u32) -> u64 {
         match self.row {
             Some((UnitBase::PartyPet(r), live)) if r == row => live.pet_record,
-            _ => self.guids.party_pet_record(row),
+            _ => self
+                .asked_row(false, row)
+                .map_or_else(|| self.guids.party_pet_record(row), |r| r.pet_record),
         }
     }
     fn raid_pet_record(&self, row: u32) -> u64 {
         match self.row {
             Some((UnitBase::RaidPet(r), live)) if r == row => live.pet_record,
-            _ => self.guids.raid_pet_record(row),
+            _ => self
+                .asked_row(true, row)
+                .map_or_else(|| self.guids.raid_pet_record(row), |r| r.pet_record),
         }
     }
 }
@@ -415,10 +495,12 @@ pub(crate) fn token_guid(lua: &Lua, guids: &UnitGuids, token: &str) -> mlua::Res
         .map_err(|()| mlua::Error::runtime(format!("Unknown unit name: {token}")))
 }
 
-/// What the resolver reads, as the app pushes it: the guid globals, the group tables and, for each
-/// unit a token can reach, whether it is held and whom it targets. The snapshot's half of
-/// [`UnitTokenGlobals`] and [`UnitTokenObjects`], and the client's globals the live read takes. A
-/// zero guid is nobody.
+/// What the resolver reads with no host to ask: the guid globals, the group tables and, for each
+/// unit a token can reach, whether it is held and whom it targets, as the VM's own seats last wrote
+/// them (the player at the world entry, the selection at a selecting call, the mouseover at its
+/// publish) or a harness set them. The stand-in's half of [`UnitTokenGlobals`] and
+/// [`UnitTokenObjects`]; the live read takes the mouseover from it, which no packet writes. A zero
+/// guid is nobody.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UnitGuids {
     /// The local player's guid; 0 without the player object, when `player` and `pet` answer nil
@@ -428,7 +510,8 @@ pub struct UnitGuids {
     pub pet: u64,
     /// The target global `[0xb4e2d8]`.
     pub target: u64,
-    /// The mouseover global `[0xb4e2c8]`, read only while it is a held unit (`0x515bd2`).
+    /// The mouseover global `[0xb4e2c8]` as its publisher last wrote it (`0x492890`): a unit's
+    /// guid, else 0. A token reads it only while that unit is held (`0x515bd2`).
     pub mouseover: u64,
     /// The interaction NPC `[0xb4e2d0]`.
     pub npc: u64,
@@ -614,9 +697,8 @@ impl UnitGuids {
     }
 
     /// The base token of the first group row naming `guid`, as a member or its pet, or `None`
-    /// off the roster: party rows 1 to 4, then raid rows. These are the units a getter answers
-    /// from a record when it holds no object (the party record, then the raid's, `0x496400`, then
-    /// the pet record, `0x496420`), so a chain ending on one reads what its own token reads.
+    /// off the roster: party rows 1 to 4, then raid rows, off the pushed rows; the no-host
+    /// fallback of the roster's member-or-pet test (`0x491900`).
     pub(crate) fn roster_token(&self, guid: u64) -> Option<String> {
         if guid == 0 {
             return None;

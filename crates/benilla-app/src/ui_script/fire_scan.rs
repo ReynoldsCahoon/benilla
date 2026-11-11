@@ -111,11 +111,10 @@ pub(super) struct Scan {
 }
 
 /// The files that drain a queue of events: their relay carries what the queue's sites pushed,
-/// and those are sites of their own. The host queue's are the `pending_events` pushes; a feed's
-/// are the calls of `Fires::post`, a firing function by its signature; the call host's are the
-/// fires an engine step made while the host was out, each held inside the firing function it
-/// came through (`fire_event_into`); the dialogs' lane's are the calls of `DialogLane::event`, a
-/// firing function by its signature.
+/// and those are sites of their own. The host queue's are the `pending_events` pushes; the call
+/// host's are the fires an engine step made while the host was out, each held inside the firing
+/// function it came through (`fire_event_into`); the dialogs' lane's are the calls of
+/// `DialogLane::event`, a firing function by its signature.
 const DRAINS: &[&str] = &[
     "crates/benilla-ui/src/script/tick.rs",
     "crates/benilla-app/src/ui_dialog_verbs/lane.rs",
@@ -1195,6 +1194,55 @@ fn queue_writers_of(s: &Scan) -> Vec<QueueWriter> {
     out
 }
 
+/// A scope benilla-app's shipped code opens for a site on the raise check's allow list,
+/// `Origin::Allowed(<key>)` ([`benilla_ui::script::origin`]).
+#[derive(Debug)]
+pub(crate) struct AllowedScope {
+    /// The key, when it is written as a string literal.
+    pub site: Option<String>,
+    /// The function the scope sits in, by its path from the crate root: `minimap::feed_minimap`.
+    pub function: String,
+    /// Where the scope opens.
+    pub at: String,
+}
+
+/// Every [`AllowedScope`], in file order.
+pub(crate) fn allowed_scopes() -> Vec<AllowedScope> {
+    const APP: &str = "crates/benilla-app/src/";
+    const OPEN: &str = "Origin::Allowed(";
+    let mut out = Vec::new();
+    for src in scan().sources.iter().filter(|s| s.path.starts_with(APP)) {
+        let module = src.path[APP.len()..]
+            .trim_end_matches(".rs")
+            .trim_end_matches("/mod")
+            .replace('/', "::");
+        let defs = defs_of(src);
+        let mut from = 0;
+        while let Some(at) = find_from(src.code.as_bytes(), OPEN, from) {
+            from = at + OPEN.len();
+            if src.lit[at] {
+                continue;
+            }
+            let site = src.code[from..]
+                .trim_start()
+                .strip_prefix('"')
+                .and_then(|key| key.split_once('"'))
+                .map(|(key, _)| key.to_string());
+            let function = defs
+                .iter()
+                .filter(|d| d.start <= at && at < d.end)
+                .min_by_key(|d| d.end - d.start)
+                .map_or_else(String::new, |d| format!("{module}::{}", d.name));
+            out.push(AllowedScope {
+                site,
+                function,
+                at: format!("{}:{}", src.path, line_of(&src.code, at)),
+            });
+        }
+    }
+    out
+}
+
 #[test]
 fn the_firing_functions_are_found_by_their_signature() {
     let s = scan();
@@ -1204,7 +1252,6 @@ fn the_firing_functions_are_found_by_their_signature() {
         "queue_event",
         "raise",
         "fire_global",
-        "post",
     ] {
         assert!(
             s.firing.contains(name),

@@ -4,12 +4,12 @@ use crate::layout::{LayoutInput, LayoutSolver, Rect};
 use crate::widget::{FrameHandle, RegionHandle, WidgetArena};
 
 use super::{
-    auction, backdrop, bank, camera_view, char_stats, chat_window, colorselect, container, craft,
-    cursor, death, gossip, guild, item_text, loot, loot_roll, macros, mail, merchant,
-    parse_unit_token, party, petition, pvp, quest, quest_log, reputation, simplehtml, skills,
-    slider, social, spellbook, stable, taxi, trade, tradeskill, trainer, weapon_enchant,
-    ActionSlot, AuraState, FontObject, ItemTemplateView, MusicRequest, PlayerReqState, ScriptValue,
-    SoundRequest, UnitBase, UnitState, UnitTokenParse,
+    auction, backdrop, bank, char_stats, chat_window, colorselect, container, craft, cursor, death,
+    gossip, guild, item_text, loot, loot_roll, macros, mail, merchant, parse_unit_token, party,
+    petition, pvp, quest, quest_log, reputation, simplehtml, skills, slider, social, spellbook,
+    stable, taxi, trade, tradeskill, trainer, weapon_enchant, ActionSlot, AuraState, FontObject,
+    ItemTemplateView, MusicRequest, PlayerReqState, ScriptValue, SoundRequest, UnitBase, UnitState,
+    UnitTokenParse,
 };
 
 // ── The Rust-side model ──
@@ -89,6 +89,15 @@ pub(crate) fn node_deferred(
 
 /// The Rust-side model behind the Lua VM, in `lua.app_data`. It holds no Lua handles, each of
 /// which is a collector root.
+/// The fields of the top's stored mouse event (`[root+0x1104]`) its readers take: the button
+/// (`+0x1108`) and the point (`+0x1118`, `+0x111c`) a move is compared with (`0x766122`).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StoredMouseEvent {
+    /// The press's button by name; `None` for a move's, which carries 0.
+    pub(crate) button: Option<String>,
+    pub(crate) at: (f32, f32),
+}
+
 #[derive(Clone)]
 pub(crate) struct Model {
     /// Which FrameScript state this VM is: it picks the event table and the frame types.
@@ -391,7 +400,7 @@ pub(crate) struct Model {
     /// Every unit's auras by guid, the player's too, ascending aura slot: one list per unit,
     /// whatever token names it.
     pub(crate) unit_auras: HashMap<u64, super::UnitAuraList>,
-    /// The unit-token resolver's inputs (`0x515970`), which the aura bindings resolve through.
+    /// The unit-token resolver's no-host stand-in and its mouseover global (`0x515970`).
     pub(crate) unit_guids: super::UnitGuids,
     /// The player's active tracking aura, behind `GetTrackingTexture`.
     pub(crate) tracking: Option<super::aura::TrackingState>,
@@ -399,11 +408,6 @@ pub(crate) struct Model {
     /// or the targeting cursor made while it was out, and the handlers an engine step fired then
     /// ([`super::host::holding`]), for it to run as soon as it is back.
     pub(crate) script_calls: Vec<super::calls::Waiting>,
-    /// What deferred stretches left waiting, parked by key until the app runs them
-    /// ([`super::UiScript::park_since`]).
-    pub(crate) parked: HashMap<u64, Vec<super::calls::Waiting>>,
-    /// The next key [`Self::parked`] hands out.
-    pub(crate) next_parked: u64,
     /// How many drains of [`Self::script_calls`] are running, each inside a call the one outside
     /// it applied ([`super::calls::submit`]).
     pub(crate) call_depth: u8,
@@ -416,8 +420,6 @@ pub(crate) struct Model {
     pub(crate) input: super::input_verbs::InputState,
     /// The protected-action gate's input events ([`super::protected`]).
     pub(crate) protected: super::protected::Flags,
-    /// `DropItemOnUnit` tokens (`0x48d960`), gated by the app; a refusal silently keeps the item.
-    pub(crate) drop_item_on_unit: Vec<String>,
 
     /// The joined channels, in join order: the numbers `GetChannelName` answers.
     pub(crate) joined_channels: Vec<Option<super::channel::JoinedChannel>>,
@@ -456,6 +458,9 @@ pub(crate) struct Model {
     /// `SetLookingForGroup` writes and `GetLookingForGroup` reads; the reference's slots stay 0.
     pub(crate) lfg_slots: [u32; 3],
     pub(crate) lfg_comment: String,
+    /// The looking-for-group result list `MSG_LOOKING_FOR_GROUP`'s reply writes, and its title
+    /// waits.
+    pub(crate) lfg_store: super::lfg::LfgStore,
     /// Guild roster, ranks, MOTD and info, sorted and filtered by the app, which holds the toggles.
     pub(crate) guild: guild::GuildState,
     /// The roster module's own cells and the rank editor's unsaved edits, apart from `guild` so a
@@ -474,6 +479,8 @@ pub(crate) struct Model {
     pub(crate) known_languages: Vec<String>,
     /// `Languages.dbc`'s `(ID, Name_lang)` rows in file order, whatever the character knows.
     pub(crate) language_table: Vec<(u32, String)>,
+    /// The `ChrRaces` and `ChrClasses` rows an item's race and class lines walk.
+    pub(crate) item_req_names: super::tooltip_item::names::ItemReqNames,
     pub(crate) zone_channel_catalog: Vec<super::channel::ZoneChannelRow>,
     /// The recruitment auto-join latch `[0x843608]`: 0 `STANDARD`, 1 `AUTO` (`0x49ea70` maps any
     /// other word to 1). Boots at 1, as the reference writes `AUTO` for an untouched option.
@@ -485,17 +492,13 @@ pub(crate) struct Model {
     pub(crate) guild_recruitment_plan: super::channel::RecruitmentPlan,
     /// Lua changed the recruitment mode: the chat cache's dirty signal.
     pub(crate) guild_recruitment_changed: bool,
-    /// `LoggingChat` and `LoggingCombat`'s flags, and their change cue.
+    /// `LoggingChat` and `LoggingCombat`'s flags.
     pub(crate) logging_chat: bool,
     pub(crate) logging_combat: bool,
-    pub(crate) logging_changed: bool,
     /// A user-placed frame moved or resized, or `SetUserPlaced` ran: the layout cache's save cue.
     pub(crate) user_placed_changed: bool,
     /// The default chat language; `None` is no player, so `GetDefaultLanguage()` returns nothing.
     pub(crate) default_language: Option<String>,
-    /// `SetView`, `SaveView`, `ResetView`, `NextView`, `PrevView` and `FlipCameraYaw` calls; the
-    /// views reach Lua only as CVars, `cameraView` and `camera{Distance,Pitch,Yaw}{,A..D}`.
-    pub(crate) camera_view_requests: Vec<camera_view::CameraViewRequest>,
     /// The glue core's slots and request queue; empty in an in-game VM.
     pub(crate) glue: super::glue_core::GlueCore,
     /// `PLAYER_LOGIN`'s one-shot, the reference's `[0xb4e260]`: armed by the UI load, spent by
@@ -562,7 +565,7 @@ pub(crate) struct Model {
     pub(crate) current_resolution: Option<usize>,
     /// What this device and presentation path offer, behind `GetVideoCaps`.
     pub(crate) video_caps: super::cvars::VideoCaps,
-    /// `RestartGx()` calls, the video window's apply button.
+    /// The `gxRestart` runs no call took, a bare VM's, for the host's frame drain.
     pub(crate) restart_gx_asks: u32,
 
     /// Globals `RegisterForSave` declared, in order: written at logout and read back at load.
@@ -594,11 +597,6 @@ pub(crate) struct Model {
     pub(crate) macros_dirty: bool,
     /// Bumped by every seed and change, for readers that must not drain `macros_dirty`.
     pub(crate) macros_generation: u64,
-    /// Bumped by every `EditMacro` that names a macro, whose worker `0x4f1280` ends in the action
-    /// bar's usable refresh (`0x4f132e`).
-    pub(crate) macro_edits: u64,
-    /// The load's derivations the table owes the app since its last take.
-    pub(crate) macro_derives: macros::MacroDerives,
     /// Each macro's cached cast by id, derived in the verbs and the app's pass; an absent macro
     /// reads unbound.
     pub(crate) macro_bindings: HashMap<u32, macros::MacroBinding>,
@@ -761,9 +759,6 @@ pub(crate) struct Model {
     pub(crate) trainer_filter: u32,
     /// The profession build's pending count (`0xbde048`).
     pub(crate) trade_skill_pending: u32,
-    /// The product records the builds missed, one per miss, each waiting with the callback
-    /// `0x4fc8e0` (`0x4fcd32`).
-    pub(crate) trade_skill_build_waits: Vec<u32>,
     /// Collapsed skill-line ids, kept across a re-push and cleared when the trainer closes.
     pub(crate) trainer_collapsed: HashSet<u32>,
     /// The skill-line filter `ds:0xb73a20`: bit n set shows header group n, every bit on a list.
@@ -922,9 +917,6 @@ pub(crate) struct Model {
     pub(crate) quest_blip: Option<quest_log::QuestBlip>,
     /// Item id to its tooltip view.
     pub(crate) item_templates: HashMap<u32, ItemTemplateView>,
-    /// Item ids asked for and missing, for the app to answer: a lookup with a callback, which
-    /// asks the server.
-    pub(crate) item_stat_asks: HashSet<u32>,
     /// Item ids `GetItemInfo` read and missing: its lookup passes no callback (`0x48e185`), so
     /// the app answers from its cache only.
     pub(crate) item_stat_reads: HashSet<u32>,
@@ -973,6 +965,9 @@ pub(crate) struct Model {
     pub(crate) item_cache_waits: HashMap<FrameHandle, Vec<super::tooltip_item::build::CacheWait>>,
     /// The misses of the item build under way, handed to its tooltip as it ends.
     pub(crate) item_cache_misses: Vec<super::tooltip_item::build::CacheWait>,
+    /// The item records a tooltip kept a wait on since the last ask, each asked of the item cache
+    /// with the tooltips' callback ([`super::ItemCallback::Tooltip`]) once the borrow drops.
+    pub(crate) tooltip_record_asks: Vec<u32>,
     /// The quest-log groups' `(ZoneOrSort, name)`, sorted by `0x4de8f0` (`0xbb7040`): a row's
     /// group ordinal is its place here.
     pub(crate) quest_log_headers: Vec<(i32, String)>,
@@ -1030,6 +1025,10 @@ pub(crate) struct Model {
 
     /// `GetBillingTimeRested()` (`0x48ec50`) in minutes from `SMSG_AUTH_RESPONSE`, unconverted.
     pub(crate) billing_time_rested: u32,
+    /// `GetBillingTimeRemaining()`'s minutes (`+0x1af4`, `0x46dbf0`) from the same group.
+    pub(crate) billing_time_remaining: u32,
+    /// The plan flags (`+0x1afc`) `GetBillingPlan()` decodes (`0x46dc40`).
+    pub(crate) billing_plan_flags: u8,
     /// `InCinematic()`. While set, `StaticPopup_Show` refuses any dialog without
     /// `interruptCinematic` (`StaticPopup.lua:1454`).
     pub(crate) in_cinematic: bool,
@@ -1042,7 +1041,8 @@ pub(crate) struct Model {
     pub(crate) inventory_slots: char_stats::InventorySlots,
     /// The six bank-bag slots, ids 64..=69, fed from the player descriptor's guids.
     pub(crate) bank_bag_slots: char_stats::BankBagSlots,
-    /// `GetInventoryAlertStatus` in `0x806eb8` order; every push fires `UPDATE_INVENTORY_ALERTS`.
+    /// The 12 alert statuses `GetInventoryAlertStatus` reads (`0xb71f60`), in `0x806eb8` order, as
+    /// the last recompute left them ([`super::UiScript::recompute_inventory_alerts`]).
     pub(crate) inventory_alerts: [u8; 12],
     /// Main- and off-hand temporary enchants in `GetWeaponEnchantInfo`'s order, pushed each frame.
     pub(crate) weapon_enchants: [Option<weapon_enchant::WeaponEnchant>; 2],
@@ -1051,8 +1051,6 @@ pub(crate) struct Model {
     /// slots 1..=19 as the doll numbers them: the slot getters' other-unit leg (`0x4c8420` →
     /// `0x5f0d60`).
     pub(crate) visible_equipment: HashMap<u64, char_stats::InventorySlots>,
-    /// `DressUpModel` `SetUnit`, `Dress`, `Undress` and `TryOn` calls, applied in call order.
-    pub(crate) dressup_intents: Vec<super::dressup::DressUpIntent>,
     /// Tabard designs per `TabardModel`, the app's preview five, the host facts and queued calls.
     pub(crate) tabard_designs: HashMap<crate::widget::FrameHandle, [i32; 5]>,
     pub(crate) tabard_preview: Option<[i32; 5]>,
@@ -1112,6 +1110,8 @@ pub(crate) struct Model {
     pub(crate) worldmap: super::worldmap::WorldMapState,
     /// Nameplate `Button`s under `WorldFrame`, never shrunk, visible to `GetChildren()`.
     pub(crate) nameplates: super::nameplate::NamePlates,
+    /// The units' watch lists in link order ([`super::unit_watch`]).
+    pub(crate) unit_watches: super::unit_watch::UnitWatches,
     /// Chat bubble `Frame`s under `WorldFrame`, pooled the same way.
     pub(crate) chat_bubbles: super::chat_bubble::ChatBubbles,
     /// The world-state readout's rows, gated and resolved by the app.
@@ -1133,6 +1133,11 @@ pub(crate) struct Model {
     pub(crate) item_locks: std::collections::HashSet<u64>,
     /// The last cursor position in UI space (logical px, y-up), behind `GetCursorPosition()`.
     pub(crate) cursor_pos: (f32, f32),
+    /// The last mouse event the top stored (`[root+0x1104]`), as the focus change's release reads
+    /// it ([`super::UiScript::focus_world_frame`]): a press stores its own at its handler's top
+    /// (`0x76631b`), a move to a new point its own (`0x76615f`), whose button is 0, and a release
+    /// or a wheel notch stores nothing.
+    pub(crate) stored_event: StoredMouseEvent,
 
     /// The minimap's process-wide statics (zoom cells, indoor byte, mask), shared by every
     /// Minimap frame of this VM.
@@ -1160,6 +1165,23 @@ pub(crate) struct Model {
 }
 
 impl Model {
+    /// The `LoggingChat` (`combat` false) or `LoggingCombat` flag.
+    pub(crate) fn logging(&self, combat: bool) -> bool {
+        if combat {
+            self.logging_combat
+        } else {
+            self.logging_chat
+        }
+    }
+
+    pub(crate) fn set_logging(&mut self, combat: bool, on: bool) {
+        if combat {
+            self.logging_combat = on;
+        } else {
+            self.logging_chat = on;
+        }
+    }
+
     /// The profession windows open (`[0xbde040]`, `[0xbdcfb8]`): the trade skill's line and the
     /// craft's type while each window is open, which a close zeroes (`0x4fc870`, `0x4f5fe0`).
     pub(crate) fn open_professions(&self) -> super::OpenProfessions {
@@ -1239,7 +1261,7 @@ impl Model {
 
     /// The state of the unit `token` names off the snapshots alone: the snapshot the app pushed
     /// under the token, else, for a token with a `target` hop or for `target` itself, what the
-    /// getters read for the guid the pushed resolver inputs name. A getter reads it through
+    /// getters read for the guid the resolver's stand-in names. A getter reads it through
     /// [`super::unit::view`], which resolves at the call.
     pub(crate) fn snapshot_unit(&self, token: &str) -> Option<&UnitState> {
         self.pushed_unit(token).or_else(|| self.chained_unit(token))
@@ -1248,9 +1270,9 @@ impl Model {
     /// What the getters read for `guid`, the unit a token names at the call where its own push
     /// names another (the resolver's guid, then each getter's lookup, `0x468460`): while it is
     /// `held`, a chain end's snapshot, else a token's push of it, else its by-name candidate's,
-    /// else the unit as its guid alone; with no object, the group row naming it, whose push
-    /// carries its records (`0x496400`, `0x496420`), else the app's no-object entry, else its guid
-    /// alone, whose name the name cache answers (`0x5171eb`).
+    /// else the unit as its guid alone; with no object, the app's no-object entry, else its guid
+    /// alone, whose name the name cache answers (`0x5171eb`). The group's records of it are the
+    /// host's to read (`0x496400`, `0x496420`).
     pub(crate) fn unit_of_guid(&self, guid: u64, held: bool) -> std::borrow::Cow<'_, UnitState> {
         use std::borrow::Cow;
         let found = if held {
@@ -1267,10 +1289,7 @@ impl Model {
                 })
                 .or_else(|| self.name_candidates.get(&guid).map(|c| &c.state))
         } else {
-            self.unit_guids
-                .roster_token(guid)
-                .and_then(|t| self.pushed_unit(&t))
-                .or_else(|| self.units_by_guid.get(&guid))
+            self.units_by_guid.get(&guid)
         };
         match found {
             Some(u) => Cow::Borrowed(u),
@@ -1298,24 +1317,15 @@ impl Model {
     /// The unit a token with a `target` hop and no push of its own names, or `target` itself while
     /// the selection's object is not held (the app pushes `"target"` for a held one): the
     /// resolver's guid (`0x515970`, which the getters call before their own object lookup,
-    /// `0x468460`), then what each getter reads for that guid. A held unit's snapshot first; with
-    /// no object, the group row naming the guid, whose own token's push carries its records
-    /// (`0x496400`, `0x496420`) and the roster's `UnitExists` (`0x491900`), so a party member out
-    /// of range shows on the target frame; off the roster, the app's no-object entry, a name from
-    /// the name cache (`0x5171eb`) and nothing more. Any other token without a hop is the app's to
-    /// push, base by base, and reads nothing here.
+    /// `0x468460`), then what each getter reads for that guid: a held unit's snapshot, else the
+    /// app's no-object entry, a name from the name cache (`0x5171eb`) and nothing more. A group
+    /// member's records are the host's to read (`0x496400`, `0x496420`). Any other token without
+    /// a hop is the app's to push, base by base, and reads nothing here.
     fn chained_unit(&self, token: &str) -> Option<&UnitState> {
         match parse_unit_token(token) {
             UnitTokenParse::Unit { base, hops } if hops > 0 || base == UnitBase::Target => {
                 let guid = self.unit_guids.resolve_unit(base, hops)?;
-                match self.units_by_guid.get(&guid) {
-                    Some(held) if held.has_object => Some(held),
-                    unheld => self
-                        .unit_guids
-                        .roster_token(guid)
-                        .and_then(|t| self.pushed_unit(&t))
-                        .or(unheld),
-                }
+                self.units_by_guid.get(&guid)
             }
             _ => None,
         }
@@ -1431,14 +1441,11 @@ impl Model {
             unit_guids: Default::default(),
             tracking: None,
             script_calls: Vec::new(),
-            parked: HashMap::new(),
-            next_parked: 0,
             call_depth: 0,
             kept_calls: None,
             call_raises: Default::default(),
             input: Default::default(),
             protected: Default::default(),
-            drop_item_on_unit: Vec::new(),
             joined_channels: Vec::new(),
             party: party::PartyState::default(),
             ready_check: party::ReadyCheckState::default(),
@@ -1456,6 +1463,7 @@ impl Model {
             lfg_dungeons: Vec::new(),
             lfg_slots: [0; 3],
             lfg_comment: String::new(),
+            lfg_store: Default::default(),
             guild: guild::GuildState::default(),
             guild_cells: guild::GuildCells::default(),
             petition: petition::PetitionState::default(),
@@ -1466,6 +1474,7 @@ impl Model {
             chat_colors_changed: false,
             known_languages: Vec::new(),
             language_table: Vec::new(),
+            item_req_names: Default::default(),
             zone_channel_catalog: Vec::new(),
             guild_recruitment_mode: 1,
             guild_recruitment_cascade: false,
@@ -1473,10 +1482,8 @@ impl Model {
             guild_recruitment_changed: false,
             logging_chat: false,
             logging_combat: false,
-            logging_changed: false,
             user_placed_changed: false,
             default_language: None,
-            camera_view_requests: Vec::new(),
             glue: Default::default(),
             player_login_armed: false,
             honor: None,
@@ -1514,8 +1521,6 @@ impl Model {
             macros: macros::MacroState::default(),
             macros_dirty: false,
             macros_generation: 0,
-            macro_edits: 0,
-            macro_derives: Default::default(),
             macro_bindings: HashMap::new(),
             macro_icons: Vec::new(),
             macro_icon_source: None,
@@ -1578,7 +1583,6 @@ impl Model {
             trainer_selection: None,
             trainer_filter: 7,
             trade_skill_pending: 0,
-            trade_skill_build_waits: Vec::new(),
             trainer_collapsed: HashSet::new(),
             trainer_line_filter: u32::MAX,
             trainer_rows: Vec::new(),
@@ -1645,7 +1649,6 @@ impl Model {
             random_properties: HashMap::new(),
             enchant_names: HashMap::new(),
             known_spells: HashSet::new(),
-            item_stat_asks: HashSet::new(),
             item_stat_reads: HashSet::new(),
             player_req: PlayerReqState::default(),
             lock_rows: HashMap::new(),
@@ -1663,6 +1666,7 @@ impl Model {
             item_builds: HashMap::new(),
             item_cache_waits: HashMap::new(),
             item_cache_misses: Vec::new(),
+            tooltip_record_asks: Vec::new(),
             quest_log_headers: Vec::new(),
             quest_store: Default::default(),
             quest_log_collapsed: HashSet::new(),
@@ -1674,12 +1678,14 @@ impl Model {
             shown_chat_lines: Vec::new(),
             worldmap: super::worldmap::WorldMapState::default(),
             nameplates: super::nameplate::NamePlates::default(),
+            unit_watches: Default::default(),
             chat_bubbles: super::chat_bubble::ChatBubbles::default(),
             worldstate: super::worldstate::WorldStateUiState::default(),
             pending_events: Vec::new(),
             verb_events: None,
             item_locks: std::collections::HashSet::new(),
             cursor_pos: (0.0, 0.0),
+            stored_event: StoredMouseEvent::default(),
             minimap: crate::widget::MinimapStatics::default(),
             screenshot_asks: 0,
             realm_name: String::new(),
@@ -1703,6 +1709,8 @@ impl Model {
             partial_play_time: false,
             no_play_time: false,
             billing_time_rested: 0,
+            billing_time_remaining: 0,
+            billing_plan_flags: 0,
             in_cinematic: false,
             exhaustion: [
                 (1, ("Rested".to_string(), 2.0)),
@@ -1719,7 +1727,6 @@ impl Model {
             inventory_alerts: [0; 12],
             weapon_enchants: [None; 2],
             visible_equipment: HashMap::new(),
-            dressup_intents: Vec::new(),
             tabard_designs: HashMap::new(),
             tabard_preview: None,
             tabard_host: Default::default(),

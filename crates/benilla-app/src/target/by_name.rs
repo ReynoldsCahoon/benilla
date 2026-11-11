@@ -80,19 +80,6 @@ impl NameSearch {
     }
 }
 
-/// `/target <name>`: resolve and select (`TargetByName`).
-#[derive(bevy::ecs::message::Message, Clone, Debug)]
-pub(crate) struct TargetByNameRequest {
-    pub(crate) name: String,
-}
-
-/// `/assist [name]`: select the basis unit's target (`AssistByName`, or bare
-/// `AssistUnit("target")`, whose basis is the current selection).
-#[derive(bevy::ecs::message::Message, Clone, Debug)]
-pub(crate) struct AssistRequest {
-    pub(crate) name: Option<String>,
-}
-
 /// The follow start gate's refusals with lines (`0x60fed0`'s mode-3 chain, after its silent arms)
 /// as a pure function, its order pinned by test; "we" are the active mover:
 ///
@@ -425,7 +412,7 @@ impl PlayerLookup<'_, '_> {
     }
 }
 
-/// `/target <name>` and the Lua `TargetByName(name, exactMatch)` through [`scan::commit_owing`], the
+/// `TargetByName(name, exactMatch)`, the stock `/target`'s, through [`scan::commit_owing`], the
 /// stop, select, re-swing path a click takes. `exact` is the Lua second argument, which `0x489d8e`
 /// reads with default 0 as the resolver's exact-only flag (consumed at `0x493cab`). The pick goes
 /// to `SetSelection` as it is (`0x489daa`), so a party member out of range is selected by guid. A
@@ -467,7 +454,7 @@ fn missing_line(name: &str) -> &'static str {
     }
 }
 
-/// `AssistByName(name)` (`0x489c40`) and `/assist [name]`: the basis is the player a nonempty name
+/// `AssistByName(name)` (`0x489c40`), the stock `/assist`'s: the basis is the player a nonempty name
 /// resolves to (typemask 0x10, mode 0, `0x489c82`), else the selection (`0x489c89`), looked up as a
 /// unit (`0x489c9b`, typemask 8); [`SelectCommit::assist`] then selects its target. A basis the
 /// object manager does not hold, a party member out of range included, shows
@@ -499,59 +486,6 @@ pub(super) fn assist_named(
     commit.assist(basis, how);
 }
 
-/// What the chat layer's `/target` and `/assist` asks read and write.
-type ByNameAsk = (
-    ByNameScan<'static, 'static>,
-    SelectCommit<'static, 'static>,
-    Res<'static, crate::ui_action::UiErrorKeys>,
-);
-
-/// One by-name ask committed through the one SetSelection path, its signals in place with the
-/// host lent, as the binding's `SetSelection` signals inside the call (`0x49389c`), then what it
-/// owes past them.
-fn ask_by_name(
-    vm: &mut crate::script_calls::VmWith<ByNameAsk>,
-    step: impl FnOnce(&ByNameScan, &mut SelectCommit, &crate::ui_action::UiErrorKeys),
-) {
-    let select = {
-        let (scan_params, mut commit, errors) = vm.own();
-        let before = super::click::Standing::of(&commit.selection, &commit.seam);
-        let owed = commit.owing(|commit| step(&scan_params, commit, &errors));
-        before.owing_debt(owed)
-    };
-    vm.engine_select(select, |(_, mut commit, _), owed| commit.pay_now(owed));
-}
-
-/// Drain the chat layer's `/target <name>` asks.
-pub(super) fn target_by_name_requests(
-    mut requests: MessageReader<TargetByNameRequest>,
-    mut vm: crate::script_calls::VmWith<ByNameAsk>,
-) {
-    for request in requests.read() {
-        ask_by_name(&mut vm, |scan_params, commit, errors| {
-            target_named(scan_params, commit, errors, &request.name, false);
-        });
-    }
-}
-
-/// Drain the chat layer's `/assist [name]` asks.
-pub(super) fn assist_requests(
-    mut requests: MessageReader<AssistRequest>,
-    mut vm: crate::script_calls::VmWith<ByNameAsk>,
-) {
-    for request in requests.read() {
-        ask_by_name(&mut vm, |scan_params, commit, errors| {
-            assist_named(
-                scan_params,
-                commit,
-                errors,
-                request.name.as_deref().unwrap_or_default(),
-                "/assist",
-            );
-        });
-    }
-}
-
 /// What a follow request comes to at the start gate (`0x60fed0`).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum FollowStart {
@@ -559,12 +493,18 @@ pub(crate) enum FollowStart {
     Refused(&'static str),
     /// The gate's silent return (`0x60ff8a`): the mover itself.
     Silent,
-    /// Armed (`0x611130`): the followee's name, `AUTOFOLLOW_BEGIN`'s argument (`0x610061`).
-    Started { name: String },
+    /// Passed, for the arm (`0x611130`, [`FollowSteps::arm`]): the followee, its name,
+    /// `AUTOFOLLOW_BEGIN`'s argument (`0x610061`), and whether a follow runs, which the arm's stop
+    /// (`0x61113e` → `0x60fb60`) ends with `AUTOFOLLOW_END` (`0x60fb84`) first.
+    Started {
+        guid: u64,
+        name: String,
+        replaced: bool,
+    },
 }
 
-/// The follow's start, from the chat layer's `/follow` and from `FollowUnit` and `FollowByName`
-/// inside their calls ([`crate::script_calls::ScriptCallHost`]); follow sends nothing on the wire.
+/// The follow's start, from `FollowUnit` and `FollowByName`, the stock `/follow`'s, inside their
+/// calls ([`crate::script_calls::ScriptCallHost`]); follow sends nothing on the wire.
 #[derive(SystemParam)]
 pub(crate) struct FollowSteps<'w, 's> {
     scan_params: ByNameScan<'w, 's>,
@@ -577,12 +517,7 @@ pub(crate) struct FollowSteps<'w, 's> {
 }
 
 impl FollowSteps<'_, '_> {
-    /// Whom the follow follows, 0 for none.
-    pub(crate) fn followee(&self) -> u64 {
-        self.follow.as_deref().and_then(|f| f.guid).unwrap_or(0)
-    }
-
-    /// `request` through the start gate, and the follow armed when it passes.
+    /// `request` through the start gate, which writes nothing: what the arm takes when it passes.
     pub(crate) fn start(&mut self, request: &crate::player::FollowRequest) -> FollowStart {
         use crate::player::FollowRequest;
         let scan_params = &self.scan_params;
@@ -641,30 +576,26 @@ impl FollowSteps<'_, '_> {
                     .resolve_unit(guid, None, Ask::Read)
                     .unwrap_or_default()
                     .to_string();
-                info!("follow: now following \"{name}\" guid {guid:#x}");
-                // The arm `0x611130` cancels what runs first: one auto-move cell.
-                if let Some(approach) = self.approach.as_deref_mut() {
-                    approach.stop();
+                let replaced = self.follow.as_deref().is_some_and(|f| f.guid.is_some());
+                FollowStart::Started {
+                    guid,
+                    name,
+                    replaced,
                 }
-                if let Some(follow) = self.follow.as_deref_mut() {
-                    follow.start(guid, name.clone());
-                }
-                FollowStart::Started { name }
             }
         }
     }
-}
 
-/// Drain the chat layer's `/follow [name]` into [`crate::player`]: a refusal's line through the
-/// action feed, the signals from [`crate::ui_follow`]'s transitions.
-pub(super) fn follow_requests(
-    mut requests: MessageReader<crate::player::FollowRequest>,
-    mut steps: FollowSteps,
-    errors: Res<crate::ui_action::UiErrorKeys>,
-) {
-    for request in requests.read() {
-        if let FollowStart::Refused(key) = steps.start(request) {
-            errors.push(crate::ui_action::UiError::key(key));
+    /// The arm `0x611130` past its stop's signal: what runs is cancelled first, one auto-move
+    /// cell (`0x61113e`), then `guid` is stored as the followee.
+    pub(crate) fn arm(&mut self, guid: u64, name: String) {
+        info!("follow: now following \"{name}\" guid {guid:#x}");
+        if let Some(approach) = self.approach.as_deref_mut() {
+            approach.stop();
+        }
+        if let Some(follow) = self.follow.as_deref_mut() {
+            follow.stop();
+            follow.start(guid, name);
         }
     }
 }
@@ -684,12 +615,15 @@ enum OwedSwing {
 }
 
 /// What a selecting verb owes after its signals, for its caller to pay once their listeners ran
-/// ([`SelectCommit::owing`]): the send after the teardown's `PET_BAR_UPDATE`, then the swings after
+/// ([`SelectCommit::owing`]): the send after the teardown's `PET_BAR_UPDATE`, or the rest of a
+/// refused StartAttack's stop after its tutorials' (`0x5ecc48`), then the swings after
 /// `PLAYER_TARGET_CHANGED`, in the order owed.
 #[must_use]
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct SelectDebt {
     send: Option<scan::OwedSend>,
+    wire: Option<scan::OwedWire>,
+    stop: Option<crate::creature_anim::StopTail>,
     swings: Vec<OwedSwing>,
 }
 
@@ -697,6 +631,8 @@ impl From<scan::Owed> for SelectDebt {
     fn from(owed: scan::Owed) -> Self {
         Self {
             send: owed.send,
+            wire: owed.wire,
+            stop: None,
             swings: owed.swing.map(OwedSwing::Again).into_iter().collect(),
         }
     }
@@ -706,6 +642,18 @@ impl SelectDebt {
     /// The send owed after the teardown's signal.
     pub(crate) fn take_send(&mut self) -> Option<scan::OwedSend> {
         self.send.take()
+    }
+
+    /// The send of a select with no release to signal, owed after its ladder's
+    /// `TUTORIAL_TRIGGER` (`0x4937be`-`0x49383c`, `0x49388d`).
+    pub(crate) fn take_wire(&mut self) -> Option<scan::OwedWire> {
+        self.wire.take()
+    }
+
+    /// A refused StartAttack's stop past its head (`0x5ecc48`), owed after its tutorials'
+    /// signal, ahead of the swings still owed.
+    pub(crate) fn take_stop(&mut self) -> Option<crate::creature_anim::StopTail> {
+        self.stop.take()
     }
 
     /// Whether swings are owed after the selection's signal.
@@ -730,9 +678,21 @@ impl SelectDebt {
         if let Some(send) = self.send {
             send.pay(selection, seam);
         }
+        if let Some(wire) = self.wire {
+            wire.send(seam);
+        }
+        if let Some(stop) = self.stop {
+            seam.stop_send(stop);
+            seam.stop_save();
+        }
         for swing in self.swings {
             match swing {
-                OwedSwing::Again(owed) => owed.pay(selection, seam, StartTarget::Unheld),
+                OwedSwing::Again(owed) => {
+                    if let Some(stop) = owed.pay(selection, seam, StartTarget::Unheld) {
+                        seam.stop_send(stop);
+                        seam.stop_save();
+                    }
+                }
                 OwedSwing::Tail { guid } => seam.start_tail(guid),
                 // The assist tail is a call's alone ([`SelectCommit::assist`]).
                 OwedSwing::Assist { .. } => {}
@@ -788,8 +748,28 @@ impl SelectCommit<'_, '_> {
         if let Some(send) = owed.send {
             self.owe_send(send);
         }
+        if let Some(wire) = owed.wire {
+            if self.owing.on {
+                debug_assert!(self.owing.debt.wire.is_none(), "one selection per verb");
+                self.owing.debt.wire = Some(wire);
+            } else {
+                wire.send(&self.seam);
+            }
+        }
         if let Some(swing) = owed.swing {
             self.owe(OwedSwing::Again(swing));
+        }
+    }
+
+    /// Owe a refused StartAttack's stop past its head while [`Self::owing`] runs; finish it now
+    /// otherwise.
+    fn owe_stop(&mut self, stop: crate::creature_anim::StopTail) {
+        if self.owing.on {
+            debug_assert!(self.owing.debt.stop.is_none(), "one stop per payment");
+            self.owing.debt.stop = Some(stop);
+        } else {
+            self.seam.stop_send(stop);
+            self.seam.stop_save();
         }
     }
 
@@ -812,24 +792,65 @@ impl SelectCommit<'_, '_> {
         }
     }
 
-    /// Store and send the selection the teardown's signal held back.
+    /// The rest of the teardown its signals held back: the pet leg if it still waits, then the
+    /// store and the send ([`scan::OwedSend::pay`]).
     pub(crate) fn pay_send(&mut self, send: scan::OwedSend) {
-        send.pay(&mut self.selection, &self.seam);
+        send.pay(&mut self.selection, &mut self.seam);
+    }
+
+    /// [`Self::pay_send`] up to its send, which waits for the ladder's listeners
+    /// ([`scan::OwedSend::store`]).
+    pub(crate) fn store_send(&mut self, send: scan::OwedSend) -> scan::OwedWire {
+        send.store(&mut self.selection, &mut self.seam)
+    }
+
+    /// A select's send past its ladder's listeners ([`scan::OwedWire::send`]).
+    pub(crate) fn send_wire(&self, wire: scan::OwedWire) {
+        wire.send(&self.seam);
+    }
+
+    /// The teardown's pet leg, if it waits behind its stop
+    /// ([`scan::OwedSend::run_pet_leg`]): whether it called a unit off.
+    pub(crate) fn run_pet_leg(&mut self, send: &mut scan::OwedSend) -> bool {
+        send.run_pet_leg(&mut self.seam)
+    }
+
+    /// A StopAttack past its head, the teardown's or a refused StartAttack's
+    /// ([`crate::creature_anim::AttackSeam::stop_send`]): whether its next-swing cancel ran.
+    pub(crate) fn stop_send(&mut self, stop: crate::creature_anim::StopTail) -> bool {
+        self.seam.stop_send(stop)
+    }
+
+    /// That StopAttack's save leg ([`crate::creature_anim::AttackSeam::stop_save`]).
+    pub(crate) fn stop_save(&mut self) {
+        self.seam.stop_save();
     }
 
     /// Pay what `debt` still owes, in order, now that the signals' listeners have run, up to a
-    /// payment whose own select moved the selection (StartAttack's, `0x5eccaa`): what that one
-    /// owes, ahead of the rest, for the caller to run its signals' listeners first and pay again.
-    /// A payment that moved nothing has nothing to signal, and what it owes is paid in place.
+    /// payment whose own select moved the selection (StartAttack's, `0x5eccaa`) or whose refused
+    /// target's stop ran its head (`0x5ecc48`): what that one owes, ahead of the rest, for the
+    /// caller to run its signals' listeners first and pay again. A payment that moved nothing has
+    /// nothing to signal, and what it owes is paid in place.
     pub(crate) fn pay(&mut self, debt: SelectDebt) -> SelectDebt {
         if let Some(send) = debt.send {
             self.pay_send(send);
+        }
+        if let Some(wire) = debt.wire {
+            self.send_wire(wire);
+        }
+        if let Some(stop) = debt.stop {
+            self.stop_send(stop);
+            self.stop_save();
         }
         let mut swings: std::collections::VecDeque<OwedSwing> = debt.swings.into();
         while let Some(swing) = swings.pop_front() {
             let before = self.selection.guid;
             let mut owed = self.owing(|commit| commit.pay_one(swing));
-            if owed.send.is_some() || self.selection.guid != before {
+            if owed.send.is_some()
+                || owed.wire.is_some()
+                || owed.stop.is_some()
+                || self.selection.guid != before
+            {
                 owed.swings.extend(swings);
                 return owed;
             }
@@ -840,7 +861,8 @@ impl SelectCommit<'_, '_> {
         SelectDebt::default()
     }
 
-    /// Pay all of `debt` now, for a writer whose signals have no listeners to run first.
+    /// Pay all of `debt` now, for a test's writer whose signals have no listeners to run first.
+    #[cfg(test)]
     pub(crate) fn pay_now(&mut self, mut debt: SelectDebt) {
         while debt != SelectDebt::default() {
             debt = self.pay(debt);
@@ -854,7 +876,9 @@ impl SelectCommit<'_, '_> {
                     .selection
                     .guid
                     .map_or(StartTarget::Unheld, |guid| self.start_target(guid));
-                owed.pay(&self.selection, &mut self.seam, now);
+                if let Some(stop) = owed.pay(&self.selection, &mut self.seam, now) {
+                    self.owe_stop(stop);
+                }
             }
             OwedSwing::Assist { guid } => {
                 if self.assist_attack.0 {
@@ -880,11 +904,13 @@ impl SelectCommit<'_, '_> {
     /// between its checks and stand and its swing: [`Self::commit`], the setter's dedup for a guid
     /// selected already, else the whole `SetSelection`, whose re-swing reaches StartAttack again
     /// at the same guid and is deduped there. The rest is owed past that select's signals while
-    /// [`Self::owing`] runs.
+    /// [`Self::owing`] runs, and so is a refused target's stop past its tutorials' (`0x5ecc48`).
     pub(crate) fn start_attack(&mut self, guid: u64) {
         let verdict = self.start_target(guid);
-        if !self.seam.start_head(verdict) {
-            return;
+        match self.seam.start_head(verdict) {
+            crate::creature_anim::StartHead::Go => {}
+            crate::creature_anim::StartHead::Stop(stop) => return self.owe_stop(stop),
+            crate::creature_anim::StartHead::Returned => return,
         }
         if let Some(entity) = self.held_unit(guid) {
             self.commit(entity, guid);
@@ -1260,7 +1286,6 @@ mod tests {
         world.init_resource::<crate::ui_action::UiErrorKeys>();
         world.init_resource::<crate::player::FollowState>();
         world.init_resource::<crate::player::Approach>();
-        world.init_resource::<Messages<crate::player::FollowRequest>>();
         let mut names = NameCache::default();
         names.insert_player(ME, "Me".into(), None);
         names.insert_player(them.guid, "Them".into(), None);
@@ -1320,21 +1345,23 @@ mod tests {
         selection.guid = target.map(|(_, g)| g);
     }
 
-    /// One request through the follow drain: the error lines it queued, and whom we follow after.
+    /// One request through the follow's start, as `FollowUnit`'s or `FollowByName`'s call makes
+    /// it: the line its refusal shows, and whom we follow after.
     fn drain(
         world: &mut World,
         request: crate::player::FollowRequest,
     ) -> (Vec<&'static str>, Option<u64>) {
-        world.write_message(request);
-        world
-            .run_system_cached(follow_requests)
-            .expect("the drain runs");
+        use bevy::ecs::system::RunSystemOnce;
         let keys = world
-            .resource_mut::<crate::ui_action::UiErrorKeys>()
-            .take()
-            .into_iter()
-            .map(|e| e.key)
-            .collect();
+            .run_system_once(move |mut steps: FollowSteps| match steps.start(&request) {
+                FollowStart::Refused(key) => vec![key],
+                FollowStart::Started { guid, name, .. } => {
+                    steps.arm(guid, name);
+                    Vec::new()
+                }
+                FollowStart::Silent => Vec::new(),
+            })
+            .expect("the start runs");
         (keys, world.resource::<crate::player::FollowState>().guid)
     }
 

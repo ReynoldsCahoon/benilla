@@ -81,6 +81,11 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// The designed API: every engine item game code may name, with the record that published it
 /// (`wall`: published without one). Adding a row is a claim made in review, with its record.
 const PUBLISHED: &[(&str, &str)] = &[
+    // The use-swept caches' grace, which the memory governor's Tight tier cuts, and the held
+    // test a game cache's sweep asks (`memory_governor`'s module record; `entities`, the body
+    // cache in `entities::attach::merge`).
+    ("art_scope::HeldValue", "record"),
+    ("art_scope::unused_grace", "record"),
     ("bgwin::BgWinPlugin", "wall"),
     ("bgwin::background_run", "record"),
     ("bgwin::no_pixel_run", "record"),
@@ -99,6 +104,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("doodad_anim::DoodadAnimHost", "record"),
     ("doodad_anim::MatAnim", "record"),
     ("doodad_anim::MatAnimTick", "record"),
+    ("doodad_anim::Stage1Loops", "record"),
     ("doodad_anim::TintLoop", "record"),
     ("doodad_anim::UvLoops", "record"),
     ("doodad_anim::clocked_twin", "record"),
@@ -144,6 +150,8 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("model_render::ModelKind", "record"),
     ("model_render::ModelPart", "record"),
     ("model_render::lazy::realize", "record"),
+    ("model_render::order::NoDepthFill", "wall"),
+    ("model_render::order::SortInstance", "wall"),
     ("modkeys::SyntheticHold", "wall"),
     ("particles::ParticleTuning", "record"),
     ("particles::ViewThrottled", "record"),
@@ -155,6 +163,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("rig_anim::PosePost", "wall"),
     ("rig_anim::RigAnchor", "wall"),
     ("rig_anim::RigFrame", "wall"),
+    ("rig_anim::RigModelPass", "wall"),
     ("rig_anim::RigPose", "wall"),
     ("rig_anim::SceneClock", "record"),
     ("rig_palette::RigPalettes", "record"),
@@ -293,7 +302,7 @@ const SORTED_LEAKS: &[(&str, &str)] = &[
     ),
     ("terrain_stream::point_light", "CLOSE/absorb"),
     ("terrain_stream::spawn_model_entities", "CLOSE/move-engine"),
-    ("view::CAM_FOVY", "CLOSE/absorb"),
+    ("view::FovZoom", "CLOSE/absorb"),
     ("view::FARCLIP_RANGE", "CLOSE/absorb"),
     ("view::NEARCLIP_DEFAULT", "CLOSE/absorb"),
     ("wmo_portal::UnitWmoRoom", "CLOSE/absorb"),

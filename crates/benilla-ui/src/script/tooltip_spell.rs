@@ -725,14 +725,17 @@ fn note_build(lua: &Lua, h: FrameHandle, spell_id: u32, misses: &[u32]) {
             waits.push(entry);
         }
     }
+    model.tooltip_record_asks.extend_from_slice(misses);
+    drop(model);
+    super::tooltip_item::build::ask_tooltip_records(lua);
 }
 
-/// `CGTooltip::OnSpellItemAnswer` (`0x52f820`) for every item record pushed since the last tick:
-/// each answer a tooltip waits on takes one off its count (`0x52f838`), and once none is owed
-/// (`0x52f847`) a tooltip still keeping a spell (`0x52f849`) builds it again fresh, with every
-/// other argument 0 (`0x52f862`), and sizes it (`0x52f867`). A refused record never answers
-/// (`0x52f826`).
-pub(super) fn answer_spell_items(lua: &Lua) -> Vec<mlua::Error> {
+/// `CGTooltip::OnSpellItemAnswer` (`0x52f820`) for every item record pushed since the last tick,
+/// or with `only`, for that entry's answer alone, at its packet: each answer a tooltip waits on
+/// takes one off its count (`0x52f838`), and once none is owed (`0x52f847`) a tooltip still
+/// keeping a spell (`0x52f849`) builds it again fresh, with every other argument 0 (`0x52f862`),
+/// and sizes it (`0x52f867`). A refused record never answers (`0x52f826`).
+pub(super) fn answer_spell_items(lua: &Lua, only: Option<u32>) -> Vec<mlua::Error> {
     let answered: Vec<(FrameHandle, usize)> = {
         let mut guard = lua.app_data_mut::<Model>().expect("model app_data");
         let model = &mut *guard;
@@ -746,7 +749,9 @@ pub(super) fn answer_spell_items(lua: &Lua) -> Vec<mlua::Error> {
                 continue;
             };
             let before = waits.len();
-            waits.retain(|entry| !model.item_templates.contains_key(entry));
+            waits.retain(|entry| {
+                !(only.is_none_or(|e| e == *entry) && model.item_templates.contains_key(entry))
+            });
             if !waits.is_empty() {
                 model.spell_item_waits.insert(h, waits.clone());
             }
@@ -972,6 +977,12 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
             // `is-number` else `Usage: SetAction(slot)` (`0x855200`, `0x5326c3`).
             let slot = binding_abi::index_arg32(lua, slot, "Usage: SetAction(slot)")?;
             let now = crate::script::clock::now(lua);
+            // The slot's cooldown query (`0x5323a6` → `0x4e6ca0`) and its attack test (`0x5323b4` →
+            // `0x4e59b0`), both at the call, as `GetActionCooldown` and `IsAttackAction` read them.
+            let state = super::action::state_of(lua, slot);
+            let cooldown = state
+                .filter(|s| !s.no_cooldown_query)
+                .and_then(|s| super::action::slot_cooldown(lua, &s));
             let (action, remaining_ms, owned, attack) = {
                 let model = lua.app_data_mut::<Model>().expect("model app_data");
                 let action = model.actions.get(&slot).cloned();
@@ -980,12 +991,11 @@ pub(super) fn install_methods(lua: &Lua, m: &Table) -> mlua::Result<()> {
                     .as_ref()
                     .filter(|a| a.kind == 0x80)
                     .and_then(|a| super::tooltip_item::owned_instance(lua, &model, a.action));
-                let state = model.action_states.get(&slot);
                 (
                     action,
-                    live_remaining_ms(state.and_then(|s| s.cooldown), now),
+                    live_remaining_ms(cooldown, now),
                     owned,
-                    state.is_some_and(|s| s.state.is_attack),
+                    state.is_some_and(|s| s.is_attack),
                 )
             };
             // Every slot clears the tooltip first (`0x5323ad`), an empty one included.

@@ -95,6 +95,11 @@ pub(crate) struct TradeSession {
 }
 
 impl TradeSession {
+    /// The teardown's free of the initiates' callbacks `0x5d4080`, running none (`0x55f990`).
+    pub(crate) fn free_store_callbacks(&mut self) {
+        self.initiate_waits.clear();
+    }
+
     /// Our `CMSG_INITIATE_TRADE` is out (`0x5d3fb0`): a fresh session with the target as partner,
     /// the pending flag set and the starter's mode beside it (`0x5d4021`, `0x5d402b`). The offers
     /// stay for the next open to clear.
@@ -602,7 +607,10 @@ fn cancel_trade_on_leave_world(commands: Res<NetCommands>) {
 pub(crate) struct UiTradePlugin;
 
 /// Mirrors the `BlockTrades` CVar into [`BlockTrades`].
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut block: ResMut<BlockTrades>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut block: bevy::prelude::Mut<'_, BlockTrades>,
+) {
     if ev.is("BlockTrades") {
         block.0 = ev.flag();
     }
@@ -610,7 +618,6 @@ pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut block: ResMut<Block
 
 impl Plugin for UiTradePlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_cvar);
         lane::add_trade_lane(app);
         net::register(app);
         app.init_resource::<TradeSession>()
@@ -918,20 +925,21 @@ fn drain_trade_touches(world: &mut World) {
     crate::creature_anim::apply_unit_edits(world);
 }
 
-/// [`touch_trade`] on each of `touches`, in order, as one engine turn.
+/// [`touch_trade`] on each of `touches`, in order, each its own engine turn: every watcher run
+/// signals in its own handler (`0x4bfa70` per item), so one item's listeners run before the next
+/// item's send.
 fn scan_trade_touches(
     In(touches): In<Vec<crate::item_watch::TradeTouch>>,
     mut vm: crate::script_calls::VmWith<ResMut<'static, TradeSession>>,
     reads: TouchReads,
 ) {
-    vm.turn(|script, mut trade| {
-        let Some(script) = script else {
-            return;
-        };
-        for touch in touches {
-            touch_trade(script, &mut trade, touch, &reads);
-        }
-    })
+    for touch in touches {
+        vm.turn(|script, mut trade| {
+            if let Some(script) = script {
+                touch_trade(script, &mut trade, touch, &reads);
+            }
+        });
+    }
 }
 
 /// What the trade scan reads beside the session: the socket its sends go out on, the objects,

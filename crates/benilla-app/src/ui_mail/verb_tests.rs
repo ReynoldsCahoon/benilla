@@ -13,6 +13,8 @@ use crate::net::{ClientCommand, NetCommands};
 use crate::script_calls::with_hosted_vm;
 
 const MAILBOX: u64 = 0xF110_0000_0000_0B0C;
+/// Mail 1's body key: the id with high dword `0x70000000` (`0x4af19d`).
+const MAIL_1_KEY: u64 = 0x7000_0000_0000_0001;
 /// The sender of every player mail here.
 const BOB: u64 = 0x42;
 
@@ -203,7 +205,7 @@ fn opening_an_unread_mail_marks_it_inside_the_call() {
             },
             ClientCommand::ItemTextQuery {
                 text_id: 9,
-                mail_id: 1,
+                key: MAIL_1_KEY,
             },
         ])
     );
@@ -211,6 +213,26 @@ fn opening_an_unread_mail_marks_it_inside_the_call() {
     let held = &world.resource::<MailOpen>().mails[0];
     assert_eq!((held.checked & CHECKED_READ, held.expire_days), (1, 3.0));
     assert!(world.resource_mut::<MailPending>().take_refresh());
+}
+
+/// The mark's `MAIL_INBOX_UPDATE` (`0x4add9d`) runs its listeners before the open arms the
+/// close's re-query (`0x4adda6`): a close one of them makes finds nothing armed and sends no
+/// query, and the arm stands for the next close.
+#[test]
+fn a_marks_listener_closes_before_the_open_arms_the_refresh() {
+    let mut h = Mailbox::new(vec![entry(1, 9)]);
+    h.run(
+        r#"local g = CreateFrame("Frame") g:RegisterEvent("MAIL_INBOX_UPDATE")
+        g:SetScript("OnEvent", function() if not CLOSED then CLOSED = 1 CloseMail() end end)"#,
+    );
+    let _ = h.sent();
+    h.run("GetInboxText(1)");
+    assert!(!h.sent().iter().any(|s| s.starts_with("QueryNextMailTime")));
+    assert!(h
+        .app
+        .world_mut()
+        .resource_mut::<MailPending>()
+        .take_refresh());
 }
 
 /// A mail already read is not marked again (`0x4adcee`): no packet, no event and no refresh. Its
@@ -225,7 +247,7 @@ fn opening_a_read_mail_only_asks_for_its_body() {
         h.sent(),
         text([ClientCommand::ItemTextQuery {
             text_id: 9,
-            mail_id: 1,
+            key: MAIL_1_KEY,
         }])
     );
     assert_eq!(h.eval::<i64>("return table.getn(HEARD)"), 0);

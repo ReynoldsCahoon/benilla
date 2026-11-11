@@ -1,7 +1,8 @@
-//! The active player's bags as the container getters and verbs read them at the call
-//! ([`benilla_ui::script::BagSlotQuery`] and its kin): the reference's look the slot up in the
-//! player's list or the bag's as they run (`GetItemInSlot`, `0x6228a0`; the bag lookup
-//! `0x4f93e0`), so a listener reads the bags its own packet left. The player's store and the item
+//! The active player's bags and worn items as the container and slot getters and verbs read them
+//! at the call ([`benilla_ui::script::BagSlotQuery`] and its kin, and
+//! [`benilla_ui::script::WornSlotQuery`]): the reference's look the slot up in the player's list
+//! or the bag's as they run (`GetItemInSlot`, `0x6228a0`; the bag lookup `0x4f93e0`), so a
+//! listener reads the bags and the doll its own packet left. The player's store and the item
 //! objects are read as of the drain's place ([`crate::ui_unit::views::ViewStores`]), each slot
 //! derived as it is asked for ([`super::feed::resolve_slot`]). With no player held the family
 //! answers nothing: a logout's `PLAYER_LOGOUT` (`0x490c2a`) runs after the object manager is gone
@@ -15,7 +16,7 @@ use benilla_protocol::ObjectFields;
 use benilla_ui::script::live::LiveAsk;
 use benilla_ui::script::{
     BagGuidQuery, BagHead, BagItemsQuery, BagQuery, BagSlotQuery, ContainerSlot, HasKeyQuery,
-    LiveReader,
+    LiveReader, WeaponEnchantQuery, WornKeysQuery, WornSlotQuery,
 };
 
 use crate::entities::ItemDisplays;
@@ -50,11 +51,12 @@ pub(crate) struct BagReads<'w, 's> {
     spells: Option<Res<'w, crate::ui_action::Spells>>,
     names: Res<'w, crate::names::NameCache>,
     petitions: Option<Res<'w, crate::ui_petition::PetitionRecords>>,
-    /// The frame's clock pair every pushed start is mapped through, as the action feed last read
-    /// it ([`crate::ui_script::UiClock`] is the tick's to write while it lends the host).
-    clock: Option<Res<'w, crate::ui_action::ActionStateMemory>>,
+    /// The interface clock's pair every start is mapped through, as the pushes map theirs.
+    clock: Option<Res<'w, crate::ui_script::HostClock>>,
     /// `ChrClasses.dbc` field 16, the fit rule's relic flag.
     classes: Option<Res<'w, crate::chr_classes::ChrClassTable>>,
+    /// `ItemSubClass.dbc`, for `GetInventoryItemCount`'s container count bit.
+    sub_classes: Option<Res<'w, super::ItemSubClasses>>,
 }
 
 impl<'w, 's> BagReads<'w, 's> {
@@ -175,11 +177,10 @@ impl Bags<'_, '_, '_> {
                 .as_deref()
                 .is_some_and(|t| t.0.has_relic_slot(u32::from(c)))
         });
-        let clock = self.clock.as_deref().and_then(|c| c.clock());
+        let clock = self.clock.as_deref().map(|c| (c.0.anchor, c.0.ui_now));
         super::feed::resolve_slot(
             guid,
             held,
-            &self.objects,
             &self.items,
             self.icons.as_deref(),
             self.rolls.get(),
@@ -236,6 +237,22 @@ impl Bags<'_, '_, '_> {
                 )
             })
             || ask.answer(|_: &HasKeyQuery| Some(has_key(me, objects, &self.items)))
+            || ask.answer(|q: &WornSlotQuery| {
+                Some(crate::ui_char::worn_slot_view(
+                    me,
+                    objects,
+                    &self.items,
+                    self.icons.as_deref(),
+                    self.rolls.get(),
+                    &self.names,
+                    self.sub_classes.as_deref(),
+                    self.classes.as_deref().map(|t| &t.0),
+                    q.0,
+                ))
+            })
+            || ask.answer(|_: &WornKeysQuery| Some(crate::ui_char::worn_keys(me, objects)))
+            || ask
+                .answer(|_: &WeaponEnchantQuery| Some(crate::ui_char::weapon_enchants(me, objects)))
     }
 }
 

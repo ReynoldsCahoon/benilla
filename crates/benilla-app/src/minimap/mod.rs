@@ -11,8 +11,6 @@
 //! - North up: screen up is world +X, screen left world +Y.
 
 pub(crate) mod blips;
-/// Where a party member is, shared with the world map so the two surfaces never disagree.
-pub(crate) use blips::party_member_pos;
 mod composite;
 mod interior;
 /// The minimap ping, engine-owned and pinned to a world point.
@@ -31,6 +29,7 @@ use benilla_formats::{tile_to_world, world_to_tile, MinimapTranslate};
 
 use interior::{interior_drawable, wmo_minimap_stem, InteriorWindow};
 
+use benilla_ui::script::origin::{within, Origin};
 use benilla_ui::widget::{MinimapArt, MinimapArtSlot, MINIMAP_DEFAULT_ZOOM};
 
 use crate::player::Player;
@@ -156,7 +155,10 @@ pub(crate) struct MinimapZoom {
 
 /// The app's mirror of the two zoom CVars, each on its own field: the record's integer as the
 /// reference's raw copy takes it into the zoom cell (`0x6d9013`), unclamped.
-pub(crate) fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut zoom: ResMut<MinimapZoom>) {
+pub(crate) fn on_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut zoom: bevy::prelude::Mut<'_, MinimapZoom>,
+) {
     match ev.key().as_str() {
         "minimapzoom" => zoom.outdoor = zoom_index(&ev.new),
         "minimapinsidezoom" => zoom.inside = zoom_index(&ev.new),
@@ -747,7 +749,10 @@ fn feed_minimap_inside(
         if *was_inside.get(script) != Some(inside) {
             script.set_minimap_inside(inside);
             *was_inside.get(script) = Some(inside);
-            script.fire_event("MINIMAP_UPDATE_ZOOM", vec![]);
+            // The update signals the change itself, at frame time (`0x6d95b8`).
+            within(Origin::Allowed("minimap::feed_minimap_inside"), || {
+                script.fire_event("MINIMAP_UPDATE_ZOOM", vec![])
+            });
         }
     })
 }
@@ -953,14 +958,20 @@ fn clear_quest_blip_on_world_entry(
     })
 }
 
-/// Push the player's facing onto the Minimap's player-arrow `Model` every frame, as the reference's
-/// per-frame `CMinimap::SetPlayerFacing` (`0x4eb8e0`) writes `[+0x39c]`, what `Model:GetFacing()`
-/// reads. `player.facing()` is an unbounded accumulator, so it is normalized to `[0, 2π)`, the
-/// wire value vmangos's `VerifyMovementInfo` requires.
-fn feed_minimap_player_facing(mut hosted_vm: crate::script_calls::HostedVm, player: Res<Player>) {
-    hosted_vm.run(|script| {
+/// The Minimap's per-frame update (`0x4eb040`) on its player-arrow `Model`: the centring, then the
+/// followed object's facing, as `CMinimap::SetPlayerFacing` (`0x4eb8e0`) writes `[+0x39c]`, what
+/// `Model:GetFacing()` reads. An object that does not resolve leaves the facing as it stands
+/// (`0x4eb0a2`), past the centring (`0x4eb074`).
+fn feed_minimap_player_facing(
+    mut vm: crate::script_calls::VmWith<crate::player::FollowedObject<'static, 'static>>,
+) {
+    let facing = vm.own().facing();
+    vm.run(|script| {
         let Some(script) = script else { return };
-        script.set_minimap_player_facing(player.facing().rem_euclid(std::f32::consts::TAU));
+        script.centre_minimap_player_arrows();
+        if let Some(facing) = facing {
+            script.set_minimap_player_facing(facing);
+        }
     })
 }
 
@@ -978,7 +989,6 @@ impl Plugin for MinimapPlugin {
             app.net_handler(K::Connected, clear_quest_blip_on_world_entry)
                 .net_handler(K::Worldport, clear_quest_blip_on_world_entry);
         }
-        app.add_observer(on_cvar);
         app.init_resource::<MinimapWidget>()
             .init_resource::<MinimapZoom>()
             .init_resource::<MinimapTileCache>()
@@ -1017,7 +1027,7 @@ impl Plugin for MinimapPlugin {
                         .after(crate::ui_chat::ChatDrain)
                         .after(crate::ui_party::drain_party)
                         .after(crate::poi_marker::expire_marker)
-                        .after(crate::poi_marker::clear_on_world_entry)
+                        .after(crate::lanes::UiLanes)
                         .after(feed_minimap_art)
                         .before(crate::ui_script::UiPaint),
                     // After the tick that can set the art, before the emit that draws with it.
@@ -1079,6 +1089,86 @@ mod stage_mask_tests {
         assert!(tile.modulate_rgb, "the outdoor tiles");
         assert_eq!(tile.rect, rect);
         assert!(matches!(stage_masks(None, rect), (None, None)));
+    }
+}
+
+#[cfg(test)]
+mod followed_facing_tests {
+    use super::*;
+    use crate::net::GuidIndex;
+    use crate::player::{camera_on_an_eye, FarSight};
+    use benilla_ui::script::UiScript;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// A VM's world, its camera on a dynamic object facing 4.0.
+    fn world() -> World {
+        let mut world = World::new();
+        world.init_resource::<Player>();
+        world.init_resource::<FarSight>();
+        world.init_resource::<GuidIndex>();
+        camera_on_an_eye(&mut world, 4.0);
+        crate::script_calls::insert_test_vm(&mut world);
+        world
+    }
+
+    fn feed(world: &mut World) {
+        world
+            .run_system_once(feed_minimap_player_facing)
+            .expect("the feed runs");
+    }
+
+    /// The arrow takes the feed, and an object that does not resolve leaves it (`0x4eb0a2`).
+    #[test]
+    fn a_followed_object_lost_leaves_the_arrow_as_it_stands() {
+        let facing = |world: &World| {
+            crate::script_calls::eval_in_vm::<f32>(
+                world,
+                "return ({m:GetChildren()})[9]:GetFacing()",
+            )
+        };
+        let mut world = world();
+        world
+            .non_send_resource::<UiScript>()
+            .run(r#"m = CreateFrame("Minimap", "TestMinimap")"#)
+            .expect("the frame");
+
+        feed(&mut world);
+        assert_eq!(facing(&world), 4.0);
+
+        world.resource_mut::<GuidIndex>().0.clear();
+        feed(&mut world);
+        assert_eq!(facing(&world), 4.0, "kept");
+    }
+
+    /// The centring sits ahead of the lookup (`0x4eb04f`-`0x4eb074`), so an object that does not
+    /// resolve still centres the arrow.
+    #[test]
+    fn a_followed_object_lost_still_centres_the_arrow() {
+        let mut world = world();
+        {
+            let mut script = world.non_send_resource_mut::<UiScript>();
+            script
+                .run(
+                    r#"m = CreateFrame("Minimap", "TestMinimap")
+                    arrow = ({m:GetChildren()})[9] arrow:SetWidth(20) arrow:SetHeight(10)"#,
+                )
+                .expect("the arrow");
+            script.set_model_facts(
+                benilla_ui::widget::MINIMAP_DEFAULT_PLAYER_MODEL,
+                benilla_ui::widget::ModelFileFacts {
+                    sequences: Vec::new(),
+                    bbox: ([-0.01; 3], [0.01; 3]),
+                    cameras: 0,
+                },
+            );
+        }
+        world.resource_mut::<GuidIndex>().0.clear();
+        feed(&mut world);
+        let x = crate::script_calls::eval_in_vm::<f32>(
+            &world,
+            "local x = arrow:GetPosition() return x",
+        );
+        assert!(x > 0.0, "centred at half its width: {x}");
     }
 }
 

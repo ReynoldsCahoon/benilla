@@ -1,8 +1,6 @@
 //! The per-frame feeds into the VM: the item-tooltip views every window reads; and the one bag
 //! slot's derivation the container getters read at the call ([`resolve_slot`], [`super::bags`]).
 
-use std::collections::HashSet;
-
 use bevy::prelude::*;
 
 use benilla_protocol::ItemInfo;
@@ -10,7 +8,7 @@ use benilla_ui::script::{ContainerSlot, ItemRead, UiScript};
 
 use crate::entities::ItemDisplays;
 use crate::items::Items;
-use crate::net::{NetCommands, ObjectStore, Objects, SelfPlayer};
+use crate::net::ObjectStore;
 use crate::query_cache::Ask;
 
 use super::find_equip_slot;
@@ -37,6 +35,7 @@ impl TokenCaster<'static> {
     };
 }
 
+#[cfg(test)]
 /// A spell's `$`-substituted description, for item trigger and set-bonus lines. An empty one
 /// yields `None` and the caller drops the whole line, prefix included: the item builder
 /// (`0x52d8a0`) expands it (`0x5075f0`), tests the first byte (`0x52da29`) and on zero skips the
@@ -98,27 +97,10 @@ fn spell_desc_parts(
     ))
 }
 
-/// What the `$`-tokens read of the player beside the modifiers: the skills the per-level terms
-/// scale by, and the gender byte `$g`/`$G` branch on (`0x508214`).
-type TokenReads = (crate::spell::SkillSnapshot, u8);
-
-fn token_reads(me: Option<&ObjectStore>) -> TokenReads {
-    let gender = me.and_then(|s| s.0.unit_gender()).unwrap_or(0);
-    (crate::spell::skill_snapshot(me), gender)
-}
-
-/// Only descriptions with substitution tokens can change when the caster's spell mods change.
-fn spell_has_mod_tokens(spells: Option<&crate::ui_action::Spells>, id: u32) -> bool {
-    spells
-        .and_then(|s| s.catalog.get(id))
-        .and_then(|d| d.description.as_deref())
-        .is_some_and(|desc| desc.contains('$'))
-}
-
-fn item_has_mod_tokens(t: &ItemInfo, spells: Option<&crate::ui_action::Spells>) -> bool {
-    t.spells
-        .iter()
-        .any(|slot| slot.spell_id != 0 && spell_has_mod_tokens(spells, slot.spell_id))
+/// The active player's `UNIT_FIELD_BYTES_0` byte 2, which `$g`/`$G` branch on (`0x508214`) and
+/// the standing label genders by (`0x612bf0`); 0 with no player.
+fn gender(me: Option<&ObjectStore>) -> u8 {
+    me.and_then(|s| s.0.unit_gender()).unwrap_or(0)
 }
 
 /// The static tables a template view names its ids through, all loaded at startup.
@@ -134,9 +116,64 @@ struct ViewTables<'a> {
     maps: Option<&'a benilla_formats::MapCatalog>,
 }
 
-/// An item template's tooltip view: the wire fields plus the strings only the app resolves, the
-/// trigger-spell text and the skill, spell and reputation requirements.
-fn template_view(
+/// An item record's view with what it reads of the player left open: the view, each spell line's
+/// text empty and the reputation line `None`; each line's description expanded against the caster
+/// as parts, its templates to be read where the line shows; and the reputation line's faction and
+/// gendered label. The host reads it at the call ([`Self::live`]), the VM's copy now
+/// ([`Self::resolved`]).
+pub(super) struct OpenView {
+    view: benilla_ui::script::ItemTemplateView,
+    texts: Vec<Vec<benilla_formats::TokenPart>>,
+    rep: Option<(String, bool)>,
+}
+
+impl OpenView {
+    /// The view with its texts read through `strings` now: a description that comes out empty
+    /// drops its line (`0x52da29`).
+    fn resolved(
+        self,
+        strings: benilla_ui::strings::Strings<'_>,
+    ) -> benilla_ui::script::ItemTemplateView {
+        let OpenView {
+            mut view,
+            texts,
+            rep,
+        } = self;
+        let get = |key: &str| strings.global(key);
+        view.spell_lines = std::mem::take(&mut view.spell_lines)
+            .into_iter()
+            .zip(texts)
+            .filter_map(|(line, parts)| {
+                let text =
+                    benilla_formats::resolve_parts(&parts, &get, &crate::ui_script::token_printf);
+                (!text.is_empty()).then_some(benilla_ui::script::ItemSpellLine { text, ..line })
+            })
+            .collect();
+        view.required_rep_line = rep.and_then(|(faction, female)| {
+            benilla_ui::script::reputation_line(strings, &faction, view.required_rep_rank, female)
+        });
+        view
+    }
+
+    /// The view as the host hands it to a getter at the call, its texts read where they show.
+    pub(super) fn live(self) -> benilla_ui::script::LiveItemView {
+        benilla_ui::script::LiveItemView {
+            view: self.view,
+            spell_texts: self
+                .texts
+                .into_iter()
+                .map(crate::ui_tooltip::tooltip_text)
+                .collect(),
+            rep: self.rep,
+        }
+    }
+}
+
+/// An item template's tooltip view ([`OpenView`]): the wire fields plus the strings only the app
+/// resolves, the trigger-spell texts and the skill, spell and reputation requirements, the texts
+/// read against `caster`, the bind point's `home_area` and the player's `gender`.
+#[allow(clippy::too_many_arguments)] // what the record's lines read, each a store of its own
+fn open_view(
     t: &ItemInfo,
     spells: Option<&crate::ui_action::Spells>,
     mods: Option<&crate::spell::SpellModifiers>,
@@ -145,12 +182,8 @@ fn template_view(
     home_area: Option<&str>,
     // The active player's gender byte, the trigger text's `$g`/`$G` branch (`0x508214`) and the
     // standing label's (`0x612bf0`).
-    gender: &dyn Fn() -> u8,
-    // The VM's own `GlobalStrings.lua` and its `GetText`, for the reputation-requirement line
-    // and the `$`-engine's keyed tokens.
-    strings: benilla_ui::strings::Strings<'_>,
-) -> benilla_ui::script::ItemTemplateView {
-    let get = |key: &str| strings.global(key);
+    gender: u8,
+) -> OpenView {
     let ViewTables {
         skill_lines,
         factions,
@@ -165,8 +198,33 @@ fn template_view(
             .and_then(|s| s.catalog.get(id))
             .map(|sd| sd.name.clone())
     };
-    let spell_text = |id: u32| spell_desc_text(spells, id, caster, home_area, gender, mods, &get);
-    benilla_ui::script::ItemTemplateView {
+    // A block with no description has no lines (`0x52da29`..`0x52da31`).
+    let (spell_lines, texts): (Vec<_>, Vec<_>) = t
+        .spells
+        .iter()
+        .filter(|s| s.spell_id != 0)
+        .filter_map(|s| {
+            let parts = spell_desc_parts(spells, s.spell_id, caster, home_area, &|| gender, mods)?;
+            let line = benilla_ui::script::ItemSpellLine {
+                trigger: s.trigger,
+                spell_id: s.spell_id,
+                text: String::new(),
+                charges: s.charges,
+                block: s.index,
+                recipe: recipe_of(spells, s.spell_id),
+            };
+            Some((line, parts))
+        })
+        .unzip();
+    // `ITEM_REQ_REPUTATION`'s faction (`0x854b8c`): a faction with no row reads the literal
+    // `UNKNOWN` (`0x838044`, `0x52d800`), and the standing's label is gendered (`0x52d80f`).
+    let rep = (t.required_rep_faction != 0).then(|| {
+        let faction = factions
+            .and_then(|c| c.faction_name(t.required_rep_faction))
+            .unwrap_or("UNKNOWN");
+        (faction.to_string(), gender == 1)
+    });
+    let view = benilla_ui::script::ItemTemplateView {
         name: t.name.clone(),
         quality: t.quality,
         class: t.class,
@@ -241,48 +299,11 @@ fn template_view(
         },
         required_honor_rank: t.required_honor_rank,
         required_city_rank: t.required_city_rank,
-        // `ITEM_REQ_REPUTATION`, the reference's key for this line (`0x854b8c`): faction, then
-        // standing; an install missing the key shows no line.
-        required_rep_line: (t.required_rep_faction != 0)
-            .then(|| {
-                // A faction with no row reads the literal `UNKNOWN` (`0x838044`, `0x52d800`); the
-                // label is gendered (`0x52d80f`) and an absent one is empty.
-                let faction = factions
-                    .and_then(|c| c.faction_name(t.required_rep_faction))
-                    .unwrap_or("UNKNOWN");
-                let standing = benilla_ui::strings::standing_label(
-                    strings,
-                    t.required_rep_rank,
-                    gender() == 1,
-                );
-                Some(benilla_ui::strings::fill(
-                    &get("ITEM_REQ_REPUTATION")?,
-                    &[
-                        benilla_ui::strings::Arg::S(faction),
-                        benilla_ui::strings::Arg::S(&standing),
-                    ],
-                ))
-            })
-            .flatten(),
+        required_rep_line: None,
         required_rep_faction: t.required_rep_faction,
         required_rep_rank: t.required_rep_rank,
         lock_id: t.lock_id,
-        // A block with no description has no lines (`0x52da29`..`0x52da31`).
-        spell_lines: t
-            .spells
-            .iter()
-            .filter(|s| s.spell_id != 0)
-            .filter_map(|s| {
-                Some(benilla_ui::script::ItemSpellLine {
-                    trigger: s.trigger,
-                    spell_id: s.spell_id,
-                    text: spell_text(s.spell_id)?,
-                    charges: s.charges,
-                    block: s.index,
-                    recipe: recipe_of(spells, s.spell_id),
-                })
-            })
-            .collect(),
+        spell_lines,
         description: t.description.clone(),
         page_text: t.page_text,
         sell_price: t.sell_price,
@@ -304,7 +325,24 @@ fn template_view(
         area: t.area,
         map: t.map,
         teaches: taught_spell(t, spells, skill_lines),
-    }
+    };
+    OpenView { view, texts, rep }
+}
+
+/// [`open_view`] read through `strings` now, as the VM's copy is.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn template_view(
+    t: &ItemInfo,
+    spells: Option<&crate::ui_action::Spells>,
+    mods: Option<&crate::spell::SpellModifiers>,
+    caster: TokenCaster,
+    tables: ViewTables,
+    home_area: Option<&str>,
+    gender: &dyn Fn() -> u8,
+    strings: benilla_ui::strings::Strings<'_>,
+) -> benilla_ui::script::ItemTemplateView {
+    open_view(t, spells, mods, caster, tables, home_area, gender()).resolved(strings)
 }
 
 /// A block's recipe (`0x52daf5`..`0x52db25`): its spell's Effect[0] is 36, and the spell that
@@ -387,7 +425,7 @@ pub(super) fn item_set_live(
         power_per_second: &power_per_second,
     };
     // The `$g`/`$G` branch reads our gender (`0x508214`).
-    let gender = token_reads(me).1;
+    let gender = gender(me);
     Some(benilla_ui::script::LiveItemSet {
         view: benilla_ui::script::ItemSetView {
             name: row.name.clone(),
@@ -488,70 +526,263 @@ pub(super) fn copy_suffix_template(
     }
 }
 
-/// The item-tooltip feed: every template that lands is pushed unprompted, and a new VM is seated
-/// with every cached one, so the first hover never misses, as the reference reads one item cache
-/// synchronously that a `/reload` keeps. A miss the VM asked for is the
-/// getter's lookup with a callback, which queries it here and asks a refused one again; a miss
-/// `GetItemInfo` read is served from the cache and never queried (`0x48e172`).
-pub(super) fn feed_item_stats(
-    mut vm: crate::script_calls::VmWith<Res<'static, Items>>,
-    commands: Res<NetCommands>,
-    spells: Option<Res<crate::ui_action::Spells>>,
-    // The caster the `$`-tokens read: its spell modifiers and its skills.
-    (spell_mods, self_q): CasterReads,
-    skill_lines: Option<Res<crate::ui_spellbook::SkillLines>>,
-    // The `$z` token: the bind point's area (`SMSG_BINDPOINTUPDATE`), named through `AreaTable`.
-    home_bind: Option<Res<crate::net::HomeBind>>,
-    (area_names, maps): (
-        Option<Res<crate::ui_quest_log::QuestHeaderNamesRes>>,
-        Option<Res<benilla_assets::MapCatalogRes>>,
+/// What an item record's view reads beside the record and the player ([`open_view`]): the spells
+/// its trigger lines name and the tables its ids are named through, all loaded at startup.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct RecordViews<'w> {
+    spells: Option<Res<'w, crate::ui_action::Spells>>,
+    skill_lines: Option<Res<'w, crate::ui_spellbook::SkillLines>>,
+    places: (
+        Option<Res<'w, crate::ui_quest_log::QuestHeaderNamesRes>>,
+        Option<Res<'w, benilla_assets::MapCatalogRes>>,
     ),
-    factions: Option<Res<crate::target::Factions>>,
-    sub_classes: Option<Res<super::ItemSubClasses>>,
+    factions: Option<Res<'w, crate::target::Factions>>,
+    sub_classes: Option<Res<'w, super::ItemSubClasses>>,
     // `GetItemInfo`'s `itemType` and `itemTexture`.
-    classes: Option<Res<super::ItemClasses>>,
-    icons: Option<Res<ItemDisplays>>,
-    mut pending: Local<crate::ui_script::VmMemo<std::collections::HashSet<u32>>>,
-    // The record changes this VM has taken in ([`Items::changed_since`]).
-    mut cursor: Local<crate::ui_script::VmMemo<u64>>,
-    // The views built from the player beyond the template, rebuilt when what they read moves.
-    mut reads_player: Local<crate::ui_script::VmMemo<HashSet<u32>>>,
-    mut last_home: Local<crate::ui_script::VmMemo<Option<String>>>,
-    mut last_reads: Local<crate::ui_script::VmMemo<Option<TokenReads>>>,
+    classes: Option<Res<'w, super::ItemClasses>>,
+    icons: Option<Res<'w, ItemDisplays>>,
+}
+
+impl RecordViews<'_> {
+    /// Zone `id`'s `AreaTable` name, the bind point's for `$z` and `GetBindLocation`
+    /// (`0x48daf4`-`0x48db07`, `0x507f18`-`0x507f2b`).
+    fn area_name(&self, id: u32) -> Option<&str> {
+        self.places.0.as_deref()?.0.resolve(id as i32)
+    }
+
+    /// `t`'s view with its texts read against `me`, the active player, its spell modifiers `mods`
+    /// and the bind point's `home_area`: no player reads every level 0 and no cost (`0x6e3233`).
+    fn open(
+        &self,
+        t: &ItemInfo,
+        items: &Items,
+        me: Option<&ObjectStore>,
+        mods: Option<&crate::spell::SpellModifiers>,
+        home_area: Option<&str>,
+    ) -> OpenView {
+        let spell_res = self.spells.as_deref();
+        let skill_catalog = self.skill_lines.as_deref().map(|s| &s.catalog);
+        let skills = crate::spell::PlayerSkills {
+            lines: skill_catalog,
+            spells: spell_res.map(|s| &s.catalog),
+            items: Some(items),
+        };
+        let level =
+            |d: &benilla_formats::SpellDisplay| crate::spell::player_spell_level(me, skills, d);
+        let power_cost = |d: &benilla_formats::SpellDisplay| match (me, mods) {
+            (Some(s), Some(mods)) => crate::spell::usable::power_cost(d, s, skills, mods),
+            _ => -1,
+        };
+        let power_per_second = |d: &benilla_formats::SpellDisplay| {
+            let level = crate::spell::SpellLevel::Player { me, skills };
+            crate::spell::usable::per_second_cost(d, level)
+        };
+        let caster = TokenCaster {
+            level: &level,
+            power_cost: &power_cost,
+            power_per_second: &power_per_second,
+        };
+        let tables = ViewTables {
+            skill_lines: skill_catalog,
+            factions: self.factions.as_deref().map(|f| f.catalog()),
+            sub_classes: self.sub_classes.as_deref().map(|s| &s.0),
+            classes: self.classes.as_deref().map(|c| &c.0),
+            icons: self.icons.as_deref(),
+            areas: self.places.0.as_deref().map(|a| &a.0),
+            maps: self.places.1.as_deref().map(|m| &m.0),
+        };
+        open_view(t, spell_res, mods, caster, tables, home_area, gender(me))
+    }
+
+    /// The VM's copy of each of `ids` the cache holds, its texts read against no player and no
+    /// bind point: a getter with the host lent builds its record's view at the call
+    /// ([`ItemViewLive`]), so the copy's texts serve a VM with no host alone.
+    fn build(
+        &self,
+        items: &Items,
+        script: &UiScript,
+        ids: impl IntoIterator<Item = u32>,
+    ) -> Vec<(u32, benilla_ui::script::ItemTemplateView)> {
+        let strings = benilla_ui::strings::Strings::Vm(script.lua());
+        ids.into_iter()
+            .filter_map(|id| {
+                let t = items.template(id, 0, Ask::Read)?;
+                Some((id, self.open(t, items, None, None, None).resolved(strings)))
+            })
+            .collect()
+    }
+}
+
+/// Seat record `entry`'s copy in the VM from the cache, for a lookup that found the copy behind the
+/// cache with no host lent to read the cache through: the VM reads the record the cache holds, as
+/// the reference's lookup does (`0x55ba30`). Whether the cache held it.
+pub(crate) fn seat_record(
+    script: &mut UiScript,
+    views: &RecordViews,
+    items: &Items,
+    entry: u32,
+) -> bool {
+    let Some((id, view)) = views.build(items, script, [entry]).pop() else {
+        return false;
+    };
+    script.set_item_template(id, view);
+    true
+}
+
+/// The item records as a getter reads them at the call, the call host's half of
+/// [`benilla_ui::script::ItemViewQuery`]: each built off the item cache (`0x55ba30`) with its
+/// spell lines expanded against the active player as of the drain's place, its spell modifiers
+/// and the bind point as they stand, as the tooltip build expands each at the build (`0x5075f0`
+/// at `0x52da24`), so a listener's build reads what its own packet left; and the bind point's
+/// area `GetBindLocation` reads (`0x48dae3` → `0x5ed420`,
+/// [`benilla_ui::script::BindLocationQuery`]).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct ItemViewLive<'w, 's> {
+    items: Res<'w, Items>,
+    views: RecordViews<'w>,
+    spell_mods: Option<Res<'w, crate::spell::SpellModifiers>>,
+    home_bind: Option<Res<'w, crate::net::HomeBind>>,
+    objects: crate::net::Objects<'w, 's>,
+    stores: crate::ui_unit::views::ViewStores<'w, 's>,
+}
+
+impl ItemViewLive<'_, '_> {
+    /// The bind point's area name, `None` before `SMSG_BINDPOINTUPDATE` or for a zone with no
+    /// row.
+    fn home_area(&self) -> Option<&str> {
+        self.home_bind
+            .as_deref()
+            .and_then(|b| b.0)
+            .and_then(|id| self.views.area_name(id))
+    }
+
+    /// Record `entry`'s view now, `None` for a record the cache lacks.
+    fn view(&self, entry: u32) -> Option<benilla_ui::script::LiveItemView> {
+        let t = self.items.template(entry, 0, Ask::Read)?;
+        let me = self.objects.player().and_then(|e| self.stores.get(e).ok());
+        let open = self.views.open(
+            t,
+            &self.items,
+            me,
+            self.spell_mods.as_deref(),
+            self.home_area(),
+        );
+        Some(open.live())
+    }
+}
+
+impl crate::script_calls::live::LiveFamily for ItemViewLive<'_, '_> {
+    fn answer(&mut self, ask: &mut benilla_ui::script::live::LiveAsk<'_>) -> bool {
+        ask.answer(|q: &benilla_ui::script::ItemViewQuery| Some(self.view(q.0)))
+            || ask.answer(|_: &benilla_ui::script::BindLocationQuery| {
+                Some(self.home_area().map(str::to_string))
+            })
+    }
+}
+
+/// `ItemCacheReceive` (`0x55bdb0`) stores the answer in its node (`0x55bef6`, the valid byte at
+/// `0x55befb`) before it runs a callback (`0x55bf39`), so a callback that reads the cache reads
+/// the record: the VM's copy of the record lands here, at its packet, ahead of the callbacks
+/// ([`crate::net::objects`]), and a refusal of a held one drops it. The change is the VM's then,
+/// which the item-tooltip feed does not push again ([`Items::vm_took`]).
+pub(crate) fn push_answered_record(
+    In(entry): In<u32>,
+    mut vm: crate::script_calls::VmWith<(ResMut<'static, Items>, RecordViews<'static>)>,
 ) {
-    vm.turn(|script, items| {
+    vm.turn(|script, (mut items, views)| {
         let Some(script) = script else {
             return;
         };
-        let (pending, new_vm) = pending.get_reset(script);
-        let cursor = cursor.get(script);
-        if new_vm {
-            pending.extend(items.cached_template_ids());
-            *cursor = items.change_count();
+        match views.build(&items, script, [entry]).pop() {
+            Some((id, view)) => script.set_item_template(id, view),
+            None if !items.template_answered(entry) => return,
+            None => script.drop_item_template(entry),
         }
-        let reads_player = reads_player.get(script);
-        let last_home = last_home.get(script);
-        let me = self_q.single().ok();
-        // The `$`-tokens follow the player's skills and gender.
-        let reads = token_reads(me);
-        let gender = reads.1;
-        let reads_changed = last_reads.get(script).as_ref() != Some(&reads);
-        *last_reads.get(script) = Some(reads);
-        // `GetBindLocation()`'s push, here so it and the `$z` token share one name, and ahead of
-        // the pending gate below: the bind point can arrive while the feed idles.
-        let home_area: Option<&str> = home_bind
-            .as_deref()
-            .and_then(|b| b.0)
-            .and_then(|id| area_names.as_deref()?.0.resolve(id as i32));
-        // Pushed on change, per VM: a rebuilt VM is fed again the frame it appears.
-        if last_home.as_deref() != home_area {
-            script.set_bind_location(home_area);
-            *last_home = home_area.map(str::to_string);
-            // Re-substitute every held view, or one pushed before the bind point carries a raw
-            // `$z`.
-            pending.extend(items.cached_template_ids());
-        }
+        items.vm_took(entry);
+    });
+}
 
+/// The quest log's callback (`0x4e0830`) on a found record, at its place in the entry's list
+/// ([`crate::net::objects`]): a `QUEST_LOG_UPDATE` for each record the VM's lookups missed
+/// (`0x4e083a`, [`UiScript::flush_quest_log_refires`]), fired there, a step in its place
+/// ([`crate::lanes::step`]).
+pub(crate) fn quest_log_answered(world: &mut World) {
+    fn flush(mut vm: crate::script_calls::HostedVm) {
+        vm.run(|script| {
+            if let Some(script) = script {
+                script.flush_quest_log_refires();
+            }
+        });
+    }
+    crate::lanes::step(world, |world| {
+        if let Err(err) = crate::script_calls::run_cached(world, flush) {
+            debug!("ui_items: the quest log's record callback did not run: {err}");
+        }
+    });
+}
+
+/// The tooltips' callbacks (`0x52e530`, `0x52f820`) on a found record, at its place in the
+/// entry's list ([`crate::net::objects`]): the rebuilds run on the item lane there
+/// ([`UiScript::answer_item_tooltips`]).
+pub(crate) fn tooltips_answered(world: &mut World, entry: u32) {
+    if let Some(mut lane) = world.get_resource_mut::<crate::item_lane::ItemLane>() {
+        lane.push(crate::item_watch::Run {
+            notice: Some(crate::item_watch::ItemNotice::TooltipRecord { entry }),
+            ..Default::default()
+        });
+    }
+}
+
+/// The change count each VM's copy of the item records has taken in ([`Items::changed_since`]):
+/// set where a new interface's load seats the copy ([`seed_vm_item_records`]), then carried on by
+/// [`feed_item_stats`]. A VM no load seated has none.
+#[derive(Resource, Default)]
+pub(crate) struct VmItemRecords(crate::ui_script::VmMemo<Option<u64>>);
+
+/// A new interface's copy of the item records, seated at its load before any file or event runs:
+/// every record the cache holds, so its files and the listeners of the login's first packets read
+/// it whole, as the reference's interface reads the one item cache a `/reload` keeps from its
+/// first file (`0x55ba30`). The copy's texts read no player and the VM's strings as they stand,
+/// none yet: they serve a VM with no host alone, as every getter of a hosted VM reads its
+/// record's lines through the host at the call ([`ItemViewLive`]).
+pub(crate) fn seed_vm_item_records(world: &mut World, script: &mut UiScript) {
+    let mut state = bevy::ecs::system::SystemState::<(Option<Res<Items>>, RecordViews)>::new(world);
+    let (items, views) = state.get(world);
+    let Some(items) = items else {
+        return;
+    };
+    let count = items.change_count();
+    let built = views.build(&items, script, items.cached_template_ids());
+    for (id, view) in built {
+        script.set_item_template(id, view);
+    }
+    *world.get_resource_or_init::<VmItemRecords>().0.get(script) = Some(count);
+}
+
+/// The item-record feed: the records that land or go outside an answer, a cache file's load and
+/// another realm's forget, carried into the VM's copy, and the ones `GetItemInfo` or a link verb
+/// read that the copy lacked, served from the cache (`0x48e172`); a VM no load seated is seated
+/// whole first. None of it is a packet's: an answer's record reaches the copy at its packet, ahead
+/// of its callbacks ([`push_answered_record`]), a getter's miss asks inside its call through the
+/// host (`0x55ba30`), and the cache's file is loaded at the character's pick, ahead of the world
+/// entry's load. The copy's texts read no player ([`RecordViews::build`]).
+pub(super) fn feed_item_stats(
+    mut vm: crate::script_calls::VmWith<(
+        Res<'static, Items>,
+        RecordViews<'static>,
+        ResMut<'static, VmItemRecords>,
+    )>,
+    mut pending: Local<crate::ui_script::VmMemo<std::collections::HashSet<u32>>>,
+) {
+    vm.turn(|script, (items, views, mut seated)| {
+        let Some(script) = script else {
+            return;
+        };
+        let pending = pending.get(script);
+        let cursor = seated.0.get(script).get_or_insert_with(|| {
+            pending.extend(items.cached_template_ids());
+            items.change_count()
+        });
         // A landed record is pushed unprompted; a refusal on a held record removed it from the
         // cache (`0x556f35`), and the VM's copy goes.
         if *cursor != items.change_count() {
@@ -565,10 +796,6 @@ pub(super) fn feed_item_stats(
             }
             *cursor = items.change_count();
         }
-        for id in script.take_item_stat_asks() {
-            items.template(id, 0, Ask::Event(&commands));
-            pending.insert(id);
-        }
         // A read the cache misses has nothing to push; a later landing pushes it unprompted.
         pending.extend(
             script
@@ -576,35 +803,9 @@ pub(super) fn feed_item_stats(
                 .into_iter()
                 .filter(|&id| items.template(id, 0, Ask::Read).is_some()),
         );
-        if spell_mods.is_changed() || reads_changed {
-            pending.extend(reads_player.iter().copied());
-        }
         if pending.is_empty() {
             return;
         }
-        let spell_res = spells.as_deref();
-        let skill_catalog = skill_lines.as_deref().map(|s| &s.catalog);
-        let skills = crate::spell::PlayerSkills {
-            lines: skill_catalog,
-            spells: spell_res.map(|s| &s.catalog),
-            items: Some(&items),
-        };
-        let level =
-            |d: &benilla_formats::SpellDisplay| crate::spell::player_spell_level(me, skills, d);
-        let power_cost = |d: &benilla_formats::SpellDisplay| {
-            me.map_or(-1, |s| {
-                crate::spell::usable::power_cost(d, s, skills, &spell_mods)
-            })
-        };
-        let power_per_second = |d: &benilla_formats::SpellDisplay| {
-            let level = crate::spell::SpellLevel::Player { me, skills };
-            crate::spell::usable::per_second_cost(d, level)
-        };
-        let caster = TokenCaster {
-            level: &level,
-            power_cost: &power_cost,
-            power_per_second: &power_per_second,
-        };
         let ready: Vec<u32> = pending
             .iter()
             .copied()
@@ -612,55 +813,15 @@ pub(super) fn feed_item_stats(
             .collect();
         // Built first, pushed after: the lookup borrows the VM that `set_item_template` needs
         // mutably.
-        let views: Vec<(u32, benilla_ui::script::ItemTemplateView)> = {
-            let strings = benilla_ui::strings::Strings::Vm(script.lua());
-            ready
-                .into_iter()
-                .filter_map(|id| {
-                    pending.remove(&id);
-                    let t = items.template(id, 0, Ask::Read)?.clone();
-                    // The standing label reads the gender too.
-                    if item_has_mod_tokens(&t, spell_res) || t.required_rep_faction != 0 {
-                        reads_player.insert(id);
-                    } else {
-                        reads_player.remove(&id);
-                    }
-                    let tables = ViewTables {
-                        skill_lines: skill_catalog,
-                        factions: factions.as_deref().map(|f| f.catalog()),
-                        sub_classes: sub_classes.as_deref().map(|s| &s.0),
-                        classes: classes.as_deref().map(|c| &c.0),
-                        icons: icons.as_deref(),
-                        areas: area_names.as_deref().map(|a| &a.0),
-                        maps: maps.as_deref().map(|m| &m.0),
-                    };
-                    let view = template_view(
-                        &t,
-                        spell_res,
-                        Some(&spell_mods),
-                        caster,
-                        tables,
-                        home_area,
-                        &|| gender,
-                        strings,
-                    );
-                    Some((id, view))
-                })
-                .collect()
-        };
-        for (id, view) in views {
+        let built = views.build(&items, script, ready);
+        for (id, view) in built {
+            pending.remove(&id);
             script.set_item_template(id, view);
         }
         // The quest log's item callbacks (`0x4e0830`) on the records the push carried, once each.
         script.flush_quest_log_refires();
     })
 }
-
-/// What the `$`-tokens read of the caster.
-type CasterReads<'w, 's> = (
-    Res<'w, crate::spell::SpellModifiers>,
-    Query<'w, 's, &'static ObjectStore, With<SelfPlayer>>,
-);
 
 /// One bag slot from its item guid: instance, template, icon and use-spell cooldown, the object
 /// read off `held` (the item objects as of the getter's place) and its countdowns off `objects`.
@@ -671,7 +832,6 @@ type CasterReads<'w, 's> = (
 pub(super) fn resolve_slot(
     guid: u64,
     held: &(impl super::ItemObjects + ?Sized),
-    objects: &Objects,
     items: &Items,
     icons: Option<&ItemDisplays>,
     rolls: crate::items::RollCatalogs,
@@ -686,7 +846,7 @@ pub(super) fn resolve_slot(
         return None;
     }
     // The enchant and lifetime (`SMSG_ITEM_TIME_UPDATE`) countdowns, in whole seconds.
-    let countdowns = objects.countdowns(guid);
+    let countdowns = held.countdowns(guid);
     let enchant_ms: [Option<u64>; crate::items::ENCHANT_SLOTS] =
         std::array::from_fn(|s| countdowns.and_then(|c| c.enchant_remaining_display_ms(s as u32)));
     let duration_ms = countdowns.and_then(|c| c.lifetime_remaining_display_ms());
@@ -1233,7 +1393,6 @@ mod tests {
             resolve_slot(
                 guid,
                 &o,
-                &o,
                 &items,
                 None,
                 RollCatalogs::NONE,
@@ -1293,7 +1452,6 @@ mod tests {
             let o = objs.get();
             resolve_slot(
                 0xC1,
-                &o,
                 &o,
                 &items,
                 None,
@@ -1356,7 +1514,6 @@ mod tests {
                 resolve_slot(
                     guid,
                     &o,
-                    &o,
                     &items,
                     None,
                     RollCatalogs::NONE,
@@ -1413,7 +1570,6 @@ mod tests {
                 let o = objs.get();
                 resolve_slot(
                     guid,
-                    &o,
                     &o,
                     &items,
                     None,
@@ -1476,7 +1632,6 @@ mod tests {
                 let o = objs.get();
                 resolve_slot(
                     guid,
-                    &o,
                     &o,
                     &items,
                     None,
@@ -1614,7 +1769,6 @@ mod tests {
                 resolve_slot(
                     guid,
                     &o,
-                    &o,
                     &items,
                     None,
                     RollCatalogs::NONE,
@@ -1683,39 +1837,6 @@ mod tests {
             category: 0,
             category_cooldown_ms: -1,
         }
-    }
-
-    #[test]
-    fn modifier_refresh_tracks_only_item_descriptions_with_tokens() {
-        let displays = std::collections::HashMap::from([
-            (
-                1,
-                benilla_formats::SpellDisplay {
-                    description: Some("Restores 5 health.".into()),
-                    ..Default::default()
-                },
-            ),
-            (
-                2,
-                benilla_formats::SpellDisplay {
-                    description: Some("Restores $s1 health.".into()),
-                    ..Default::default()
-                },
-            ),
-        ]);
-        let spells = crate::ui_action::Spells {
-            catalog: benilla_formats::SpellCatalog::from_displays(displays),
-            forms: Default::default(),
-            ranges: Default::default(),
-            cast_times: Default::default(),
-            durations: Default::default(),
-            radii: Default::default(),
-        };
-        let mut item = crate::items::test_template("Token item");
-        item.spells = vec![slot(1, 0)];
-        assert!(!super::item_has_mod_tokens(&item, Some(&spells)));
-        item.spells.push(slot(2, 0));
-        assert!(super::item_has_mod_tokens(&item, Some(&spells)));
     }
 
     /// On the real Spell.dbc, an undescribed spell such as a key's `Opening` builds no trigger
@@ -1788,18 +1909,6 @@ mod tests {
         assert!(line(1).contains("the mage and her allies"), "{}", line(1));
         assert!(line(0).contains("the mage and his allies"), "{}", line(0));
     }
-
-    /// The item feeds re-substitute a held `$`-text when what the tokens read moves: the gender
-    /// byte `$g`/`$G` branch on (`0x508214`), and no other byte of `UNIT_FIELD_BYTES_0`.
-    #[test]
-    fn the_token_reads_move_with_the_gender_byte_alone() {
-        let store = |bytes: u32| {
-            crate::net::ObjectStore(benilla_protocol::ObjectFields::from_pairs(&[(36, bytes)]))
-        };
-        let male = super::token_reads(Some(&store(4 | 1 << 8)));
-        assert_ne!(super::token_reads(Some(&store(4 | 1 << 8 | 1 << 16))), male);
-        assert_eq!(super::token_reads(Some(&store(1 | 2 << 8 | 1 << 24))), male);
-    }
 }
 
 #[cfg(test)]
@@ -1809,25 +1918,34 @@ mod ask_tests {
     use crate::items::Items;
     use crate::net::NetCommands;
 
-    /// A `/reload` keeps the reference's item cache, so a new VM is seated with every cached
-    /// record its first frame, ahead of its world entry, and its first read hits.
-    #[test]
-    fn a_new_vm_is_seated_with_every_cached_template() {
+    /// The feed alone over a fresh VM, with the sends kept.
+    fn feed_app() -> (App, crossbeam_channel::Receiver<crate::net::ClientCommand>) {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut app = App::new();
         app.insert_resource(NetCommands(tx))
             .init_resource::<Items>()
+            .init_resource::<super::VmItemRecords>()
             .init_resource::<crate::spell::SpellModifiers>()
             .add_systems(Update, super::feed_item_stats);
+        (app, rx)
+    }
+
+    /// `GetItemInfo(25)` off the VM's copy, with no host lent.
+    fn name(app: &mut App) -> Option<String> {
+        app.world_mut()
+            .non_send_resource_mut::<benilla_ui::script::UiScript>()
+            .eval::<Option<String>>("return (GetItemInfo(25))")
+            .unwrap()
+    }
+
+    /// A VM no interface's load seated (a harness's) is seated with every cached record by the
+    /// feed, and a new one again; nothing is asked.
+    #[test]
+    fn a_vm_no_load_seated_is_seated_with_every_cached_template() {
+        let (mut app, rx) = feed_app();
         app.world_mut()
             .resource_mut::<Items>()
             .insert_template(25, Some(crate::items::test_template("Linen Cloth")));
-        let name = |app: &mut App| {
-            app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
-                .eval::<Option<String>>("return (GetItemInfo(25))")
-                .unwrap()
-        };
         app.insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
         app.update();
         assert_eq!(name(&mut app).as_deref(), Some("Linen Cloth"));
@@ -1841,26 +1959,53 @@ mod ask_tests {
         assert!(crate::query_cache::queries(&rx).is_empty());
     }
 
+    /// A VM its load seated takes no second copy from the feed: only what changed since.
+    #[test]
+    fn a_vm_its_load_seated_takes_only_what_changed_since() {
+        let (mut app, _rx) = feed_app();
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(25, Some(crate::items::test_template("Linen Cloth")));
+        let mut script = benilla_ui::script::UiScript::new().unwrap();
+        super::seed_vm_item_records(app.world_mut(), &mut script);
+        app.insert_non_send_resource(script);
+        assert_eq!(
+            name(&mut app).as_deref(),
+            Some("Linen Cloth"),
+            "seated at the load"
+        );
+        app.world_mut()
+            .non_send_resource_mut::<benilla_ui::script::UiScript>()
+            .drop_item_template(25);
+        app.world_mut()
+            .resource_mut::<Items>()
+            .insert_template(26, Some(crate::items::test_template("Wool Cloth")));
+        app.update();
+        assert_eq!(
+            name(&mut app),
+            None,
+            "the seated record is not pushed again"
+        );
+        assert_eq!(
+            app.world_mut()
+                .non_send_resource_mut::<benilla_ui::script::UiScript>()
+                .eval::<Option<String>>("return (GetItemInfo(26))")
+                .unwrap()
+                .as_deref(),
+            Some("Wool Cloth"),
+            "the record landed since is"
+        );
+    }
+
     /// A refusal on a record the cache held removes it (`0x556ec0`-`0x556f37`), so the VM's copy
     /// goes too: its readers, the equip questions among them, miss where they read it before.
     #[test]
     fn a_refusal_on_a_held_record_leaves_the_vm_too() {
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let mut app = App::new();
-        app.insert_resource(NetCommands(tx))
-            .init_resource::<Items>()
-            .init_resource::<crate::spell::SpellModifiers>()
-            .add_systems(Update, super::feed_item_stats);
+        let (mut app, _rx) = feed_app();
         app.world_mut()
             .resource_mut::<Items>()
             .insert_template(25, Some(crate::items::test_template("Linen Cloth")));
         app.insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
-        let name = |app: &mut App| {
-            app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
-                .eval::<Option<String>>("return (GetItemInfo(25))")
-                .unwrap()
-        };
         app.update();
         assert_eq!(name(&mut app).as_deref(), Some("Linen Cloth"));
         app.world_mut()
@@ -1870,17 +2015,11 @@ mod ask_tests {
         assert_eq!(name(&mut app), None, "the refusal removed it");
     }
 
-    /// A miss the VM asks for is the getter's lookup with a callback: it queries, a frame between
-    /// asks queries nothing, and the next ask queries a refused id again. A miss `GetItemInfo`
-    /// reads never queries (`0x48e172`).
+    /// A miss `GetItemInfo` reads never queries (`0x48e172`): not at the read, not at a frame,
+    /// not on a refused record.
     #[test]
-    fn a_refused_template_is_asked_by_the_next_getter_and_never_by_get_item_info() {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let mut app = App::new();
-        app.insert_resource(NetCommands(tx))
-            .init_resource::<Items>()
-            .init_resource::<crate::spell::SpellModifiers>()
-            .add_systems(Update, super::feed_item_stats);
+    fn get_item_info_never_queries_a_miss() {
+        let (mut app, rx) = feed_app();
         app.insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
         let run = |app: &mut App, lua: &str| {
             app.world_mut()
@@ -1894,14 +2033,6 @@ mod ask_tests {
             crate::query_cache::queries(&rx).is_empty(),
             "a read asks nothing"
         );
-        let ask = |app: &mut App| {
-            app.world_mut()
-                .non_send_resource_mut::<benilla_ui::script::UiScript>()
-                .ask_item_templates([25]);
-            app.update();
-        };
-        ask(&mut app);
-        assert_eq!(crate::query_cache::queries(&rx).len(), 1);
         app.world_mut()
             .resource_mut::<Items>()
             .insert_template(25, None);
@@ -1911,12 +2042,6 @@ mod ask_tests {
         assert!(
             crate::query_cache::queries(&rx).is_empty(),
             "no frame or read asks a refusal"
-        );
-        ask(&mut app);
-        assert_eq!(
-            crate::query_cache::queries(&rx).len(),
-            1,
-            "the next getter asks again"
         );
     }
 

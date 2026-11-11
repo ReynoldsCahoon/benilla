@@ -31,6 +31,20 @@ impl MailVerbs<'_> {
         self.mail.as_deref().and_then(|m| m.mailbox)
     }
 
+    /// The mailbox a use asked to open ([`super::MailOpen::use_mailbox`]), taken. The cell is
+    /// lent mutably only when a use left one, so a use that opened no mailbox writes nothing.
+    pub(crate) fn take_used(&mut self) -> Option<u64> {
+        let mail = self.mail.as_mut().filter(|m| m.used.is_some())?;
+        mail.used.take()
+    }
+
+    /// The open's cell (`0x4acd27`).
+    pub(crate) fn open(&mut self, mailbox: u64) {
+        if let Some(mail) = self.mail.as_deref_mut() {
+            mail.click(mailbox);
+        }
+    }
+
     /// The close core's clear of the cell (`0x4acd8f`), the VM's verbs finding none from here.
     pub(crate) fn clear_mailbox(&mut self, script: &mut UiScript) {
         if let Some(mail) = self.mail.as_deref_mut() {
@@ -51,14 +65,26 @@ impl MailVerbs<'_> {
         }
     }
 
-    /// Apply one mail call; the close is the host's ([`MailCall::Close`]).
+    /// An unread mail's open arms the close's re-query (`0x4adda6`), after its mark's
+    /// `MAIL_INBOX_UPDATE` (`0x4add9d`) ran its listeners.
+    pub(crate) fn arm_close_refresh(&mut self) {
+        if self.mail.is_none() {
+            return;
+        }
+        if let Some(pending) = self.pending.as_deref_mut() {
+            pending.arm_refresh();
+        }
+    }
+
+    /// Apply one mail call; the close is the host's ([`MailCall::Close`]), and so is an unread
+    /// mail's arm after its open ([`Self::arm_close_refresh`]).
     pub(crate) fn apply(&mut self, script: &mut UiScript, call: MailCall) {
         let Self {
             mail,
-            pending,
             commands,
             filter,
             switches,
+            ..
         } = self;
         let Some(mail) = mail.as_deref_mut() else {
             debug!("ui_mail: no mail session in this world; {call:?} dropped");
@@ -77,11 +103,9 @@ impl MailVerbs<'_> {
                         .0
                         .send(ClientCommand::MailMarkAsRead { mailbox, mail_id });
                     mail.mark_read(mail_id);
+                    // Its listeners run before the open arms the close's re-query, which the host
+                    // does after them ([`Self::arm_close_refresh`]).
                     script.mark_mail_read(index);
-                    // Only an unread mail arms the close's re-query (`0x4adda6`).
-                    if let Some(pending) = pending.as_deref_mut() {
-                        pending.arm_refresh();
-                    }
                 }
                 return;
             }
@@ -92,9 +116,10 @@ impl MailVerbs<'_> {
             } => {
                 // A miss asks and keeps the callback `0x4af340`, one per call (`0x4af1bf`).
                 let held = mail.bodies.lookup(text_id, || {
-                    let _ = commands
-                        .0
-                        .send(ClientCommand::ItemTextQuery { text_id, mail_id });
+                    let _ = commands.0.send(ClientCommand::ItemTextQuery {
+                        text_id,
+                        key: benilla_protocol::messages::mail_text_key(mail_id),
+                    });
                 });
                 if held.is_none() {
                     mail.wait(super::MailWait::Body(text_id));

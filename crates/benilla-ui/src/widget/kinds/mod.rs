@@ -328,6 +328,12 @@ pub struct TooltipState {
     /// health watcher (`0x467e70`, registered at `0x52a0a8`) drives the bar; a `set_unit` push of
     /// that unit, under any token, re-drives it.
     pub unit_guid: Option<u64>,
+    /// The game object this tooltip shows (`+0x370`/`+0x374`, stored at `0x52aa8c`), which the lock
+    /// key's record callback builds again (`0x52ad34`); every clear zeroes it (`0x5300b9`).
+    pub object_guid: Option<u64>,
+    /// The corpse this tooltip shows (`+0x388`/`+0x38c`, stored at `0x52af3e`), which the owner's
+    /// name callback builds again (`0x52b004`); every clear zeroes it (`0x5300d1`).
+    pub corpse_guid: Option<u64>,
     /// The unit's health as the bar was last driven with it: the watcher's copy of the field
     /// (`0x4667a0`), which a values update compares before calling it (`0x4655bb`).
     pub unit_health: u32,
@@ -426,6 +432,11 @@ pub struct ModelState {
     /// call (`0x76ccf5`-`0x76cd0d`), its scene starting over, even for the file it held. 0 for
     /// none.
     pub instance: u64,
+    /// The instance keeps its depth fill: a copy handed to the frame through slot `0x90`, made by
+    /// `0x707400` with flags 0, as the minimap's group and rim arrows are (`0x4ee1b9`,
+    /// `0x4ee206`). `SetModel`'s own create pushes flags 5 (`0x76ccf5`), whose bit 0 turns depth
+    /// fill off (`0x707a48`).
+    pub depth_fill: bool,
 }
 
 /// A model pane's armed fog, all the renderer needs ([`ModelState::armed_fog`]).
@@ -521,6 +532,7 @@ impl Default for ModelState {
             ffx: false,
             select_fill: false,
             instance: 0,
+            depth_fill: false,
         }
     }
 }
@@ -650,6 +662,7 @@ impl ModelState {
         self.armed = None;
         self.pending_seed = true;
         self.select_fill = false;
+        self.depth_fill = false;
         if let Some(facts) = facts {
             self.seed_from_facts(facts);
         }
@@ -666,6 +679,7 @@ impl ModelState {
         self.armed = None;
         self.pending_seed = false;
         self.select_fill = false;
+        self.depth_fill = false;
     }
 
     /// `SetSequence`/`SetSequenceTime` (`0x7121a0`): interrupts what plays, with no
@@ -957,7 +971,7 @@ pub const MINIMAP_INDOOR_RADII: [f32; 6] = [150.0, 120.0, 90.0, 60.0, 40.0, 25.0
 /// The minimap's radius in yards (`0x6da9b0`): with the indoor byte set the indoor table at the
 /// indoor index (`0x6da9bf`), else the outdoor chunk count times 0.5 and 33.333332 (`0x6da9e9`,
 /// `0x6da9ef`). The ping, the blips and the dots all use it. Deviation: an index past 5 reads the
-/// last entry, where 1.12.1 reads past both six-entry tables (`0x6da9d5`, `0x6da9c4`), a client
+/// last entry, because 1.12.1 reads past both six-entry tables (`0x6da9d5`, `0x6da9c4`), a client
 /// fault a hand-edited CVar reaches.
 pub fn minimap_radius_yd(zoom: u32, inside_zoom: u32, inside: bool) -> f32 {
     let at = |z: u32| z.min(u32::from(MINIMAP_ZOOM_LEVELS - 1)) as usize;
@@ -1059,7 +1073,8 @@ pub struct ButtonState {
     /// and drag edges skip the button, and an `Enable`/`Disable` that runs (`0x779160`) clears it.
     pub locked: bool,
     /// [`FrameKind::LootButton`]'s 0-based slot (`+0x4dc`) from `SetSlot`. Deviation: `None`
-    /// until then, not the ctor's 0, so that an unset row takes nothing rather than slot 0.
+    /// until then, not the ctor's 0, because that way an unset row takes nothing rather than slot
+    /// 0.
     pub loot_slot: Option<u32>,
     /// A CheckButton's checked flag (`+0x4dc`, XML `checked`).
     pub checked: bool,
