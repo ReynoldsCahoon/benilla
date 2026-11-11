@@ -30,12 +30,18 @@
 //!
 //! # Cargo reads `[patch]` and `[profile]` from the root manifest only, so benilla's are repeated:
 //! # without the kira patch the mixer is not benilla's, without the alsa one the lock holds two
-//! # `alsa-sys` and does not resolve, and without the wgpu-hal one a presentation stall past a
-//! # second loses the device on Vulkan.
+//! # `alsa-sys` and does not resolve, without the wgpu-hal one a presentation stall past a
+//! # second loses the device on Vulkan, without naga, bevy_pbr and bevy_render the iPad's Metal
+//! # GPU family 2 cannot draw, and without bevy_ecs a single-threaded schedule keeps its systems'
+//! # stored access.
 //! [patch.crates-io]
 //! kira = { git = "https://github.com/samwhosung/benilla" }
 //! alsa = { git = "https://github.com/samwhosung/benilla" }
 //! wgpu-hal = { git = "https://github.com/samwhosung/benilla" }
+//! naga = { git = "https://github.com/samwhosung/benilla" }
+//! bevy_pbr = { git = "https://github.com/samwhosung/benilla" }
+//! bevy_render = { git = "https://github.com/samwhosung/benilla" }
+//! bevy_ecs = { git = "https://github.com/samwhosung/benilla" }
 //!
 //! [profile.dev]
 //! opt-level = 1
