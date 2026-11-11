@@ -487,6 +487,21 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // benilla-assets' loaders go into the live `AssetServer`, so they register after `AssetPlugin`.
     benilla_assets::register_asset_loaders(&mut app);
 
+    // Every main-world schedule single-threaded, not only Update and PostUpdate, with
+    // `WOW_ST_ALL=1`: on the iPad Air 2's three cores, beside the render thread, the multi-threaded
+    // executor's hand-offs in First, PreUpdate, Last and the fixed-timestep schedules cost the main
+    // thread ~11 ms of waiting a frame for ~3.6 ms of work (`ios-perf-systot`, 2026-11-11). A
+    // system that parallelises inside (avian's `par_iter`s) still does. Under measurement.
+    if std::env::var("WOW_ST_ALL").as_deref() == Ok("1") {
+        let mut schedules = app.world_mut().resource_mut::<Schedules>();
+        let mut n = 0;
+        for (_, schedule) in schedules.iter_mut() {
+            schedule.set_executor_kind(bevy::ecs::schedule::ExecutorKind::SingleThreaded);
+            n += 1;
+        }
+        println!("executor: {n} main-world schedules -> single-threaded (WOW_ST_ALL=1)");
+    }
+
     // `ExtractSchedule` runs single-threaded too: bevy_render leaves it multi-threaded, with no
     // non-Send member, and single-threaded measured faster. `WOW_MT_EXTRACT=1` restores it.
     //
