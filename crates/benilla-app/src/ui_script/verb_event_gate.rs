@@ -60,7 +60,7 @@ fn sources() -> Vec<(PathBuf, String)> {
         .expect("workspace root")
         .join("crates");
     let mut out = Vec::new();
-    let mut stack = vec![root];
+    let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
         for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let p = e.path();
@@ -68,8 +68,9 @@ fn sources() -> Vec<(PathBuf, String)> {
                 stack.push(p);
                 continue;
             }
-            // Skip tests and `*_gate.rs`, test-only modules whose names do not say so.
-            let name = p.to_string_lossy();
+            // Skip tests and `*_gate.rs`, test-only modules whose names do not say so; judged
+            // under `crates/`, as the checkout's own folder may say "test".
+            let name = p.strip_prefix(&root).unwrap_or(&p).to_string_lossy();
             if p.extension().is_none_or(|x| x != "rs")
                 || name.contains("test")
                 || name.ends_with("_gate.rs")

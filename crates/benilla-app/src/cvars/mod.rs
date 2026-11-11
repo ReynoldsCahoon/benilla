@@ -3611,8 +3611,12 @@ mod tests {
             .into_iter()
             .chain(crate::test_support::rust_files(&ui_src))
         {
-            let rel = file.to_string_lossy().replace('\\', "/");
-            if rel.contains("benilla-app/src/cvars/") || rel.contains("tests") {
+            // From `crates/` on: the checkout's own folder may say "tests".
+            let path = file.to_string_lossy().replace('\\', "/");
+            let rel = path
+                .rsplit_once("/crates/")
+                .map_or(path.as_str(), |(_, r)| r);
+            if rel.starts_with("benilla-app/src/cvars/") || rel.contains("tests") {
                 continue;
             }
             let text = std::fs::read_to_string(&file).expect("source is readable");
