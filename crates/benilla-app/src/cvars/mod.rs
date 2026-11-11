@@ -1413,6 +1413,14 @@ mod tests {
     /// initial value; a locale that does not leaves every knob where it was.
     #[test]
     fn a_locale_default_reaches_its_knob_at_load() {
+        // `VideoConfig::default` reads the windowed-run variables, which other tests set.
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _w = EnvGuard::unset("WOW_WIN");
+        let _c = EnvGuard::unset("WOW_CAPTURE");
+        let _u = EnvGuard::unset("WOW_CAPTURE_UI");
         let boot = |locale: usize| {
             let mut app = cvar_app();
             app.insert_resource(Cvars::for_locale(locale));
