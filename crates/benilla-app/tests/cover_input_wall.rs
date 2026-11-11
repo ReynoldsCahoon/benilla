@@ -78,8 +78,28 @@ const VERDICTS: &[(&str, Verdict)] = &[
              window would warp it back in. Draining it would blind the gate to its own signal.",
         ),
     ),
+    (
+        "TouchInput",
+        Open(
+            "iOS only (`touch_mouse.rs`), read before `InputSystems` and written out as the mouse \
+             channels the cover swallows after it (`MouseButtonInput`, `MouseMotion`, \
+             `MouseWheel`, `WindowEvent`, the cursor), so a tap or drag never lands under the \
+             cover; the stick and jump legs go to the bindings instead, and the stick re-asserts \
+             its held directions after the cover's clear by design (`virtual_stick.rs`)",
+        ),
+    ),
+    (
+        "TouchPhase",
+        Open("a field of `TouchInput`, its verdict"),
+    ),
     // ── Not input at all ────────────────────────────────────────────────────────────────────
     ("ButtonState", Plumbing),
+    // The iOS event loop's pacing (`ios_boot.rs`), not a channel.
+    ("UpdateMode", Plumbing),
+    ("WinitSettings", Plumbing),
+    // The soft keyboard's handle to ask winit for the keyboard again (`soft_keyboard.rs`): an
+    // output; the keys it brings arrive as `KeyboardInput`, which the cover swallows.
+    ("WINIT_WINDOWS", Plumbing),
     // Cursor outputs benilla writes; nothing arrives through them.
     ("CursorGrabMode", Plumbing),
     ("CursorIcon", Plumbing),
