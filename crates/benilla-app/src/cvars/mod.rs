@@ -900,6 +900,10 @@ fn session_values(world: &World) -> Vec<(&'static str, Option<String>)> {
         let v = world.get_resource::<crate::ui_script::UiScaleCvar>();
         out.push(("uiScale", v.map(|s| s.0.to_string())));
     }
+    if set("WOW_POST_AA") {
+        let v = world.get_resource::<benilla_world::post_aa::PostAa>();
+        out.push(("postAntiAlias", v.map(|a| a.spelling().to_string())));
+    }
     if set("WOW_FARCLIP") {
         let v = world.get_resource::<benilla_world::view::ViewDistance>();
         out.push(("farclip", v.map(|s| s.farclip.to_string())));
@@ -2639,6 +2643,29 @@ mod tests {
         );
     }
 
+    /// The Anti-Aliasing dropdown's writes switch the world view's pass at once; an unknown
+    /// spelling is off.
+    #[test]
+    fn a_lua_write_switches_the_post_process_anti_aliasing() {
+        use benilla_world::post_aa::PostAa;
+        let env = CvarEnv::hold();
+        let mut app = cvar_app_in(&env);
+        app.update();
+        for (value, want) in [
+            ("fxaa", PostAa::Fxaa),
+            ("bogus", PostAa::Off),
+            ("smaa-ultra", PostAa::parse("smaa-ultra").unwrap()),
+            ("0", PostAa::Off),
+        ] {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .run(&format!(r#"SetCVar("postAntiAlias", "{value}")"#))
+                .unwrap();
+            app.update();
+            assert_eq!(*res::<PostAa>(&app), want, "{value}");
+        }
+    }
+
     /// The old `benilla-config/account` file moves into `config.toml`'s `accountName` once: the
     /// first boot reads it, the save writes the row and only then deletes the file, and the next
     /// boot reads the row.
@@ -2790,7 +2817,7 @@ mod tests {
     /// What a CVar host reads from the environment when it is built and when it loads
     /// ([`session_values`], [`crate::video::windowed_env`], [`crate::local_state::home`]); the
     /// persistence variables are `ENV_LOCK`'s own, the window ones are the capture tests'.
-    const HOST_ENV: [&str; 13] = [
+    const HOST_ENV: [&str; 14] = [
         "WOW_WIN",
         "WOW_CAPTURE",
         "WOW_CAPTURE_UI",
@@ -2802,6 +2829,7 @@ mod tests {
         "WOW_ANISO",
         "WOW_MSAA",
         "WOW_RENDER_SCALE",
+        "WOW_POST_AA",
         "WOW_HOST",
         "BENILLA_HOME",
     ];
@@ -2930,6 +2958,7 @@ mod tests {
             .init_resource::<crate::creature_anim::blood::ViolenceLevel>()
             .init_resource::<crate::player::Approach>()
             .init_resource::<crate::dynamic_scale::DynamicScaleConfig>()
+            .insert_resource(benilla_world::post_aa::PostAa::Off)
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
         app

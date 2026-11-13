@@ -310,6 +310,19 @@ pub(crate) fn on_cvar(
     }
 }
 
+/// The `postAntiAlias` change callback: an unknown spelling is off.
+pub(crate) fn on_post_aa_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut aa: bevy::prelude::Mut<'_, benilla_world::post_aa::PostAa>,
+) {
+    if ev.is("postAntiAlias") {
+        let want = benilla_world::post_aa::PostAa::parse(&ev.new).unwrap_or_default();
+        if *aa != want {
+            *aa = want;
+        }
+    }
+}
+
 impl Plugin for WorldBackdropPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RenderScale>()

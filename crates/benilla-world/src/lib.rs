@@ -127,6 +127,7 @@ pub mod layout_keys;
 pub mod lighting;
 pub mod liquid;
 pub mod log_ring;
+pub mod post_aa;
 
 /// The iOS boot's engine settings for the iPad Air 2's GPU.
 #[cfg(target_os = "ios")]

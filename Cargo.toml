@@ -29,6 +29,9 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "ui_bevy_render",
     "scene",
     "picking",
+    # SMAA's area and search lookup tables (`benilla_world::post_aa`), KTX2 with zstd in Rust.
+    "smaa_luts",
+    "zstd_rust",
 ] }
 # For the `WOW_GPU_MS` meter's query set, which bevy 0.18 does not wrap; must match bevy's wgpu.
 wgpu = "27"

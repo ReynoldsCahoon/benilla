@@ -1626,6 +1626,50 @@ fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// Anti-Aliasing, benilla's own dropdown under Render Scale on the desktop page too: Off by
+/// default, each entry writes its spelling live.
+#[test]
+fn the_anti_aliasing_row_offers_off_fxaa_and_three_smaa_presets() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = audio_harness();
+    s.set_cvar_host("postAntiAlias", "0");
+    let mut s = harness_on(s);
+    let row = "BenillaOptionsFrameContainerBodyGraphicsRowAntiAliasing";
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+    s.resolve();
+    assert_eq!(
+        s.eval::<String>(&format!("return {row}DropdownText:GetText()"))
+            .unwrap(),
+        "Off"
+    );
+    let gap: f32 = s
+        .eval(&format!(
+            "return BenillaOptionsFrameContainerBodyGraphicsRowRenderScale:GetBottom() - {row}:GetTop()"
+        ))
+        .unwrap();
+    assert!((gap - 9.0).abs() < 0.01, "right under Render Scale: {gap}");
+    let entries: String = s
+        .eval(&format!(
+            "local t = {{}} for _, e in ipairs({row}.entries) do table.insert(t, e.text .. \"=\" .. e.value) end \
+             return table.concat(t, \",\")"
+        ))
+        .unwrap();
+    assert_eq!(
+        entries,
+        "Off=0,FXAA=fxaa,SMAA Low=smaa-low,SMAA High=smaa-high,SMAA Ultra=smaa-ultra"
+    );
+    let _ = s.take_cvar_changes();
+    s.run(&format!("BenillaOptionsRow_Set({row}, \"smaa-high\")"))
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("postAntiAlias".to_string(), "smaa-high".to_string())]
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// The touch client's Video page (`BenillaOptions_TouchLayout`, run at load where
 /// `BenillaIsTouchClient()` answers; called by hand here, on the desktop): Display Mode and
 /// Vertical Sync give way to Target Frame Rate, Dynamic Resolution and Minimum Resolution on the
@@ -1655,6 +1699,7 @@ fn the_touch_layout_swaps_the_desktop_video_rows_for_the_frame_rate_levers() {
     for (row, on) in [
         ("RowDisplayMode", true),
         ("RowVerticalSync", true),
+        ("RowAntiAliasing", true),
         ("RowTargetFps", false),
         ("RowDynamicResolution", false),
         ("RowMinResolution", false),
@@ -1670,16 +1715,18 @@ fn the_touch_layout_swaps_the_desktop_video_rows_for_the_frame_rate_levers() {
         ("RowDisplayMode", false),
         ("RowVerticalSync", false),
         ("RowRenderScale", true),
+        ("RowAntiAliasing", true),
         ("RowTargetFps", true),
         ("RowDynamicResolution", true),
         ("RowMinResolution", true),
     ] {
         assert_eq!(shown(&mut s, row), on, "touch {row}");
     }
-    // One chain: Render Scale under Weather Intensity, the three rows under it.
+    // One chain: Render Scale under Weather Intensity, Anti-Aliasing and the three rows under it.
     let tops: Vec<f32> = [
         "RowWeatherDensity",
         "RowRenderScale",
+        "RowAntiAliasing",
         "RowTargetFps",
         "RowDynamicResolution",
         "RowMinResolution",
@@ -2485,11 +2532,13 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
             untipped.push(row.to_string());
             continue;
         }
-        // Four rows with no fitting 1.12 string carry a `BENILLA_` one, each held to its row:
-        // Render Scale and Enable Sound in Background have no 1.12 setting, Display Mode's
-        // string describes a checkbox, and `OPTION_TOOLTIP_GAMMA` cites art this page lacks.
+        // Five rows with no fitting 1.12 string carry a `BENILLA_` one, each held to its row:
+        // Render Scale, Anti-Aliasing and Enable Sound in Background have no 1.12 setting,
+        // Display Mode's string describes a checkbox, and `OPTION_TOOLTIP_GAMMA` cites art this
+        // page lacks.
         const BENILLA_OWNED: &[(&str, &str)] = &[
             ("BENILLA_TOOLTIP_RENDER_SCALE", "GraphicsRowRenderScale"),
+            ("BENILLA_TOOLTIP_ANTI_ALIASING", "GraphicsRowAntiAliasing"),
             ("BENILLA_TOOLTIP_DISPLAY_MODE", "GraphicsRowDisplayMode"),
             (
                 "BENILLA_TOOLTIP_BACKGROUND_SOUND",
@@ -2519,9 +2568,9 @@ fn every_row_tooltip_key_resolves_in_the_real_global_strings() {
         );
         checked += 1;
     }
-    // 84 rows less the three untipped below; four of the 81 carry a `BENILLA_` key, and a dropdown
+    // 85 rows less the three untipped below; five of the 82 carry a `BENILLA_` key, and a dropdown
     // row is checked on the key it wears at rest.
-    assert_eq!(checked, 81, "every tipped row carries a live key");
+    assert_eq!(checked, 82, "every tipped row carries a live key");
     assert_eq!(
         untipped,
         vec![
@@ -2617,8 +2666,8 @@ fn every_flavor_of_row_raises_its_plate_from_the_page_it_lives_on() {
             s.errors()
         );
     }
-    // Every tipped row: the same 81 the key census counts.
-    assert_eq!(raised, 81, "every row but Auto Loot raises a description");
+    // Every tipped row: the same 82 the key census counts.
+    assert_eq!(raised, 82, "every row but Auto Loot raises a description");
 }
 
 /// 1.12's AdvancedOptionsCombatText box as saved-global rows: a click writes the global, never a

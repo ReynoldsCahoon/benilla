@@ -146,6 +146,7 @@ impl Plugin for WorldFoundation {
             .init_resource::<benilla_assets::TexFilterSetting>()
             // Its clamp to what this GPU accepts, in `finish()`, between the adapter and `Startup`.
             .add_plugins(crate::view::MsaaSupportPlugin)
+            .add_plugins(crate::post_aa::PostAaPlugin)
             // The viewer's body, empty in a program with no avatar.
             .init_resource::<crate::view::Viewer>()
             // The dev state, whose defaults are the player's; the debug panel only edits it.

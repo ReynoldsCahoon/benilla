@@ -872,6 +872,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
     // benilla's own: [`crate::dynamic_scale`] moves a factor on `renderScale` to hold
     // `dynamicRenderScaleFPS`, never below `dynamicRenderScaleMin`. On by default on iOS only,
     // where the iPad Air 2's GPU cost follows the 3D's pixel count.
+    // benilla's own: the world view's post-process anti-aliasing (`benilla_world::post_aa`), "0"
+    // off, or "fxaa", "smaa-low", "smaa-medium", "smaa-high", "smaa-ultra"; `$WOW_POST_AA`
+    // overrides it for the session.
+    ours(
+        "postAntiAlias",
+        "0",
+        "benilla's own — the reference has no post-process anti-aliasing",
+    ),
     ours(
         "dynamicRenderScale",
         if cfg!(target_os = "ios") { "1" } else { "0" },

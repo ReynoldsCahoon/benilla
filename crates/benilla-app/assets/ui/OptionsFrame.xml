@@ -434,6 +434,13 @@
             .. "Below 100% trades sharpness for frame rate; above 100% is supersampling, which "
             .. "smooths edges at the cost of frame rate. Applies when you click Apply."
 
+        -- 1.12 has no post-process anti-aliasing.
+        BENILLA_TOOLTIP_ANTI_ALIASING =
+            "Smooths the jagged edges of the 3D world, including leaves, grass and fences, which "
+            .. "multisampling misses. The interface is unaffected.\n\n"
+            .. "FXAA is the cheapest and softens textures slightly. SMAA keeps textures sharper; "
+            .. "its higher settings catch more edges for a little more time each frame."
+
         -- The touch client's Video rows (BenillaOptions_TouchLayout); 1.12 has none of them.
         BENILLA_TOOLTIP_RENDER_SCALE_TOUCH =
             "Draws the 3D world at a fraction of the screen's resolution. The interface is "
@@ -496,7 +503,7 @@
             Graphics = {
                 "RowUiScale", "RowFarclip", "RowWorldDetail", "RowSpellDetail", "RowBrightness",
                 "RowWeatherDensity",
-                "RowDisplayMode", "RowVerticalSync", "RowRenderScale",
+                "RowDisplayMode", "RowVerticalSync", "RowRenderScale", "RowAntiAliasing",
             },
             -- Guild Names and Player Titles are children of Player Names
             -- (UIOptionsFrame.lua:703-709).
@@ -652,7 +659,8 @@
         BENILLA_TOUCH_GRAPHICS_ROWS = {
             "RowUiScale", "RowFarclip", "RowWorldDetail", "RowSpellDetail", "RowBrightness",
             "RowWeatherDensity",
-            "RowRenderScale", "RowTargetFps", "RowDynamicResolution", "RowMinResolution",
+            "RowRenderScale", "RowAntiAliasing", "RowTargetFps", "RowDynamicResolution",
+            "RowMinResolution",
         }
 
         function BenillaOptions_TouchLayout()
@@ -2069,11 +2077,30 @@
                                                 this.deferred = 1
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <!-- The touch client's rows: hidden off it (BenillaOptions_TouchLayout). -->
-                                        <Frame name="$parentRowTargetFps" inherits="BenillaOptionsDropdownRowTemplate" hidden="true">
+                                        <Frame name="$parentRowAntiAliasing" inherits="BenillaOptionsDropdownRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Deviation: our own row; the reference has no
+                                                -- post-process anti-aliasing (benilla_world post_aa).
+                                                BenillaOptionsRow_OnLoad(this, "postAntiAlias",
+                                                    "Anti-Aliasing", "BENILLA_TOOLTIP_ANTI_ALIASING")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = "Off", value = "0" },
+                                                    { text = "FXAA", value = "fxaa" },
+                                                    { text = "SMAA Low", value = "smaa-low" },
+                                                    { text = "SMAA High", value = "smaa-high" },
+                                                    { text = "SMAA Ultra", value = "smaa-ultra" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- The touch client's rows: hidden off it (BenillaOptions_TouchLayout). -->
+                                        <Frame name="$parentRowTargetFps" inherits="BenillaOptionsDropdownRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAntiAliasing" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAntiAliasing" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 -- Deviation: our own row; the reference runs as fast
