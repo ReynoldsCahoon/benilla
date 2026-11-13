@@ -416,7 +416,50 @@ impl Plugin for PlayerUiPlugin {
             )
             .add_systems(Update, clear_ui_overlays.before(UiQuadAppend))
             .add_systems(Update, rebuild_ui_mesh.after(UiQuadAppend))
+            .init_resource::<UiRenderScale>()
+            .add_systems(PostUpdate, apply_ui_render_scale)
             .add_systems(Last, count_material_events);
+    }
+}
+
+/// The fraction of the window the player-UI camera renders at, the world's composite and the quads
+/// together; the gamma decode stretches it to the window ([`crate::ui_gamma`]). 1.0 is native. Set
+/// from `uiRenderScale` by [`crate::dynamic_scale`] (fixed, or Dynamic). Deviation: benilla's own;
+/// the reference draws its interface at the backbuffer's size.
+#[derive(Resource, Clone, Copy, PartialEq, Debug)]
+pub(crate) struct UiRenderScale(pub(crate) f32);
+
+impl Default for UiRenderScale {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+/// Puts [`UiRenderScale`] on the player-UI camera when it spawns or the scale moves.
+fn apply_ui_render_scale(
+    mut commands: Commands,
+    scale: Res<UiRenderScale>,
+    cams: Query<Entity, With<PlayerUiCamera>>,
+    added: Query<(), Added<PlayerUiCamera>>,
+    mut quads: ResMut<UiQuads>,
+) {
+    if !scale.is_changed() && added.is_empty() {
+        return;
+    }
+    // The masks sit in device px of the target ([`rebuild_ui_mesh`]): rebuild at the new size.
+    if scale.is_changed() {
+        quads.dirty = true;
+    }
+    for cam in &cams {
+        if scale.0 < 1.0 {
+            commands
+                .entity(cam)
+                .insert(bevy::render::view::MainTextureScale(scale.0));
+        } else {
+            commands
+                .entity(cam)
+                .remove::<bevy::render::view::MainTextureScale>();
+        }
     }
 }
 
@@ -808,7 +851,9 @@ fn rebuild_ui_mesh(
     mut mesh_cost: ResMut<UiMeshCost>,
     cost_wanted: Res<crate::ui_script::UiCostWanted>,
     widescreen: Option<Res<crate::video::Widescreen>>,
+    ui_scale: Option<Res<UiRenderScale>>,
 ) {
+    let render_scale = ui_scale.map_or(1.0, |s| s.0);
     // Forget the materials of removed images first, before any early return, since a missed read
     // leaks: a cached material holds a strong image handle and, prepared, its GPU texture.
     // `Removed`, not `Unused`: this cache is itself a strong handle, so `Unused` never fires for a
@@ -1019,7 +1064,8 @@ fn rebuild_ui_mesh(
             continue;
         }
         let z = -450.0 + (i as f32 / run_count) * 900.0;
-        let scale = window.scale_factor();
+        // The target's device px: the window's, at the UI render scale ([`UiRenderScale`]).
+        let scale = window.scale_factor() * render_scale;
         let (mask_rect, mask) = match &run.mask {
             // The mask is tested in the target's device px, where the stretch has landed.
             Some(m) => (

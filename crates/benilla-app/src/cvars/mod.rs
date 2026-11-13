@@ -900,6 +900,16 @@ fn session_values(world: &World) -> Vec<(&'static str, Option<String>)> {
         let v = world.get_resource::<crate::ui_script::UiScaleCvar>();
         out.push(("uiScale", v.map(|s| s.0.to_string())));
     }
+    if set("WOW_UI_RENDER_SCALE") {
+        let v = world.get_resource::<crate::dynamic_scale::UiScaleChoice>();
+        out.push((
+            "uiRenderScale",
+            v.map(|c| match c {
+                crate::dynamic_scale::UiScaleChoice::Fixed(s) => s.to_string(),
+                crate::dynamic_scale::UiScaleChoice::Dynamic => "0".to_string(),
+            }),
+        ));
+    }
     if set("WOW_POST_AA") {
         let v = world.get_resource::<benilla_world::post_aa::PostAa>();
         out.push(("postAntiAlias", v.map(|a| a.spelling().to_string())));
@@ -2643,6 +2653,29 @@ mod tests {
         );
     }
 
+    /// The Interface Resolution dropdown's writes reach the interface's scaler at once: "0" is
+    /// Dynamic, anything else a fixed scale held to 50-100%.
+    #[test]
+    fn a_lua_write_sets_the_interface_resolution() {
+        use crate::dynamic_scale::UiScaleChoice;
+        let env = CvarEnv::hold();
+        let mut app = cvar_app_in(&env);
+        app.update();
+        for (value, want) in [
+            ("0.75", UiScaleChoice::Fixed(0.75)),
+            ("0", UiScaleChoice::Dynamic),
+            ("0.2", UiScaleChoice::Fixed(0.5)),
+            ("1", UiScaleChoice::Fixed(1.0)),
+        ] {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .run(&format!(r#"SetCVar("uiRenderScale", "{value}")"#))
+                .unwrap();
+            app.update();
+            assert_eq!(*res::<UiScaleChoice>(&app), want, "{value}");
+        }
+    }
+
     /// The Anti-Aliasing dropdown's writes switch the world view's pass at once; an unknown
     /// spelling is off.
     #[test]
@@ -2817,7 +2850,7 @@ mod tests {
     /// What a CVar host reads from the environment when it is built and when it loads
     /// ([`session_values`], [`crate::video::windowed_env`], [`crate::local_state::home`]); the
     /// persistence variables are `ENV_LOCK`'s own, the window ones are the capture tests'.
-    const HOST_ENV: [&str; 14] = [
+    const HOST_ENV: [&str; 15] = [
         "WOW_WIN",
         "WOW_CAPTURE",
         "WOW_CAPTURE_UI",
@@ -2830,6 +2863,7 @@ mod tests {
         "WOW_MSAA",
         "WOW_RENDER_SCALE",
         "WOW_POST_AA",
+        "WOW_UI_RENDER_SCALE",
         "WOW_HOST",
         "BENILLA_HOME",
     ];
@@ -2959,6 +2993,7 @@ mod tests {
             .init_resource::<crate::player::Approach>()
             .init_resource::<crate::dynamic_scale::DynamicScaleConfig>()
             .insert_resource(benilla_world::post_aa::PostAa::Off)
+            .insert_resource(crate::dynamic_scale::UiScaleChoice::Fixed(1.0))
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
         app

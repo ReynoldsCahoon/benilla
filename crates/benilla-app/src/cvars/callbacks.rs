@@ -47,6 +47,7 @@ pub(crate) struct CvarCallbacks<'w> {
     render_scale: Option<ResMut<'w, crate::world_backdrop::RenderScale>>,
     dynamic_scale: Option<ResMut<'w, crate::dynamic_scale::DynamicScaleConfig>>,
     post_aa: Option<ResMut<'w, benilla_world::post_aa::PostAa>>,
+    ui_scale_choice: Option<ResMut<'w, crate::dynamic_scale::UiScaleChoice>>,
     shadows: Option<ResMut<'w, crate::blob_shadow::ShadowSettings>>,
     violence: Option<ResMut<'w, crate::creature_anim::blood::ViolenceLevel>>,
 }
@@ -133,6 +134,9 @@ impl CvarCallbacks<'_> {
         }
         if let Some(k) = self.dynamic_scale.as_mut() {
             crate::dynamic_scale::on_cvar(ev, k.reborrow());
+        }
+        if let Some(k) = self.ui_scale_choice.as_mut() {
+            crate::dynamic_scale::on_ui_scale_cvar(ev, k.reborrow());
         }
         if let Some(k) = self.post_aa.as_mut() {
             crate::world_backdrop::on_post_aa_cvar(ev, k.reborrow());

@@ -172,6 +172,83 @@ struct Controller {
     probing: bool,
 }
 
+impl Controller {
+    /// One frame of `dt` seconds against a `budget_ms` frame: steps down a level (to `deepest` at
+    /// most) after a missed second, when `may_descend`, and probes up one after
+    /// [`PROBE_AFTER_S`] on budget; see the module docs. Whether the level moved.
+    fn tick(
+        &mut self,
+        dt: f32,
+        budget_ms: f32,
+        deepest: usize,
+        may_descend: bool,
+        levels: &[f32],
+        what: &str,
+    ) -> bool {
+        if self.probe_wait_s == 0.0 {
+            self.probe_wait_s = PROBE_AFTER_S;
+        }
+        // A raised floor pulls the scale up to it at once.
+        if self.level > deepest {
+            self.level = deepest;
+            return true;
+        }
+        if self.settle_s > 0.0 {
+            self.settle_s -= dt;
+            self.window_s = 0.0;
+            self.window_frames = 0;
+            return false;
+        }
+        self.window_s += dt;
+        self.window_frames += 1;
+        if self.window_s < 1.0 {
+            return false;
+        }
+        let mean_ms = self.window_s * 1000.0 / self.window_frames as f32;
+        let elapsed = self.window_s;
+        self.window_s = 0.0;
+        self.window_frames = 0;
+
+        let from = levels[self.level];
+        if mean_ms > budget_ms * MISS {
+            if self.probing {
+                self.probe_wait_s = (self.probe_wait_s * 2.0).min(PROBE_MAX_S);
+            }
+            self.probing = false;
+            self.on_budget_s = 0.0;
+            if may_descend && self.level < deepest {
+                self.level += 1;
+                self.settle_s = SETTLE_S;
+                info!(
+                    "{what} {from:.2} -> {:.2}: {mean_ms:.1} ms frames over a {budget_ms:.1} ms budget",
+                    levels[self.level]
+                );
+                return true;
+            }
+        } else {
+            if self.probing {
+                // The probe held: the next one waits the base time.
+                self.probing = false;
+                self.probe_wait_s = PROBE_AFTER_S;
+            }
+            self.on_budget_s += elapsed;
+            if self.level > 0 && self.on_budget_s >= self.probe_wait_s {
+                self.level -= 1;
+                self.on_budget_s = 0.0;
+                self.probing = true;
+                self.settle_s = SETTLE_S;
+                info!(
+                    "{what} {from:.2} -> {:.2}: probing up, {mean_ms:.1} ms frames on a \
+                     {budget_ms:.1} ms budget",
+                    levels[self.level]
+                );
+                return true;
+            }
+        }
+        false
+    }
+}
+
 /// Holds the budget: see the module docs.
 fn hold_budget(
     time: Res<Time<bevy::time::Real>>,
@@ -186,71 +263,91 @@ fn hold_budget(
         *state = Controller::default();
         return;
     }
-    if state.probe_wait_s == 0.0 {
-        state.probe_wait_s = PROBE_AFTER_S;
-    }
-    // A raised floor pulls the scale up to it at once.
-    let deepest = config.deepest();
-    if state.level > deepest {
-        state.level = deepest;
-    }
-
-    let dt = time.delta_secs();
-    if state.settle_s > 0.0 {
-        state.settle_s -= dt;
-        state.window_s = 0.0;
-        state.window_frames = 0;
-        apply(&mut scale, state.level);
-        return;
-    }
-    state.window_s += dt;
-    state.window_frames += 1;
-    if state.window_s < 1.0 {
-        apply(&mut scale, state.level);
-        return;
-    }
-    let mean_ms = state.window_s * 1000.0 / state.window_frames as f32;
-    let budget = config.budget_ms();
-    let elapsed = state.window_s;
-    state.window_s = 0.0;
-    state.window_frames = 0;
-
-    let from = LEVELS[state.level];
-    if mean_ms > budget * MISS {
-        if state.probing {
-            state.probe_wait_s = (state.probe_wait_s * 2.0).min(PROBE_MAX_S);
-        }
-        state.probing = false;
-        state.on_budget_s = 0.0;
-        if state.level < deepest {
-            state.level += 1;
-            state.settle_s = SETTLE_S;
-            info!(
-                "dynamic render scale {from:.2} -> {:.2}: {mean_ms:.1} ms frames over a \
-                 {budget:.1} ms budget",
-                LEVELS[state.level]
-            );
-        }
-    } else {
-        if state.probing {
-            // The probe held: the next one waits the base time.
-            state.probing = false;
-            state.probe_wait_s = PROBE_AFTER_S;
-        }
-        state.on_budget_s += elapsed;
-        if state.level > 0 && state.on_budget_s >= state.probe_wait_s {
-            state.level -= 1;
-            state.on_budget_s = 0.0;
-            state.probing = true;
-            state.settle_s = SETTLE_S;
-            info!(
-                "dynamic render scale {from:.2} -> {:.2}: probing up, {mean_ms:.1} ms frames on a \
-                 {budget:.1} ms budget",
-                LEVELS[state.level]
-            );
-        }
-    }
+    state.tick(
+        time.delta_secs(),
+        config.budget_ms(),
+        config.deepest(),
+        true,
+        &LEVELS,
+        "dynamic render scale",
+    );
     apply(&mut scale, state.level);
+}
+
+/// The interface's render scales, `uiRenderScale`'s Dynamic steps through, from native down.
+const UI_LEVELS: [f32; 3] = [1.0, 0.75, 0.5];
+
+/// `uiRenderScale`: a fixed fraction of the window the interface renders at, or Dynamic.
+#[derive(Resource, Clone, Copy, PartialEq, Debug)]
+pub(crate) enum UiScaleChoice {
+    Fixed(f32),
+    Dynamic,
+}
+
+impl Default for UiScaleChoice {
+    /// Native, or `$WOW_UI_RENDER_SCALE` for the session (`0` is Dynamic).
+    fn default() -> Self {
+        std::env::var("WOW_UI_RENDER_SCALE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .map_or(Self::Fixed(1.0), Self::from_value)
+    }
+}
+
+impl UiScaleChoice {
+    /// A CVar value: `0` (or below) is Dynamic, anything else a fixed scale in 0.5-1.0.
+    pub(crate) fn from_value(v: f32) -> Self {
+        if v <= 0.0 {
+            Self::Dynamic
+        } else {
+            Self::Fixed(v.clamp(0.5, 1.0))
+        }
+    }
+}
+
+/// The `uiRenderScale` callback, beside [`on_cvar`]; `$WOW_UI_RENDER_SCALE` owns the session.
+pub(crate) fn on_ui_scale_cvar(ev: &crate::cvars::CvarChanged, mut choice: Mut<'_, UiScaleChoice>) {
+    if ev.is("uiRenderScale") && std::env::var_os("WOW_UI_RENDER_SCALE").is_none() {
+        let want = UiScaleChoice::from_value(ev.num());
+        if *choice != want {
+            *choice = want;
+        }
+    }
+}
+
+/// The interface's scale ([`crate::ui_pass::UiRenderScale`]): the fixed choice, or under Dynamic
+/// the same stepping as the 3D's against the same target, 100%, 75%, 50%. Dynamic steps down only
+/// once the 3D's dynamic scale is off or at its floor, so a missed second lowers one of them, the
+/// world first; it steps back up on its own probes.
+fn hold_ui_budget(
+    time: Res<Time<bevy::time::Real>>,
+    config: Res<DynamicScaleConfig>,
+    choice: Res<UiScaleChoice>,
+    world_scale: Res<DynamicScale>,
+    mut ui: ResMut<crate::ui_pass::UiRenderScale>,
+    mut state: Local<Controller>,
+) {
+    let want = match *choice {
+        UiScaleChoice::Fixed(s) => {
+            *state = Controller::default();
+            s
+        }
+        UiScaleChoice::Dynamic => {
+            let world_at_floor = !config.on || world_scale.0 <= LEVELS[config.deepest()] + 1e-4;
+            state.tick(
+                time.delta_secs(),
+                config.budget_ms(),
+                UI_LEVELS.len() - 1,
+                world_at_floor,
+                &UI_LEVELS,
+                "dynamic interface scale",
+            );
+            UI_LEVELS[state.level]
+        }
+    };
+    if ui.0 != want {
+        ui.0 = want;
+    }
 }
 
 /// Writes the level's factor, only when it moves: a write rebuilds nothing, but a moved factor
@@ -269,10 +366,12 @@ impl Plugin for DynamicScalePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DynamicScaleConfig>()
             .init_resource::<DynamicScale>()
+            .init_resource::<UiScaleChoice>()
+            .init_resource::<crate::ui_pass::UiRenderScale>()
             // After the frame's world stages, and before the render size reads the factor.
             .add_systems(
                 Update,
-                (resolve_target, hold_budget)
+                (resolve_target, hold_budget, hold_ui_budget)
                     .chain()
                     .after(benilla_world::schedule::WorldStage::Present)
                     .before(crate::world_backdrop::track_render_size),
@@ -396,5 +495,58 @@ mod tests {
         // An unknown refresh reads as 60 Hz; a set rate under it stands.
         assert_eq!(target_fps(120.0, None, [None]), 60.0);
         assert_eq!(target_fps(30.0, Some("Apple M2 GPU"), hz(120)), 30.0);
+    }
+
+    fn ui_app(choice: UiScaleChoice) -> App {
+        let mut app = App::new();
+        app.init_resource::<Time<bevy::time::Real>>()
+            .insert_resource(DynamicScaleConfig {
+                on: true,
+                target_fps: 30.0,
+                asked_fps: 30.0,
+                floor: 0.5,
+            })
+            .init_resource::<DynamicScale>()
+            .insert_resource(choice)
+            .init_resource::<crate::ui_pass::UiRenderScale>()
+            .add_systems(Update, (hold_budget, hold_ui_budget).chain());
+        app
+    }
+
+    fn ui(app: &App) -> f32 {
+        app.world().resource::<crate::ui_pass::UiRenderScale>().0
+    }
+
+    #[test]
+    fn dynamic_interface_steps_down_after_the_world_and_back_up_on_budget() {
+        let mut app = ui_app(UiScaleChoice::Dynamic);
+        // Missed seconds: the world steps first, the interface holds at 100% until it floors.
+        let mut world_floored_at = None;
+        for s in 0..40 {
+            second(&mut app, 50.0);
+            if factor(&app) > 0.5 + 1e-4 {
+                assert_eq!(ui(&app), 1.0, "second {s}: the world still has steps");
+            } else if world_floored_at.is_none() {
+                world_floored_at = Some(s);
+            }
+        }
+        assert!(world_floored_at.is_some(), "the world reached its floor");
+        assert_eq!(ui(&app), 0.5, "then the interface stepped 75% and 50%");
+        // On budget: the interface climbs back to native.
+        for _ in 0..120 {
+            second(&mut app, 33.3);
+        }
+        assert_eq!(ui(&app), 1.0);
+    }
+
+    #[test]
+    fn a_fixed_interface_scale_never_moves() {
+        let mut app = ui_app(UiScaleChoice::Fixed(0.75));
+        for _ in 0..30 {
+            second(&mut app, 50.0);
+        }
+        assert_eq!(ui(&app), 0.75);
+        assert_eq!(UiScaleChoice::from_value(0.0), UiScaleChoice::Dynamic);
+        assert_eq!(UiScaleChoice::from_value(0.3), UiScaleChoice::Fixed(0.5));
     }
 }

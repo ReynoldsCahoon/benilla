@@ -208,6 +208,13 @@ pub struct Hdr;
 #[derive(Component, Default, Copy, Clone, ExtractComponent, PartialEq, Eq, Hash, Debug)]
 pub struct SingleMainTexture;
 
+/// benilla: a camera with no viewport of its own renders at this fraction of its target's size
+/// (`extract_cameras`): its main textures, depth and view are sized down, and a final pass that
+/// samples the main texture into the full-size target (benilla's `ui_gamma`) stretches it back.
+/// Ignored at or above 1, or on a camera with a viewport.
+#[derive(Component, Copy, Clone, PartialEq, Debug)]
+pub struct MainTextureScale(pub f32);
+
 /// An identifier for a view that is stable across frames.
 ///
 /// We can't use [`Entity`] for this because render world entities aren't

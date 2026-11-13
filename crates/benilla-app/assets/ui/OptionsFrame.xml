@@ -459,6 +459,12 @@
             .. "raises it again once they keep up. The interface stays sharp.\n\n"
             .. "Off, the world always draws at Render Scale, and a busy scene drops frames "
             .. "instead."
+        BENILLA_TOOLTIP_INTERFACE_RESOLUTION =
+            "Draws the interface (and the world behind it) at a fraction of the screen's "
+            .. "resolution, then stretches it to fit. Lower saves the graphics chip some work each "
+            .. "frame; text and icons get slightly softer.\n\n"
+            .. "Dynamic stays at 100% while the game keeps up with the Target Frame Rate, steps "
+            .. "down to 75% and then 50% while it does not, and climbs back when it does."
         BENILLA_TOOLTIP_MIN_RESOLUTION =
             "How far Dynamic Resolution may lower the 3D world's resolution. Lower keeps the "
             .. "frame rate up in busy scenes at the cost of a blurrier world."
@@ -660,8 +666,8 @@
         BENILLA_TOUCH_GRAPHICS_ROWS = {
             "RowUiScale", "RowFarclip", "RowWorldDetail", "RowSpellDetail", "RowBrightness",
             "RowWeatherDensity",
-            "RowRenderScale", "RowAntiAliasing", "RowTargetFps", "RowDynamicResolution",
-            "RowMinResolution",
+            "RowRenderScale", "RowAntiAliasing", "RowInterfaceResolution", "RowTargetFps",
+            "RowDynamicResolution", "RowMinResolution",
         }
 
         function BenillaOptions_TouchLayout()
@@ -2145,6 +2151,25 @@
                                                     "Minimum Resolution", "BENILLA_TOOLTIP_MIN_RESOLUTION", 1)
                                                 BenillaOptionsSliderRow_Setup(this, 0.35, 1.0, 0.05)
                                                 this.parentRow = "RowDynamicResolution"
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowInterfaceResolution" inherits="BenillaOptionsDropdownRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowMinResolution" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowMinResolution" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Deviation: our own row; the reference draws its
+                                                -- interface at the backbuffer's size. "0" is Dynamic
+                                                -- (benilla-app dynamic_scale).
+                                                BenillaOptionsRow_OnLoad(this, "uiRenderScale",
+                                                    "Interface Resolution", "BENILLA_TOOLTIP_INTERFACE_RESOLUTION")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = "100%", value = "1" },
+                                                    { text = "75%", value = "0.75" },
+                                                    { text = "50%", value = "0.5" },
+                                                    { text = "Dynamic", value = "0" },
+                                                })
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>

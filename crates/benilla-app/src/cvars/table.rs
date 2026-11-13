@@ -880,6 +880,13 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "0",
         "benilla's own — the reference has no post-process anti-aliasing",
     ),
+    // benilla's own: the interface's render scale (`ui_pass::UiRenderScale`), "1" native, "0.75",
+    // "0.5", or "0" Dynamic (`dynamic_scale`); `$WOW_UI_RENDER_SCALE` overrides it for the session.
+    ours(
+        "uiRenderScale",
+        "1",
+        "benilla's own — the reference draws its interface at the backbuffer's size",
+    ),
     ours(
         "dynamicRenderScale",
         if cfg!(target_os = "ios") { "1" } else { "0" },

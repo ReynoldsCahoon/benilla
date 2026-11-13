@@ -437,6 +437,7 @@ pub fn extract_cameras(
                 Option<&RenderLayers>,
                 Option<&Projection>,
                 Has<NoIndirectDrawing>,
+                Option<&crate::view::MainTextureScale>,
             ),
         )>,
     >,
@@ -474,6 +475,7 @@ pub fn extract_cameras(
             render_layers,
             projection,
             no_indirect_drawing,
+            main_texture_scale,
         ),
     ) in query.iter()
     {
@@ -504,6 +506,17 @@ pub fn extract_cameras(
                     .remove::<ExtractedCameraComponents>();
                 continue;
             }
+            // benilla: `MainTextureScale` renders a whole-target camera smaller.
+            let (viewport_origin, viewport_size, target_size) = match main_texture_scale {
+                Some(&crate::view::MainTextureScale(s)) if s < 1.0 && camera.viewport.is_none() => {
+                    let scaled = (target_size.as_vec2() * s.max(0.05))
+                        .round()
+                        .as_uvec2()
+                        .max(UVec2::ONE);
+                    (UVec2::ZERO, scaled, scaled)
+                }
+                _ => (viewport_origin, viewport_size, target_size),
+            };
 
             let render_visible_entities = RenderVisibleEntities {
                 entities: visible_entities

@@ -162,10 +162,11 @@ fn init_pipeline(
             ),
         ),
     );
-    // Point sampling: this is a 1:1 full-screen resolve, never a resample.
+    // Linear: at 1:1 every sample lands on a texel centre, so it reads exactly the texel; under a
+    // UI render scale (`ui_pass::UiRenderScale`) it stretches the smaller image smoothly.
     let sampler = render_device.create_sampler(&SamplerDescriptor {
-        min_filter: FilterMode::Nearest,
-        mag_filter: FilterMode::Nearest,
+        min_filter: FilterMode::Linear,
+        mag_filter: FilterMode::Linear,
         address_mode_u: AddressMode::ClampToEdge,
         address_mode_v: AddressMode::ClampToEdge,
         ..Default::default()
