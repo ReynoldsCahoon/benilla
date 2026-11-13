@@ -124,75 +124,26 @@ pub(crate) fn hold_directions(
     }
 }
 
-/// The ring and the knob.
-#[derive(Component)]
-enum StickPart {
-    Ring,
-    Knob,
-}
-
-/// Above the interface, below the loading cover (1000).
-const STICK_Z: i32 = 900;
-
 /// The knob's diameter, as a fraction of the ring's.
-const KNOB_SCALE: f32 = 0.45;
+pub(crate) const KNOB_SCALE: f32 = 0.45;
 
-/// The ring and the knob, spawned once and parked hidden.
-fn spawn_stick(mut commands: Commands) {
-    for (part, diameter, color) in [
-        (
-            StickPart::Ring,
-            2.0 * RADIUS,
-            Color::srgba(1.0, 1.0, 1.0, 0.12),
-        ),
-        (
-            StickPart::Knob,
-            2.0 * RADIUS * KNOB_SCALE,
-            Color::srgba(1.0, 1.0, 1.0, 0.35),
-        ),
-    ] {
-        commands.spawn((
-            part,
-            Node {
-                position_type: PositionType::Absolute,
-                width: Val::Px(diameter),
-                height: Val::Px(diameter),
-                border: UiRect::all(Val::Px(2.0)),
-                border_radius: BorderRadius::MAX,
-                ..default()
-            },
-            BackgroundColor(color),
-            BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.4)),
-            GlobalZIndex(STICK_Z),
-            Visibility::Hidden,
-        ));
-    }
-}
-
-/// The ring at the stick's centre and the knob at the finger, clamped to the ring.
-fn place_stick(
+/// The ring at the stick's centre and the knob at the finger, clamped to the ring, as quads in the
+/// player UI's pass ([`crate::touch_art`]); nothing while no stick finger is down.
+fn draw_stick(
     stick: Res<VirtualStick>,
-    mut parts: Query<(&StickPart, &mut Node, &mut Visibility)>,
+    art: Option<Res<crate::touch_art::TouchArt>>,
+    mut quads: ResMut<crate::ui_pass::UiQuads>,
 ) {
-    if !stick.is_changed() {
+    let (Some((center, at)), Some(art)) = (stick.0, art) else {
         return;
-    }
-    for (part, mut node, mut vis) in &mut parts {
-        let Some((center, at)) = stick.0 else {
-            *vis = Visibility::Hidden;
-            continue;
-        };
-        let (middle, diameter) = match part {
-            StickPart::Ring => (center, 2.0 * RADIUS),
-            StickPart::Knob => (
-                center + (at - center).clamp_length_max(RADIUS),
-                2.0 * RADIUS * KNOB_SCALE,
-            ),
-        };
-        node.left = Val::Px(middle.x - diameter / 2.0);
-        node.top = Val::Px(middle.y - diameter / 2.0);
-        *vis = Visibility::Visible;
-    }
+    };
+    crate::touch_art::push(&mut quads, &art.ring, center, 2.0 * RADIUS);
+    crate::touch_art::push(
+        &mut quads,
+        &art.knob,
+        center + (at - center).clamp_length_max(RADIUS),
+        2.0 * RADIUS * KNOB_SCALE,
+    );
 }
 
 /// Draws the stick on iOS; [`hold_directions`] runs in the bindings' tail on every platform and
@@ -202,8 +153,7 @@ pub(crate) struct VirtualStickPlugin;
 impl Plugin for VirtualStickPlugin {
     fn build(&self, app: &mut App) {
         if cfg!(target_os = "ios") {
-            app.add_systems(Startup, spawn_stick)
-                .add_systems(PostUpdate, place_stick);
+            app.add_systems(Update, draw_stick.in_set(crate::ui_pass::UiQuadAppend));
         }
     }
 }

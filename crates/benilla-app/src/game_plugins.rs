@@ -242,6 +242,7 @@ impl PluginGroup for GamePlugins {
             .add(crate::screenshot::ScreenshotPlugin)
             // On iOS, touches as the mouse and the on-screen keyboard; no-ops elsewhere.
             .add(crate::touch_mouse::TouchMousePlugin)
+            .add(crate::touch_art::TouchArtPlugin)
             .add(crate::virtual_stick::VirtualStickPlugin)
             .add(crate::jump_button::JumpButtonPlugin)
             .add(crate::soft_keyboard::SoftKeyboardPlugin)

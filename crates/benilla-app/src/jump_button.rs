@@ -71,71 +71,17 @@ pub(crate) fn fire_jump(
     }
 }
 
-#[derive(Component)]
-struct JumpRing;
-
-/// Above the interface, below the loading cover (1000), as the stick.
-const BUTTON_Z: i32 = 900;
-
-/// The ring with an upward chevron, spawned once and parked hidden.
-fn spawn_button(mut commands: Commands) {
-    let line = Color::srgba(1.0, 1.0, 1.0, 0.5);
-    commands
-        .spawn((
-            JumpRing,
-            Node {
-                position_type: PositionType::Absolute,
-                width: Val::Px(2.0 * RADIUS),
-                height: Val::Px(2.0 * RADIUS),
-                border: UiRect::all(Val::Px(2.0)),
-                border_radius: BorderRadius::MAX,
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.12)),
-            BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.4)),
-            GlobalZIndex(BUTTON_Z),
-            Visibility::Hidden,
-        ))
-        .with_children(|ring| {
-            // The chevron's two strokes, each turned 45° about its own centre and nudged so they
-            // meet at the top.
-            for (dx, angle) in [(-6.0, -45.0_f32), (6.0, 45.0)] {
-                ring.spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        width: Val::Px(20.0),
-                        height: Val::Px(4.0),
-                        left: Val::Px(RADIUS - 2.0 - 10.0 + dx),
-                        top: Val::Px(RADIUS - 2.0 - 2.0 + 3.0),
-                        border_radius: BorderRadius::MAX,
-                        ..default()
-                    },
-                    UiTransform::from_rotation(Rot2::degrees(angle)),
-                    BackgroundColor(line),
-                ));
-            }
-        });
-}
-
-/// The ring at the button's centre, hidden outside the world.
+/// The ring and its chevron at the button's centre, a quad in the player UI's pass
+/// ([`crate::touch_art`]); nothing outside the world.
 fn draw_button(
     button: Res<JumpButton>,
-    mut ring: Query<(&mut Node, &mut Visibility), With<JumpRing>>,
+    art: Option<Res<crate::touch_art::TouchArt>>,
+    mut quads: ResMut<crate::ui_pass::UiQuads>,
 ) {
-    if !button.is_changed() {
+    let (Some(center), Some(art)) = (button.center, art) else {
         return;
-    }
-    for (mut node, mut vis) in &mut ring {
-        let Some(center) = button.center else {
-            *vis = Visibility::Hidden;
-            continue;
-        };
-        node.left = Val::Px(center.x - RADIUS);
-        node.top = Val::Px(center.y - RADIUS);
-        *vis = Visibility::Visible;
-    }
+    };
+    crate::touch_art::push(&mut quads, &art.jump, center, 2.0 * RADIUS);
 }
 
 /// Places and draws the button on iOS; [`fire_jump`] runs in the bindings' tail on every platform
@@ -146,13 +92,12 @@ impl Plugin for JumpButtonPlugin {
     fn build(&self, app: &mut App) {
         if cfg!(target_os = "ios") {
             app.init_resource::<JumpButton>()
-                .add_systems(Startup, spawn_button)
                 .add_systems(
                     PreUpdate,
                     // Before the touches read it: `touch_to_mouse` orders itself after.
                     place_button.before(bevy::input::InputSystems),
                 )
-                .add_systems(PostUpdate, draw_button);
+                .add_systems(Update, draw_button.in_set(crate::ui_pass::UiQuadAppend));
         }
     }
 }
