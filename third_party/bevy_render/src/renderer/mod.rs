@@ -537,6 +537,8 @@ impl<'w> RenderContext<'w> {
         })
     }
 
+    // benilla: no caller since the camera-window clear stopped reading it (BENILLA.md).
+    #[allow(dead_code)]
     pub(crate) fn has_commands(&mut self) -> bool {
         self.command_encoder.is_some() || !self.command_buffer_queue.is_empty()
     }

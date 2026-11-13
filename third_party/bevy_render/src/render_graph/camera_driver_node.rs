@@ -71,7 +71,10 @@ impl Node for CameraDriverNode {
         // wgpu (and some backends) require doing work for swap chains if you call `get_current_texture()` and `present()`
         // This ensures that Bevy doesn't crash, even when there are no cameras (and therefore no work submitted).
         for (id, window) in world.resource::<ExtractedWindows>().iter() {
-            if camera_windows.contains(id) && render_context.has_commands() {
+            // benilla: a window a camera's graph will draw is not cleared. The sub graphs run after
+            // this node returns (`run_sub_graph` queues them), so `has_commands()` was still false
+            // here and every camera window took a full clear its camera then overwrote.
+            if camera_windows.contains(id) {
                 continue;
             }
 
