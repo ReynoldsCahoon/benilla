@@ -703,17 +703,21 @@ pub struct RigPaletteMirrors(
     pub std::collections::HashMap<&'static str, bevy::render::render_resource::Buffer>,
 );
 
-/// What the last upload put on the GPU; `dirty` is the published `Arc`'s pointer.
+/// What the last upload put on the GPU; `dirty` is the published `Arc`'s pointer, `mirrors` the
+/// mirror buffers it wrote to.
 #[derive(Default)]
 struct UploadedGenerations {
     table: Option<u64>,
     dirty: u64,
     origin: Option<u64>,
     origin_mirror: Option<u64>,
+    mirrors: Vec<bevy::render::render_resource::BufferId>,
 }
 
 /// Render world (`PrepareResources`): write the dirty rows, and on change the slot and origin
-/// tables, into the shared buffer and every mirror.
+/// tables, into the shared buffer and every mirror. A mirror that joined since the last upload
+/// (a light-pool slot comes and goes with its panes, `ui_models`) takes the slot table, the
+/// origins and every palette row whole, since it missed the rows written while it was away.
 fn upload_rig_palettes(
     queue: Res<RenderQueue>,
     shared: Option<Res<crate::lighting::SharedLightBuffer>>,
@@ -730,14 +734,22 @@ fn upload_rig_palettes(
     let origin_new = last.origin != Some(data.origin_generation) && !data.origins.is_empty();
     let origin_mirror_new =
         last.origin_mirror != Some(data.origin_mirror_generation) && !data.origins.is_empty();
-    if !table_new && !dirty_new && !origin_new && !origin_mirror_new {
+    let mirror_ids: Vec<_> = mirrors
+        .iter()
+        .flat_map(|m| m.0.values().map(|b| b.id()))
+        .collect();
+    let joined = mirror_ids.iter().any(|id| !last.mirrors.contains(id));
+    if !table_new && !dirty_new && !origin_new && !origin_mirror_new && !joined {
+        last.mirrors = mirror_ids;
         return;
     }
+    let was_mirrored = std::mem::take(&mut last.mirrors);
     *last = UploadedGenerations {
         table: Some(data.table_generation),
         dirty: dirty_ptr,
         origin: Some(data.origin_generation),
         origin_mirror: Some(data.origin_mirror_generation),
+        mirrors: mirror_ids,
     };
     let cost_t0 = rig_cost_enabled().then(std::time::Instant::now);
     let mut cost_calls = 0u32;
@@ -757,6 +769,33 @@ fn upload_rig_palettes(
         .map(|s| (&s.0, false))
         .chain(mirrors.iter().flat_map(|m| m.0.values().map(|b| (b, true))));
     for (buffer, mirror_only) in targets {
+        if mirror_only && !was_mirrored.contains(&buffer.id()) {
+            // A mirror that just joined: everything, whole.
+            if !data.table.is_empty() {
+                queue.write_buffer(
+                    buffer,
+                    rig_table_region_offset(),
+                    bytemuck::cast_slice(&data.table),
+                );
+            }
+            if !data.origins.is_empty() {
+                queue.write_buffer(
+                    buffer,
+                    rig_origin_region_offset(),
+                    bytemuck::cast_slice(&data.origins),
+                );
+            }
+            if !data.rows.is_empty() {
+                queue.write_buffer(
+                    buffer,
+                    palette_region_offset(),
+                    bytemuck::cast_slice(data.rows.as_slice()),
+                );
+            }
+            cost_calls += 3;
+            cost_bytes += data.rows.len() as u64 * 16;
+            continue;
+        }
         if table_new && !data.table.is_empty() {
             queue.write_buffer(
                 buffer,

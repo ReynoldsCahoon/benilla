@@ -118,15 +118,18 @@ fn upload_mat_anim(
     shared: Option<Res<crate::lighting::SharedLightBuffer>>,
     mirrors: Option<Res<MatAnimMirrors>>,
     table: Option<Res<MatAnimTable>>,
-    mut last: Local<Option<u64>>,
+    mut last: Local<Option<(u64, Vec<bevy::render::render_resource::BufferId>)>>,
 ) {
     let Some(table) = table else { return };
-    // The gate folds in the mirror count, so a mirror registered after the last write gets rows.
+    // The gate holds the mirror set, so a mirror that joined since the last write gets rows even
+    // when another left in the same frame.
     let mirrors = mirrors
         .map(|m| m.0.values().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
-    let gate = table.generation ^ ((mirrors.len() as u64) << 40);
-    if *last == Some(gate) {
+    let mut ids: Vec<_> = mirrors.iter().map(|b| b.id()).collect();
+    ids.sort_unstable();
+    let gate = (table.generation, ids);
+    if last.as_ref() == Some(&gate) {
         return;
     }
     *last = Some(gate);

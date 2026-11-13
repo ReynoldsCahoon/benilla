@@ -229,8 +229,8 @@ struct TileLight {
 /// A point light's candidacy range, unbounded: the reference's 4-nearest gather has none.
 const POINT_RANGE: f32 = 1.0e6;
 
-/// The light pool's mirror keys, one per slot. A key is only ever added: the mat-anim upload
-/// gates on the mirror count, so a set that grew and shrank in one frame could skip an upload.
+/// The light pool's mirror keys, one per slot. A slot is a mirror only while it is asked for
+/// ([`sync_light_mirrors`]); the uploads write a mirror that joins whole.
 const LIGHT_MIRROR_KEYS: [&str; UI_MODEL_CAM_LAYERS] = [
     "ui_models",
     "ui_models_1",
@@ -294,6 +294,35 @@ fn pick_slot<'a>(
         (true, _) => SlotPick::Grow,
         (false, Some(i)) => SlotPick::Reuse(i),
         (false, None) => SlotPick::Full,
+    }
+}
+
+/// `Last`, after every asker: a pool slot asked for this frame or the last (the reuse rule's
+/// grace, [`pick_slot`]) is a palette and mat-anim mirror; an idle one leaves both lists, so no
+/// upload writes into a buffer no pane draws with. The buffer and its twins stay: a slot asked
+/// again rejoins, and the uploads write a joining mirror whole.
+fn sync_light_mirrors(
+    rig: Option<Res<TileRig>>,
+    mut mirrors: ResMut<RigPaletteMirrors>,
+    mut anim_mirrors: ResMut<MatAnimMirrors>,
+) {
+    let Some(rig) = rig else { return };
+    for (light, key) in rig.lights.iter().zip(LIGHT_MIRROR_KEYS) {
+        let asked = light.used + 1 >= rig.epoch;
+        if mirrors.0.contains_key(key) != asked {
+            if asked {
+                mirrors.0.insert(key, light.buffer.clone());
+            } else {
+                mirrors.0.remove(key);
+            }
+        }
+        if anim_mirrors.0.contains_key(key) != asked {
+            if asked {
+                anim_mirrors.0.insert(key, light.buffer.clone());
+            } else {
+                anim_mirrors.0.remove(key);
+            }
+        }
     }
 }
 
@@ -624,7 +653,8 @@ impl Plugin for UiModelsPlugin {
                     .before(sync_tiles)
                     .before(crate::ui_script::UiFeed),
             )
-            .add_systems(Update, dump_atlas.after(sync_tiles));
+            .add_systems(Update, dump_atlas.after(sync_tiles))
+            .add_systems(Last, sync_light_mirrors);
     }
 }
 
