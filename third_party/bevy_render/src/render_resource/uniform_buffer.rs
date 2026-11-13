@@ -180,6 +180,8 @@ pub struct DynamicUniformBuffer<T: ShaderType> {
     changed: bool,
     buffer_usage: BufferUsages,
     _marker: PhantomData<fn() -> T>,
+    /// benilla: the last upload, so a writer whose bytes repeat it skips the copy (BENILLA.md).
+    last_upload: alloc::sync::Arc<std::sync::Mutex<super::buffer_vec::UploadMemo>>,
 }
 
 impl<T: ShaderType> Default for DynamicUniformBuffer<T> {
@@ -191,6 +193,7 @@ impl<T: ShaderType> Default for DynamicUniformBuffer<T> {
             changed: false,
             buffer_usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
             _marker: PhantomData,
+            last_upload: Default::default(),
         }
     }
 }
@@ -204,6 +207,7 @@ impl<T: ShaderType + WriteInto> DynamicUniformBuffer<T> {
             changed: false,
             buffer_usage: BufferUsages::COPY_DST | BufferUsages::UNIFORM,
             _marker: PhantomData,
+            last_upload: Default::default(),
         }
     }
 
@@ -306,15 +310,18 @@ impl<T: ShaderType + WriteInto> DynamicUniformBuffer<T> {
             self.changed = false;
         }
 
-        if let Some(buffer) = self.buffer.as_deref() {
-            let buffer_view = queue
-                .write_buffer_with(buffer, 0, NonZero::<u64>::new(buffer.size())?)
-                .unwrap();
+        if let Some(buffer) = self.buffer.clone() {
+            NonZero::<u64>::new(buffer.size())?;
+            // benilla: written into memory first, and copied on drop only if it differs from the
+            // last upload (BENILLA.md, "identical rewrites skipped").
             Some(DynamicUniformBufferWriter {
                 buffer: encase::DynamicUniformBuffer::new_with_alignment(
-                    QueueWriteBufferViewWrapper {
-                        capacity: capacity as usize,
-                        buffer_view,
+                    MemoWriteWrapper {
+                        data: alloc::vec![0; capacity as usize],
+                        written: 0,
+                        buffer,
+                        queue: queue.clone(),
+                        memo: self.last_upload.clone(),
                     },
                     alignment.get(),
                 ),
@@ -358,7 +365,7 @@ impl<T: ShaderType + WriteInto> DynamicUniformBuffer<T> {
 ///
 /// For more information, see [`DynamicUniformBuffer::get_writer`].
 pub struct DynamicUniformBufferWriter<T> {
-    buffer: encase::DynamicUniformBuffer<QueueWriteBufferViewWrapper>,
+    buffer: encase::DynamicUniformBuffer<MemoWriteWrapper>,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -368,29 +375,48 @@ impl<T: ShaderType + WriteInto> DynamicUniformBufferWriter<T> {
     }
 }
 
-/// A wrapper to work around the orphan rule so that [`wgpu::QueueWriteBufferView`] can implement
-/// [`BufferMut`].
-struct QueueWriteBufferViewWrapper {
-    buffer_view: wgpu::QueueWriteBufferView,
-    // Must be kept separately and cannot be retrieved from buffer_view, as the read-only access will
-    // invoke a panic.
-    capacity: usize,
+/// benilla: the writer's target, a buffer in memory; on drop its written span is copied to the GPU
+/// buffer unless it repeats the last upload.
+struct MemoWriteWrapper {
+    data: Vec<u8>,
+    written: usize,
+    buffer: Buffer,
+    queue: RenderQueue,
+    memo: alloc::sync::Arc<std::sync::Mutex<super::buffer_vec::UploadMemo>>,
 }
 
-impl BufferMut for QueueWriteBufferViewWrapper {
+impl BufferMut for MemoWriteWrapper {
     #[inline]
     fn capacity(&self) -> usize {
-        self.capacity
+        self.data.len()
     }
 
     #[inline]
     fn write<const N: usize>(&mut self, offset: usize, val: &[u8; N]) {
-        self.buffer_view.write(offset, val);
+        self.data[offset..offset + N].copy_from_slice(val);
+        self.written = self.written.max(offset + N);
     }
 
     #[inline]
     fn write_slice(&mut self, offset: usize, val: &[u8]) {
-        self.buffer_view.write_slice(offset, val);
+        self.data[offset..offset + val.len()].copy_from_slice(val);
+        self.written = self.written.max(offset + val.len());
+    }
+}
+
+impl Drop for MemoWriteWrapper {
+    fn drop(&mut self) {
+        if self.written == 0 {
+            return;
+        }
+        let bytes = &self.data[..self.written];
+        let unchanged = self
+            .memo
+            .lock()
+            .is_ok_and(|mut m| m.unchanged(&self.buffer, bytes));
+        if !unchanged {
+            self.queue.write_buffer(&self.buffer, 0, bytes);
+        }
     }
 }
 

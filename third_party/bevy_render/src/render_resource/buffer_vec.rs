@@ -45,6 +45,40 @@ pub struct RawBufferVec<T: NoUninit> {
     buffer_usage: BufferUsages,
     label: Option<String>,
     changed: bool,
+    last_upload: UploadMemo,
+}
+
+/// benilla: the bytes last uploaded into a buffer, so an identical rewrite is skipped. On the iPad
+/// Air 2 every `write_buffer` is a GPU copy costing ~0.3 ms whatever its size (BENILLA.md).
+#[derive(Default)]
+pub(crate) struct UploadMemo {
+    id: Option<super::BufferId>,
+    bytes: Vec<u8>,
+}
+
+impl UploadMemo {
+    pub(crate) const fn new() -> Self {
+        Self {
+            id: None,
+            bytes: Vec::new(),
+        }
+    }
+
+    /// Whether `bytes` are what `buffer` already holds from the last upload; if not, they are
+    /// remembered as the upload about to be made. Never for an `INDIRECT` buffer, which GPU
+    /// preprocessing writes between uploads.
+    pub(crate) fn unchanged(&mut self, buffer: &Buffer, bytes: &[u8]) -> bool {
+        if buffer.usage().contains(BufferUsages::INDIRECT) {
+            return false;
+        }
+        if self.id == Some(buffer.id()) && self.bytes == bytes {
+            return true;
+        }
+        self.id = Some(buffer.id());
+        self.bytes.clear();
+        self.bytes.extend_from_slice(bytes);
+        false
+    }
 }
 
 impl<T: NoUninit> RawBufferVec<T> {
@@ -58,6 +92,7 @@ impl<T: NoUninit> RawBufferVec<T> {
             buffer_usage,
             label: None,
             changed: false,
+            last_upload: UploadMemo::new(),
         }
     }
 
@@ -180,7 +215,9 @@ impl<T: NoUninit> RawBufferVec<T> {
         if let Some(buffer) = &self.buffer {
             let range = 0..self.item_size * self.values.len();
             let bytes: &[u8] = must_cast_slice(&self.values);
-            queue.write_buffer(buffer, 0, &bytes[range]);
+            if !self.last_upload.unchanged(buffer, &bytes[range.clone()]) {
+                queue.write_buffer(buffer, 0, &bytes[range]);
+            }
         }
     }
 
@@ -289,6 +326,7 @@ where
     label: Option<String>,
     label_changed: bool,
     phantom: PhantomData<T>,
+    last_upload: UploadMemo,
 }
 
 impl<T> BufferVec<T>
@@ -305,6 +343,7 @@ where
             label: None,
             label_changed: false,
             phantom: PhantomData,
+            last_upload: UploadMemo::new(),
         }
     }
 
@@ -417,7 +456,9 @@ where
         self.reserve(self.data.len() / u64::from(T::min_size()) as usize, device);
 
         let Some(buffer) = &self.buffer else { return };
-        queue.write_buffer(buffer, 0, &self.data);
+        if !self.last_upload.unchanged(buffer, &self.data) {
+            queue.write_buffer(buffer, 0, &self.data);
+        }
     }
 
     /// Queues writing of data from system RAM to VRAM using the [`RenderDevice`]

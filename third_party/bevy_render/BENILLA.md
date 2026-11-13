@@ -68,6 +68,26 @@ n-th call submits the pending writes (`queue.submit` with no command buffers), c
 asset types. Order is kept: writes after the submit go into the next pending batch. Off (0) by
 default, upstream's behaviour; benilla sets 4 on iOS (`benilla_world::world_plugins`).
 
+## The patch — no swapchain clear under a camera
+
+`CameraDriverNode` clears every window "with no camera", testing `camera_windows.contains(id) &&
+render_context.has_commands()`; the camera sub graphs it starts run only after the node returns, so
+`has_commands()` is false there and every window a camera draws took a full clear first, which the
+camera's own output then overwrote (`no_camera_clear_pass`, ~0.8 ms of the iPad Air 2's GPU a
+frame). `src/render_graph/camera_driver_node.rs` skips the clear for any window a camera whose graph
+runs targets. A window with no such camera is still cleared.
+
+## The patch — identical rewrites skipped
+
+Bevy rewrites `StorageBuffer`, `RawBufferVec` and `BufferVec` contents every frame whether or not
+they changed. On the iPad Air 2 each `write_buffer` is a blit in wgpu's PendingWrites command buffer
+costing ~0.3 ms of GPU whatever its size (the wow-optimize FINDINGS, 2026-11-13), so
+`src/render_resource/buffer_vec.rs` adds `UploadMemo` (the buffer and bytes last uploaded), and the
+three `write_buffer`s skip an upload identical to the last one into the same buffer. Never for an
+`INDIRECT` buffer, which GPU preprocessing writes between uploads. `DynamicUniformBuffer::get_writer`
+(`src/render_resource/uniform_buffer.rs`) writes into memory instead of a staging view and on drop
+copies the written span only if it differs, where it used to copy the buffer's whole capacity.
+
 ## The patch — a count of budget deferrals
 
 `RenderAssetBytesPerFrame` (benilla sets 4 MB on iOS) pushes an asset past the frame's budget to
@@ -78,4 +98,4 @@ the next frame, and nothing outside the render world can tell. `src/render_asset
 its meshes or textures are still queued (`benilla_app::portrait`). No behaviour change.
 
 Check: `diff -r <registry>/bevy_render-0.18.1 third_party/bevy_render` shows only those lines, the shadow-sampling
-lines above, the slab node table, the single main texture, the pending-write flush, the deferral count, and this file.
+lines above, the slab node table, the single main texture, the pending-write flush, the deferral count, the camera-window clear, the upload memo, and this file.

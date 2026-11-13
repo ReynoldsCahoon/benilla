@@ -39,6 +39,7 @@ pub struct StorageBuffer<T: ShaderType> {
     changed: bool,
     buffer_usage: BufferUsages,
     last_written_size: Option<BufferSize>,
+    last_upload: super::buffer_vec::UploadMemo,
 }
 
 impl<T: ShaderType> From<T> for StorageBuffer<T> {
@@ -51,6 +52,7 @@ impl<T: ShaderType> From<T> for StorageBuffer<T> {
             changed: false,
             buffer_usage: BufferUsages::COPY_DST | BufferUsages::STORAGE,
             last_written_size: None,
+            last_upload: super::buffer_vec::UploadMemo::new(),
         }
     }
 }
@@ -65,6 +67,7 @@ impl<T: ShaderType + Default> Default for StorageBuffer<T> {
             changed: false,
             buffer_usage: BufferUsages::COPY_DST | BufferUsages::STORAGE,
             last_written_size: None,
+            last_upload: super::buffer_vec::UploadMemo::new(),
         }
     }
 }
@@ -139,7 +142,9 @@ impl<T: ShaderType + WriteInto> StorageBuffer<T> {
             }));
             self.changed = false;
         } else if let Some(buffer) = &self.buffer {
-            queue.write_buffer(buffer, 0, self.scratch.as_ref());
+            if !self.last_upload.unchanged(buffer, self.scratch.as_ref()) {
+                queue.write_buffer(buffer, 0, self.scratch.as_ref());
+            }
         }
 
         self.last_written_size = BufferSize::new(size);
