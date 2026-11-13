@@ -53,19 +53,6 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "IsLinuxClient",
         lua.create_function(|_, _: MultiValue| Ok(Value::Nil))?,
     )?;
-    // `BenillaIsTouchClient()`: benilla's own, 1 on iOS and nil elsewhere, for the options window's
-    // touch layout (`OptionsFrame.xml`'s `BenillaOptions_TouchLayout`). Deviation: the reference
-    // only ran on a desktop.
-    g.set(
-        "BenillaIsTouchClient",
-        lua.create_function(|_, _: MultiValue| {
-            Ok(if cfg!(target_os = "ios") {
-                Value::Number(1.0)
-            } else {
-                Value::Nil
-            })
-        })?,
-    )?;
 
     // `GetDebugStats()` (`0x488af0`, `xor eax,eax; ret`): zero values, which `StatsFrame.lua:20`
     // hands straight to `SetText`.

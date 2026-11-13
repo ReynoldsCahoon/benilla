@@ -1670,8 +1670,8 @@ fn the_anti_aliasing_row_offers_off_fxaa_and_three_smaa_presets() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
-/// The touch client's Video page (`BenillaOptions_TouchLayout`, run at load where
-/// `BenillaIsTouchClient()` answers; called by hand here, on the desktop): Display Mode and
+/// The touch client's Video page (`BenillaOptions_TouchLayout`, which the host runs after the layer
+/// loads on iOS, `manifest::load_layer`; called by hand here, on the desktop): Display Mode and
 /// Vertical Sync give way to Target Frame Rate, Dynamic Resolution and Minimum Resolution on the
 /// same chain, Render Scale stops at 100%, and Minimum Resolution greys with its switch. On the
 /// desktop the three rows stay hidden.
@@ -1691,11 +1691,6 @@ fn the_touch_layout_swaps_the_desktop_video_rows_for_the_frame_rate_levers() {
     s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
     s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
         .unwrap();
-    assert!(
-        !s.eval::<bool>("return BenillaIsTouchClient() ~= nil")
-            .unwrap(),
-        "the desktop is no touch client"
-    );
     for (row, on) in [
         ("RowDisplayMode", true),
         ("RowVerticalSync", true),

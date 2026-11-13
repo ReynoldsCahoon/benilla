@@ -441,7 +441,7 @@
             .. "FXAA is the cheapest and softens textures slightly. SMAA keeps textures sharper; "
             .. "its higher settings catch more edges for a little more time each frame."
 
-        -- The touch client's Video rows (BenillaOptions_TouchLayout); 1.12 has none of them.
+        -- The touch client's Video rows (BenillaOptions_TouchLayout, run by the host on iOS after the layer loads); 1.12 has none of them.
         BENILLA_TOOLTIP_RENDER_SCALE_TOUCH =
             "Draws the 3D world at a fraction of the screen's resolution. The interface is "
             .. "unaffected at any setting.\n\n"
@@ -2102,7 +2102,7 @@
                                                 })
                                             </OnLoad></Scripts>
                                         </Frame>
-                                        <!-- The touch client's rows: hidden off it (BenillaOptions_TouchLayout). -->
+                                        <!-- The touch client's rows: hidden off it (BenillaOptions_TouchLayout, which the host runs on iOS). -->
                                         <Frame name="$parentRowTargetFps" inherits="BenillaOptionsDropdownRowTemplate" hidden="true">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowAntiAliasing" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
@@ -2145,10 +2145,6 @@
                                                     "Minimum Resolution", "BENILLA_TOOLTIP_MIN_RESOLUTION", 1)
                                                 BenillaOptionsSliderRow_Setup(this, 0.35, 1.0, 0.05)
                                                 this.parentRow = "RowDynamicResolution"
-                                                -- The last row: every row it rearranges exists.
-                                                if BenillaIsTouchClient and BenillaIsTouchClient() then
-                                                    BenillaOptions_TouchLayout()
-                                                end
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>

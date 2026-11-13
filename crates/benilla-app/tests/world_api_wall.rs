@@ -157,6 +157,8 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("particles::ViewThrottled", "record"),
     ("particles::render::EFFECT_DRAW_STATS", "record"),
     ("particles::spawn_emitter", "record"),
+    // The `postAntiAlias` CVar's knob, written by its change callback (`post_aa`'s module record).
+    ("post_aa::PostAa", "record"),
     ("ride_frame::RideFrame", "record"),
     ("rig_anim::AnimParked", "wall"),
     ("rig_anim::GlobalSeqDrive", "wall"),

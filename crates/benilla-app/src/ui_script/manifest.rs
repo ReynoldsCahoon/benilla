@@ -268,8 +268,15 @@ pub(crate) fn load_stock_bindings(script: &mut UiScript) {
 fn load_layer(script: &UiScript) -> Vec<String> {
     let before = script.diagnostics_seq();
     let layer = Addon::layer();
-    let failures = layer.load_files(script, &layer.toc.files);
+    let mut failures = layer.load_files(script, &layer.toc.files);
     script.replay_diagnostics(before, "BenillaScriptLog_Record");
+    // The touch client's options page (`OptionsFrame.xml`), laid out by the host: a platform
+    // answer is a host seam, not a global an addon could branch on.
+    if cfg!(target_os = "ios") {
+        if let Err(e) = script.run("BenillaOptions_TouchLayout()") {
+            failures.push(format!("BenillaOptions_TouchLayout: {e}"));
+        }
+    }
     failures
 }
 
