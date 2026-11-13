@@ -23,6 +23,10 @@
 //!   left, as before.
 //! - In the world, a finger landing on the jump button ([`crate::jump_button`]) with no interface
 //!   frame under it jumps, a frame later, once per touch, and leaves the mouse until it lifts.
+//! - Under the loading cover nothing a finger does reaches anything ([`Gesture::cover`]): the stick
+//!   lets go, a jump is dropped, and every finger down is spent until it lifts, so a finger held
+//!   across the cover acts again only after a fresh touch, as a key held across it must be pressed
+//!   again (`crate::loading_screen`'s input gate).
 //!
 //! Each action is written twice, as bevy_winit writes a real mouse's: as its typed message (the
 //! button plane, motion and wheel the game reads) and into the window's ordered event stream
@@ -214,6 +218,19 @@ impl Gesture {
     /// Whether the jump button was pressed since the last call.
     pub(crate) fn take_jump(&mut self) -> bool {
         std::mem::take(&mut self.jumped)
+    }
+
+    /// A frame under the loading cover: the stick and the jump button let go, a jump not yet taken
+    /// and the actions held for the next frame are dropped, and the fingers still down are spent
+    /// ([`Mode::Draining`]) until they lift. A stick or jump finger leaves `fingers` when claimed,
+    /// so its later touches find nothing to act on.
+    pub(crate) fn cover(&mut self) {
+        self.stick = None;
+        self.jump_finger = None;
+        self.jumped = false;
+        self.look = false;
+        self.next_frame.clear();
+        self.mode = self.idle_or_draining();
     }
 
     /// The button a one-finger drag holds: the right, mouselook, while the stick is held or for a
@@ -453,6 +470,7 @@ struct StickGate<'w> {
     world_unit: Option<Res<'w, crate::target::Hovered>>,
     world_object: Option<Res<'w, crate::target::HoveredObject>>,
     client_state: Option<Res<'w, State<crate::client_state::ClientState>>>,
+    cover: Option<Res<'w, crate::loading_screen::LoadingScreen>>,
     stick: ResMut<'w, crate::virtual_stick::VirtualStick>,
     jump: Option<ResMut<'w, crate::jump_button::JumpButton>>,
 }
@@ -522,6 +540,11 @@ fn touch_to_mouse(
         out.extend(gesture.touch(touch.id, touch.phase, touch.position, now));
     }
     out.extend(gesture.frame(now));
+    if stick_gate.cover.as_ref().is_some_and(|c| c.covering()) {
+        // The touches were still read, so a lift under the cover ends its finger.
+        out.clear();
+        gesture.cover();
+    }
     if gesture.take_jump() {
         if let Some(jump) = stick_gate.jump.as_mut() {
             jump.pressed = true;
@@ -682,6 +705,42 @@ mod tests {
         g.claim();
         assert!(g.take_jump());
         assert!(g.stick().is_some(), "the stick is still held");
+    }
+
+    #[test]
+    fn under_the_cover_the_stick_and_the_jump_let_go_until_a_fresh_touch() {
+        let mut g = with_jump();
+        let start = Vec2::new(100.0, 500.0);
+        g.touch(1, TouchPhase::Started, start, 0.0);
+        g.claim();
+        g.touch(1, TouchPhase::Moved, start + Vec2::new(0.0, -50.0), 0.05);
+        assert!(g.stick().is_some());
+        let ring = Vec2::new(900.0, 250.0);
+        g.touch(2, TouchPhase::Started, ring, 0.1);
+        g.claim();
+
+        g.cover();
+        assert_eq!(g.stick(), None, "the stick lets go under the cover");
+        assert!(!g.take_jump(), "a jump not yet taken is dropped");
+
+        // Held across the cover: moving the stick finger or tapping the ring does nothing.
+        assert_eq!(g.touch(1, TouchPhase::Moved, start, 0.2), vec![]);
+        assert_eq!(g.stick(), None);
+        g.touch(2, TouchPhase::Ended, ring, 0.3);
+        assert!(!g.take_jump());
+        // A finger landing under the cover is spent too: its lift clicks nothing.
+        let world = Vec2::new(600.0, 400.0);
+        g.touch(3, TouchPhase::Started, world, 0.3);
+        g.cover();
+        assert_eq!(g.frame(1.0), vec![], "no dwell press under the cover");
+        g.touch(3, TouchPhase::Ended, world, 1.1);
+        assert_eq!(g.begin_frame(), vec![], "no tap from a covered finger");
+        g.touch(1, TouchPhase::Ended, start, 1.2);
+
+        // After the cover a fresh touch drives the stick again.
+        g.touch(4, TouchPhase::Started, start, 2.0);
+        g.claim();
+        assert!(g.stick().is_some());
     }
 
     #[test]

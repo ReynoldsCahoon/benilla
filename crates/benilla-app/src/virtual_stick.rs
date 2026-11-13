@@ -85,8 +85,10 @@ fn toggle_gait(want: Option<bool>, last: Option<bool>, walking: bool) -> bool {
 }
 
 /// The stick's directions into the bindings, after the frame's binding calls: a Start each frame a
-/// direction is held, which is no new edge on a held bit and restores one the loading cover's bulk
-/// clear dropped, and a Stop when it lets go; and the walk toggle when the gait changes.
+/// direction is held, which is no new edge on a held bit, and a Stop when it lets go; and the walk
+/// toggle when the gait changes. Under the loading cover there is no stick
+/// ([`crate::touch_mouse::Gesture::cover`]), so the directions stop and a walk the stick set
+/// toggles back to running.
 pub(crate) fn hold_directions(
     stick: Option<Res<VirtualStick>>,
     player: Option<Res<crate::player::Player>>,

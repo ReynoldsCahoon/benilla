@@ -84,8 +84,10 @@ const VERDICTS: &[(&str, Verdict)] = &[
             "iOS only (`touch_mouse.rs`), read before `InputSystems` and written out as the mouse \
              channels the cover swallows after it (`MouseButtonInput`, `MouseMotion`, \
              `MouseWheel`, `WindowEvent`, the cursor), so a tap or drag never lands under the \
-             cover; the stick and jump legs go to the bindings instead, and the stick re-asserts \
-             its held directions after the cover's clear by design (`virtual_stick.rs`)",
+             cover; the stick and jump legs go to the bindings instead, so the gesture itself ends \
+             them under the cover (`Gesture::cover`): no stick, no jump, every finger down spent \
+             until it lifts. Read rather than drained, because a lift under the cover must still \
+             end its finger",
         ),
     ),
     (
