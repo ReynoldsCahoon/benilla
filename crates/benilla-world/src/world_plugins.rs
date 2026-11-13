@@ -219,21 +219,9 @@ impl Plugin for WorldFoundation {
             PostUpdate,
             bevy::light::SimulationLightSystems::CheckLightVisibility.run_if(any_bevy_light),
         );
-        // Even frame pacing on iOS: each frame stays on the display at least 1/30 s
-        // (`wgpu_hal::metal::PRESENT_MIN_DURATION`, the vendored `wgpu-hal`'s `BENILLA.md`), the
-        // rate the iPad Air 2 can hold; `WOW_PRESENT_MIN_MS=<ms>` sets it, 0 presents at once.
-        // Engine pacing, not a 1.12 behaviour.
-        #[cfg(target_os = "ios")]
-        {
-            let ms = std::env::var("WOW_PRESENT_MIN_MS")
-                .ok()
-                .and_then(|v| v.parse::<f64>().ok())
-                .unwrap_or(1000.0 / 30.0);
-            wgpu_hal::metal::PRESENT_MIN_DURATION.store(
-                (ms.max(0.0) / 1000.0).to_bits(),
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        }
+        // Even frame pacing on iOS ([`crate::frame_pace::hold_frames_for`]): 30 fps until the
+        // app resolves its frame-rate target (benilla-app `dynamic_scale`).
+        crate::frame_pace::hold_frames_for(30.0);
         // The Metal backend reuses wgpu-core's staging buffers instead of making and releasing
         // one per write (the vendored `wgpu-hal`'s `BENILLA.md`); on by default, and on iOS
         // `WOW_STAGING_POOL=0` turns it off for a measurement. Engine pacing, not a 1.12 behaviour.

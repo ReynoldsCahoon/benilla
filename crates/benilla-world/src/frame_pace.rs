@@ -18,6 +18,27 @@ use std::time::{Duration, Instant};
 use bevy::prelude::*;
 use bevy::time::{Real, TimeSystems, TimeUpdateStrategy, Virtual};
 
+/// Even frame pacing on iOS: each frame stays on the display at least 1/`fps` s
+/// (`wgpu_hal::metal::PRESENT_MIN_DURATION`, the vendored `wgpu-hal`'s `BENILLA.md`), so a device
+/// that misses the display's rate shows frames for an even number of refreshes rather than 2, 3
+/// or 4 at random. `WOW_PRESENT_MIN_MS=<ms>` overrides it, 0 presents at once. Elsewhere nothing.
+/// Engine pacing, not a 1.12 behaviour.
+pub fn hold_frames_for(fps: f32) {
+    #[cfg(target_os = "ios")]
+    {
+        let ms = std::env::var("WOW_PRESENT_MIN_MS")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(1000.0 / f64::from(fps.max(1.0)));
+        wgpu_hal::metal::PRESENT_MIN_DURATION.store(
+            (ms.max(0.0) / 1000.0).to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    #[cfg(not(target_os = "ios"))]
+    let _ = fps;
+}
+
 /// Recent raw deltas the refresh-period median is taken over, about a third of a second at 60 Hz.
 const WINDOW: usize = 20;
 /// A sample counts as "on cadence" when it is within this fraction of the median.

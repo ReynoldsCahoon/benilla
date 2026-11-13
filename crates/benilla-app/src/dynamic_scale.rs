@@ -11,6 +11,11 @@
 //!
 //! Built for the iPad Air 2, whose GPU cost at the login screen follows the 3D's pixel count (163
 //! ms a frame at 2048x1536, 55 ms at a quarter of the pixels): on iOS it is on by default.
+//!
+//! The target is `dynamicRenderScaleFPS`, held to the display's own rate. Its "0", the iOS
+//! default, is the device's ([`auto_fps`]): 30 on the A8-class GPUs (the iPad Air 2, the iPad mini
+//! 4), which cannot hold 60, and 60 on anything newer. On iOS the same target paces the
+//! presentation ([`benilla_world::frame_pace::hold_frames_for`]), with or without the controller.
 
 use bevy::prelude::*;
 
@@ -36,8 +41,10 @@ const SETTLE_S: f32 = 1.5;
 struct DynamicScaleConfig {
     /// `dynamicRenderScale`.
     on: bool,
-    /// `dynamicRenderScaleFPS`: the frame rate held.
+    /// The frame rate held: [`Self::asked_fps`] resolved by [`resolve_target`].
     target_fps: f32,
+    /// `dynamicRenderScaleFPS` as set; [`AUTO`] is the device's own rate.
+    asked_fps: f32,
     /// `dynamicRenderScaleMin`: the lowest factor it may reach.
     floor: f32,
 }
@@ -48,9 +55,64 @@ impl Default for DynamicScaleConfig {
         Self {
             on: cfg!(target_os = "ios"),
             target_fps: 30.0,
+            asked_fps: if cfg!(target_os = "ios") { AUTO } else { 30.0 },
             floor: 0.5,
         }
     }
+}
+
+/// `dynamicRenderScaleFPS`'s "the device's own rate".
+const AUTO: f32 = 0.0;
+
+/// The device's own rate: 30 on an Apple A8-class GPU (the adapter names "Apple A8 GPU" and
+/// "Apple A8X GPU"), 60 otherwise; 30 until the adapter is known.
+fn auto_fps(adapter_name: Option<&str>) -> f32 {
+    match adapter_name {
+        None => 30.0,
+        Some(name) if name.contains(" A8") => 30.0,
+        Some(_) => 60.0,
+    }
+}
+
+/// The rate held: the asked one or the device's, never past the fastest display's refresh
+/// (`None` refresh rates read as 60 Hz, as [`crate::video::refresh_period`] does).
+fn target_fps(
+    asked: f32,
+    adapter_name: Option<&str>,
+    refresh_millihertz: impl IntoIterator<Item = Option<u32>>,
+) -> f32 {
+    let display = 1.0 / crate::video::refresh_period(refresh_millihertz).as_secs_f32();
+    let fps = if asked == AUTO {
+        auto_fps(adapter_name)
+    } else {
+        asked
+    };
+    fps.min(display.round())
+}
+
+/// Resolves the target as the setting, the adapter or the displays change, and paces the
+/// presentation to it on iOS.
+fn resolve_target(
+    mut config: ResMut<DynamicScaleConfig>,
+    adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
+    monitors: Query<&bevy::window::Monitor>,
+    mut held: Local<Option<f32>>,
+) {
+    let fps = target_fps(
+        config.asked_fps,
+        adapter.as_deref().map(|a| a.name.as_str()),
+        monitors.iter().map(|m| m.refresh_rate_millihertz),
+    );
+    if *held == Some(fps) {
+        return;
+    }
+    *held = Some(fps);
+    config.target_fps = fps;
+    benilla_world::frame_pace::hold_frames_for(fps);
+    info!(
+        "frame-rate target {fps} fps (dynamicRenderScaleFPS {})",
+        config.asked_fps
+    );
 }
 
 impl DynamicScaleConfig {
@@ -72,7 +134,12 @@ fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut config: ResMut<DynamicScaleCon
     if ev.is("dynamicRenderScale") {
         config.on = ev.flag();
     } else if ev.is("dynamicRenderScaleFPS") {
-        config.target_fps = ev.num().clamp(10.0, 240.0);
+        let asked = ev.num();
+        config.asked_fps = if asked <= 0.0 {
+            AUTO
+        } else {
+            asked.clamp(10.0, 240.0)
+        };
     } else if ev.is("dynamicRenderScaleMin") {
         config.floor = ev.num().clamp(0.25, 1.0);
     }
@@ -197,7 +264,8 @@ impl Plugin for DynamicScalePlugin {
             // After the frame's world stages, and before the render size reads the factor.
             .add_systems(
                 Update,
-                hold_budget
+                (resolve_target, hold_budget)
+                    .chain()
                     .after(benilla_world::schedule::WorldStage::Present)
                     .before(crate::world_backdrop::track_render_size),
             );
@@ -225,6 +293,7 @@ mod tests {
             .insert_resource(DynamicScaleConfig {
                 on,
                 target_fps: 30.0,
+                asked_fps: 30.0,
                 floor: 0.5,
             })
             .init_resource::<DynamicScale>()
@@ -302,5 +371,22 @@ mod tests {
         assert_eq!(deepest(0.35), 0.35);
         assert_eq!(deepest(0.25), 0.35);
         assert_eq!(deepest(1.0), 1.0);
+    }
+
+    #[test]
+    fn the_target_is_the_device_s_own_rate_held_to_the_display() {
+        let hz = |hz: u32| [Some(hz * 1000)];
+        // Automatic: the A8-class GPUs hold 30, anything newer 60, and 30 before the adapter.
+        assert_eq!(target_fps(AUTO, Some("Apple A8X GPU"), hz(60)), 30.0);
+        assert_eq!(target_fps(AUTO, Some("Apple A8 GPU"), hz(60)), 30.0);
+        assert_eq!(target_fps(AUTO, Some("Apple A12Z GPU"), hz(120)), 60.0);
+        assert_eq!(target_fps(AUTO, Some("Apple M2 GPU"), hz(120)), 60.0);
+        assert_eq!(target_fps(AUTO, None, hz(60)), 30.0);
+        // Display Maximum ("120") is the screen's rate: 120 on ProMotion, 60 elsewhere.
+        assert_eq!(target_fps(120.0, Some("Apple M2 GPU"), hz(120)), 120.0);
+        assert_eq!(target_fps(120.0, Some("Apple A8X GPU"), hz(60)), 60.0);
+        // An unknown refresh reads as 60 Hz; a set rate under it stands.
+        assert_eq!(target_fps(120.0, None, [None]), 60.0);
+        assert_eq!(target_fps(30.0, Some("Apple M2 GPU"), hz(120)), 30.0);
     }
 }

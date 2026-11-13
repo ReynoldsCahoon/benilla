@@ -879,8 +879,10 @@ pub(crate) const REGISTERED: &[Registered] = &[
     ),
     ours(
         "dynamicRenderScaleFPS",
-        "30",
-        "benilla's own — the frame rate dynamicRenderScale holds",
+        // "0" is the device's own rate (`dynamic_scale::auto_fps`), the iOS default.
+        if cfg!(target_os = "ios") { "0" } else { "30" },
+        "benilla's own — the frame rate dynamicRenderScale holds, and on iOS each frame's \
+         least time on the display",
     ),
     ours(
         "dynamicRenderScaleMin",

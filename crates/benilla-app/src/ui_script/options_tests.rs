@@ -1626,6 +1626,131 @@ fn the_render_scale_row_shows_a_percentage_and_defers_to_apply() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// The touch client's Video page (`BenillaOptions_TouchLayout`, run at load where
+/// `BenillaIsTouchClient()` answers; called by hand here, on the desktop): Display Mode and
+/// Vertical Sync give way to Target Frame Rate, Dynamic Resolution and Minimum Resolution on the
+/// same chain, Render Scale stops at 100%, and Minimum Resolution greys with its switch. On the
+/// desktop the three rows stay hidden.
+#[test]
+fn the_touch_layout_swaps_the_desktop_video_rows_for_the_frame_rate_levers() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = audio_harness();
+    s.set_cvar_host("dynamicRenderScale", "1");
+    s.set_cvar_host("dynamicRenderScaleFPS", "0");
+    s.set_cvar_host("dynamicRenderScaleMin", "0.5");
+    let mut s = harness_on(s);
+    let base = "BenillaOptionsFrameContainerBodyGraphics";
+    let shown = |s: &mut UiScript, row: &str| -> bool {
+        s.eval::<bool>(&format!("return {base}{row}:IsVisible()"))
+            .unwrap()
+    };
+    s.run("ShowUIPanel(BenillaOptionsFrame)").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+    assert!(
+        !s.eval::<bool>("return BenillaIsTouchClient() ~= nil")
+            .unwrap(),
+        "the desktop is no touch client"
+    );
+    for (row, on) in [
+        ("RowDisplayMode", true),
+        ("RowVerticalSync", true),
+        ("RowTargetFps", false),
+        ("RowDynamicResolution", false),
+        ("RowMinResolution", false),
+    ] {
+        assert_eq!(shown(&mut s, row), on, "desktop {row}");
+    }
+
+    s.run("BenillaOptions_TouchLayout()").unwrap();
+    s.run("BenillaOptionsFrameCategoryListRowAudio:Click(); BenillaOptionsFrameCategoryListRowGraphics:Click()")
+        .unwrap();
+    s.resolve();
+    for (row, on) in [
+        ("RowDisplayMode", false),
+        ("RowVerticalSync", false),
+        ("RowRenderScale", true),
+        ("RowTargetFps", true),
+        ("RowDynamicResolution", true),
+        ("RowMinResolution", true),
+    ] {
+        assert_eq!(shown(&mut s, row), on, "touch {row}");
+    }
+    // One chain: Render Scale under Weather Intensity, the three rows under it.
+    let tops: Vec<f32> = [
+        "RowWeatherDensity",
+        "RowRenderScale",
+        "RowTargetFps",
+        "RowDynamicResolution",
+        "RowMinResolution",
+    ]
+    .iter()
+    .map(|r| {
+        s.eval::<f32>(&format!("return {base}{r}:GetTop()"))
+            .unwrap()
+    })
+    .collect();
+    assert!(
+        tops.windows(2).all(|w| w[0] > w[1]),
+        "the rows chain downward: {tops:?}"
+    );
+    let gap: f32 = s
+        .eval(&format!(
+            "return {base}RowWeatherDensity:GetBottom() - {base}RowRenderScale:GetTop()"
+        ))
+        .unwrap();
+    assert!((gap - 9.0).abs() < 0.01, "Render Scale moves up: {gap}");
+    assert!(s
+        .eval::<bool>(&format!(
+            "local lo, hi = {base}RowRenderScaleControlSlider:GetMinMaxValues() \
+             return math.abs(lo - 0.5) < 0.0001 and math.abs(hi - 1.0) < 0.0001"
+        ))
+        .unwrap());
+    assert_eq!(
+        s.eval::<String>(&format!("return {base}RowTargetFpsDropdownText:GetText()"))
+            .unwrap(),
+        "Automatic"
+    );
+    for tip in [
+        "BENILLA_TOOLTIP_RENDER_SCALE_TOUCH",
+        "BENILLA_TOOLTIP_TARGET_FPS",
+        "BENILLA_TOOLTIP_DYNAMIC_RESOLUTION",
+        "BENILLA_TOOLTIP_MIN_RESOLUTION",
+    ] {
+        assert!(
+            s.eval::<bool>(&format!("return {tip} ~= nil")).unwrap(),
+            "{tip}"
+        );
+    }
+    let _ = s.take_cvar_changes();
+
+    // The target writes live; Display Maximum stores "120".
+    s.run(&format!(
+        "BenillaOptionsRow_Set({base}RowTargetFps, \"120\")"
+    ))
+    .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("dynamicRenderScaleFPS".to_string(), "120".to_string())]
+    );
+    // Dynamic Resolution off greys its floor.
+    let floor_live = |s: &mut UiScript| -> bool {
+        s.eval::<bool>(&format!(
+            "return {base}RowMinResolutionControlSliderThumb:IsShown()"
+        ))
+        .unwrap()
+    };
+    assert!(floor_live(&mut s));
+    s.run(&format!("{base}RowDynamicResolutionCheck:Click()"))
+        .unwrap();
+    assert_eq!(
+        s.take_cvar_changes(),
+        vec![("dynamicRenderScale".to_string(), "0".to_string())]
+    );
+    assert!(!floor_live(&mut s), "the floor greys with its switch");
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// Pending edits are panel-wide, as the era's modified table: a category switch keeps them, and
 /// hiding the window discards them.
 #[test]

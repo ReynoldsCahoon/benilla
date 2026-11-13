@@ -434,6 +434,28 @@
             .. "Below 100% trades sharpness for frame rate; above 100% is supersampling, which "
             .. "smooths edges at the cost of frame rate. Applies when you click Apply."
 
+        -- The touch client's Video rows (BenillaOptions_TouchLayout); 1.12 has none of them.
+        BENILLA_TOOLTIP_RENDER_SCALE_TOUCH =
+            "Draws the 3D world at a fraction of the screen's resolution. The interface is "
+            .. "unaffected at any setting.\n\n"
+            .. "Lower trades sharpness for frame rate. Dynamic Resolution lowers it further on "
+            .. "its own when frames run late. Applies when you click Apply."
+        BENILLA_TOOLTIP_TARGET_FPS =
+            "The frame rate the game aims for. Each frame stays on screen for at least this "
+            .. "long, so motion stays even, and Dynamic Resolution lowers the 3D world's "
+            .. "resolution whenever frames miss it.\n\n"
+            .. "Automatic picks 30 on older iPads and 60 on newer ones. Display Maximum runs "
+            .. "as fast as the screen refreshes (120 on ProMotion iPads), which uses the most "
+            .. "battery."
+        BENILLA_TOOLTIP_DYNAMIC_RESOLUTION =
+            "Lowers the 3D world's resolution while frames miss the Target Frame Rate, and "
+            .. "raises it again once they keep up. The interface stays sharp.\n\n"
+            .. "Off, the world always draws at Render Scale, and a busy scene drops frames "
+            .. "instead."
+        BENILLA_TOOLTIP_MIN_RESOLUTION =
+            "How far Dynamic Resolution may lower the 3D world's resolution. Lower keeps the "
+            .. "frame rate up in busy scenes at the cost of a blurrier world."
+
         -- 1.12 has no such checkbox.
         BENILLA_TOOLTIP_BACKGROUND_SOUND =
             "Keeps the game's sound playing while you are working in another window.\n\n"
@@ -622,6 +644,27 @@
             "RowUiScale", "RowFarclip", "RowWorldDetail",
             [6] = "RowBrightness", [8] = "RowSpellDetail", [9] = "RowWeatherDensity",
         }
+
+        -- The touch client's Video page. Deviation: on a tablet, Display Mode (a desktop
+        -- window's) and Vertical Sync (the display always waits) mean nothing, and Render Scale
+        -- stops at the screen's own resolution, since supersampling would cost an iPad more pixels
+        -- and memory than it has; the frame-rate target and Dynamic Resolution take their place.
+        BENILLA_TOUCH_GRAPHICS_ROWS = {
+            "RowUiScale", "RowFarclip", "RowWorldDetail", "RowSpellDetail", "RowBrightness",
+            "RowWeatherDensity",
+            "RowRenderScale", "RowTargetFps", "RowDynamicResolution", "RowMinResolution",
+        }
+
+        function BenillaOptions_TouchLayout()
+            local base = "BenillaOptionsFrameContainerBodyGraphics"
+            getglobal(base .. "RowDisplayMode"):Hide()
+            getglobal(base .. "RowVerticalSync"):Hide()
+            BENILLA_OPTIONS_PAGE_ROWS.Graphics = BENILLA_TOUCH_GRAPHICS_ROWS
+            local scale = getglobal(base .. "RowRenderScale")
+            scale.tip = "BENILLA_TOOLTIP_RENDER_SCALE_TOUCH"
+            BenillaOptionsSliderRow_Setup(scale, 0.5, 1.0, 0.05)
+            BenillaOptionsPage_Layout("Graphics")
+        end
 
         -- SetMinMaxValues re-clamps and fires OnValueChanged, which must not write back.
         function BenillaOptionsSliderRow_Setup(row, min, max, step, fmt, stops)
@@ -893,6 +936,12 @@
                 -- UIOptionsFrame.lua:722-726: Right ActionBar 2 needs Right ActionBar.
                 BenillaOptionsRow_SetEnabled(BenillaOptionsFrameContainerBodyActionBarsRowMultiBar4,
                     SHOW_MULTI_ACTIONBAR_3)
+                return
+            end
+            if key == "Graphics" then
+                -- Minimum Resolution is Dynamic Resolution's floor (the touch client's rows).
+                BenillaOptionsRow_SetEnabled(BenillaOptionsFrameContainerBodyGraphicsRowMinResolution,
+                    GetCVar("dynamicRenderScale") ~= "0")
                 return
             end
             if key ~= "Audio" then return end
@@ -2018,6 +2067,55 @@
                                                     "BENILLA_TOOLTIP_RENDER_SCALE")
                                                 BenillaOptionsSliderRow_Setup(this, 0.5, 2.0, 0.05)
                                                 this.deferred = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <!-- The touch client's rows: hidden off it (BenillaOptions_TouchLayout). -->
+                                        <Frame name="$parentRowTargetFps" inherits="BenillaOptionsDropdownRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Deviation: our own row; the reference runs as fast
+                                                -- as it can. "0" is the device's own rate and "120"
+                                                -- is held to the screen's (benilla-app dynamic_scale).
+                                                BenillaOptionsRow_OnLoad(this, "dynamicRenderScaleFPS",
+                                                    "Target Frame Rate", "BENILLA_TOOLTIP_TARGET_FPS")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = "Automatic", value = "0" },
+                                                    { text = "30", value = "30" },
+                                                    { text = "60", value = "60" },
+                                                    { text = "Display Maximum", value = "120" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowDynamicResolution" inherits="BenillaOptionsCheckboxRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowTargetFps" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowTargetFps" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Deviation: our own row; the reference renders at a
+                                                -- fixed resolution.
+                                                BenillaOptionsRow_OnLoad(this, "dynamicRenderScale",
+                                                    "Dynamic Resolution", "BENILLA_TOOLTIP_DYNAMIC_RESOLUTION")
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowMinResolution" inherits="BenillaOptionsSliderRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowDynamicResolution" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowDynamicResolution" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Deviation: our own row, Dynamic Resolution's floor.
+                                                BenillaOptionsRow_OnLoad(this, "dynamicRenderScaleMin",
+                                                    "Minimum Resolution", "BENILLA_TOOLTIP_MIN_RESOLUTION", 1)
+                                                BenillaOptionsSliderRow_Setup(this, 0.35, 1.0, 0.05)
+                                                this.parentRow = "RowDynamicResolution"
+                                                -- The last row: every row it rearranges exists.
+                                                if BenillaIsTouchClient and BenillaIsTouchClient() then
+                                                    BenillaOptions_TouchLayout()
+                                                end
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>
