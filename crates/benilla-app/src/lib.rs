@@ -121,6 +121,8 @@ mod script_calls;
 mod shaders;
 
 mod game_tip;
+/// An iPad's hardware keyboard as the desktop's.
+mod hw_keyboard;
 mod opaque2d;
 /// Where "the client is going down" is observed, in `Last`; every system that persists state on the
 /// way out registers through it.

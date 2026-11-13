@@ -98,16 +98,21 @@ impl Plugin for SoftKeyboardPlugin {
 /// names the frame the tap ended on.
 fn follow_focus(
     capture: Res<UiKeyboardCapture>,
+    hw: Option<Res<crate::hw_keyboard::HwKeyboard>>,
     hover: Res<crate::ui_script::PlayerUiHover>,
     buttons: Res<ButtonInput<MouseButton>>,
     mut windows: Query<(Entity, &mut Window)>,
 ) {
-    let tapped_box = buttons.just_released(MouseButton::Left)
+    // A hardware keyboard types into the box itself ([`crate::hw_keyboard`]); the on-screen one
+    // stays down, and winit's text path with it, so nothing arrives twice.
+    let hardware = hw.is_some_and(|h| h.connected);
+    let tapped_box = !hardware
+        && buttons.just_released(MouseButton::Left)
         && capture.typing
         && hover.0.is_some()
         && hover.0 == capture.focused_box;
     for (entity, mut window) in &mut windows {
-        if !capture.typing {
+        if !capture.typing || hardware {
             if window.ime_enabled {
                 window.ime_enabled = false;
             }

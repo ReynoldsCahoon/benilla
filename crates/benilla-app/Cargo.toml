@@ -120,6 +120,12 @@ objc2-app-kit = { version = "0.2", features = [
 ] }
 objc2-foundation = { version = "0.2", features = ["NSArray", "NSData", "NSGeometry"] }
 
+# The iPad's hardware keyboard (`hw_keyboard`): `GCKeyboard` through the objc and block versions
+# wgpu-hal's Metal backend already builds.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc = "0.2.7"
+block = "0.1.6"
+
 # The audio device layer off macOS (`sound::output::cpal`); on macOS cpal cannot rebuild on a
 # lost default device and drops the IO-cycle timestamp.
 [target.'cfg(not(target_os = "macos"))'.dependencies]

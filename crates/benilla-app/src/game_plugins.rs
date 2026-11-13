@@ -246,6 +246,7 @@ impl PluginGroup for GamePlugins {
             .add(crate::virtual_stick::VirtualStickPlugin)
             .add(crate::jump_button::JumpButtonPlugin)
             .add(crate::soft_keyboard::SoftKeyboardPlugin)
+            .add(crate::hw_keyboard::HwKeyboardPlugin)
             // Last: it orders every system the plugins added, the probes' too.
             .add(crate::vm_pass::VmPassPlugin)
     }

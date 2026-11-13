@@ -67,3 +67,5 @@ targets:
       - sdk: AVFoundation.framework
       - sdk: CoreAudio.framework
       - sdk: Security.framework
+      # `GCKeyboard`, the hardware keyboard (`benilla-app` `hw_keyboard`).
+      - sdk: GameController.framework
