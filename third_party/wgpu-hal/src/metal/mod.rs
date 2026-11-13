@@ -42,6 +42,12 @@ use metal::{
 };
 use naga::FastHashMap;
 
+/// benilla: each presented drawable stays on the display at least this long, in seconds as `f64`
+/// bits (0, the default, presents as soon as possible), through
+/// `presentDrawable:afterMinimumDuration:`: frames land on an even cadence, and none is presented
+/// only to be replaced within the same refresh. Set by the client (`benilla_world`'s plugins).
+pub static PRESENT_MIN_DURATION: atomic::AtomicU64 = atomic::AtomicU64::new(0);
+
 /// iPad instrument: when set, every submitted command buffer adds its GPU time
 /// (`GPUStartTime`..`GPUEndTime`, which every Apple GPU records, unlike in-pass timestamps) to
 /// [`GPU_BUSY_NS`] on completion, counting only the part past the latest end seen, so overlapping
@@ -530,7 +536,23 @@ impl crate::Queue for Queue {
 
             // https://developer.apple.com/documentation/quartzcore/cametallayer/1478157-presentswithtransaction?language=objc
             if !texture.present_with_transaction {
-                command_buffer.present_drawable(&texture.drawable);
+                // benilla: `PRESENT_MIN_DURATION` (BENILLA.md, "Even frame pacing").
+                let min = f64::from_bits(PRESENT_MIN_DURATION.load(atomic::Ordering::Relaxed));
+                if min > 0.0 {
+                    use objc::{msg_send, sel, sel_impl};
+                    let drawable: &metal::DrawableRef = &texture.drawable;
+                    // SAFETY: `presentDrawable:afterMinimumDuration:` (iOS 10.3+, macOS 10.15.4+)
+                    // on a command buffer not yet committed, with a live drawable.
+                    unsafe {
+                        let () = msg_send![
+                            command_buffer,
+                            presentDrawable: drawable
+                            afterMinimumDuration: min
+                        ];
+                    }
+                } else {
+                    command_buffer.present_drawable(&texture.drawable);
+                }
             }
 
             command_buffer.commit();

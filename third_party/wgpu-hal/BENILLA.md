@@ -124,3 +124,13 @@ marks the ones to return. `staging_pool::ENABLED` (on by default) is benilla's s
 Check: a pooled buffer is only ever handed out after `destroy_buffer` (the GPU finished with it),
 and only to a `MAP_WRITE | COPY_SRC` request, which wgpu-core fills completely before copying from
 it.
+
+## Even frame pacing — `src/metal/mod.rs`, `Queue::present`
+
+`PRESENT_MIN_DURATION` (seconds as `f64` bits, 0 by default: upstream's behaviour) presents through
+`presentDrawable:afterMinimumDuration:` so each frame stays on the display at least that long.
+benilla sets 1/30 s on iOS: the iPad Air 2 cannot hold 60 fps, and presenting as soon as possible
+left a frame on for 2, 3 or 4 refreshes and presented ~8% of frames only to be replaced in the same
+refresh (measured 2026-11-13: frames at an even 33 ms 54% -> 79%, never shown 159 -> 49 of ~1800,
+shown fps unchanged).
+
