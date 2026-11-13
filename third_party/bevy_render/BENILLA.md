@@ -99,3 +99,16 @@ its meshes or textures are still queued (`benilla_app::portrait`). No behaviour 
 
 Check: `diff -r <registry>/bevy_render-0.18.1 third_party/bevy_render` shows only those lines, the shadow-sampling
 lines above, the slab node table, the single main texture, the pending-write flush, the deferral count, the camera-window clear, the upload memo, and this file.
+
+## The patch — a camera rendered at a fraction of its target
+
+`src/view/mod.rs` adds `MainTextureScale(f32)`, a main-world camera component, and
+`src/camera.rs`'s `extract_cameras` reads it: a camera without a viewport of its own and a scale
+below 1 is extracted at `target size × scale` (`physical_target_size`, `physical_viewport_size` and
+the view's viewport alike), so its main textures, depth texture and view uniform are all the
+smaller size, and every pass's default viewport covers them. The output attachment (the window's
+swapchain) keeps its own size; a final pass that samples the main texture into it, benilla's
+`ui_gamma` decode, stretches the image back. Main-world state (the camera's target info, UI layout,
+picking) is untouched. benilla's player-UI camera carries it for Interface Resolution (`benilla-app`
+`ui_pass::UiRenderScale`): on the iPad Air 2 the 2-D pass costs 4.0 ms at native, 2.3 at 75%, 1.1
+at 50% (2026-11-13). All platforms; only views carrying the component change.
