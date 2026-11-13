@@ -217,16 +217,7 @@ impl Plugin for WorldFoundation {
         // Engine housekeeping, not a 1.12 behaviour.
         app.configure_sets(
             PostUpdate,
-            bevy::light::SimulationLightSystems::CheckLightVisibility.run_if(
-                |lights: Query<
-                    (),
-                    Or<(
-                        With<bevy::light::DirectionalLight>,
-                        With<bevy::light::PointLight>,
-                        With<bevy::light::SpotLight>,
-                    )>,
-                >| !lights.is_empty(),
-            ),
+            bevy::light::SimulationLightSystems::CheckLightVisibility.run_if(any_bevy_light),
         );
         // The Metal backend reuses wgpu-core's staging buffers instead of making and releasing
         // one per write (the vendored `wgpu-hal`'s `BENILLA.md`); on by default, and on iOS
@@ -244,4 +235,16 @@ impl Plugin for WorldFoundation {
             app.register_required_components::<bevy::camera::Camera, bevy::render::view::NoIndirectDrawing>();
         }
     }
+}
+
+/// Any of Bevy's own lights: directional, point or spot.
+type BevyLight = Or<(
+    With<bevy::light::DirectionalLight>,
+    With<bevy::light::PointLight>,
+    With<bevy::light::SpotLight>,
+)>;
+
+/// Whether a Bevy light exists, which gates Bevy's light visibility checks.
+fn any_bevy_light(lights: Query<(), BevyLight>) -> bool {
+    !lights.is_empty()
 }
