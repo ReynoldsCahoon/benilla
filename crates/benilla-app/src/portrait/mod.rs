@@ -463,6 +463,13 @@ struct Booth {
     pipes_settling: bool,
     /// When the `pipes_settling` hold began (wall secs), bounded at [`PIPELINE_SETTLING_SECS`].
     pipes_since: Option<f64>,
+    /// The upload budget pushed assets to later frames while this bake was rendering (wall secs
+    /// of the first): the camera stays up until uploads are quiet, bounded at
+    /// [`PENDING_LANDING_SECS`], so the still is not taken before its meshes and textures are on
+    /// the GPU.
+    uploads_since: Option<f64>,
+    /// The frame after an uploads hold released: one more render, which arms no new hold.
+    uploads_final: bool,
     /// A rig stands in this booth, for the park gate.
     rigged: bool,
     /// The scene is parked: its camera sleeps and [`benilla_world::rig_anim::AnimParked`] holds
@@ -487,14 +494,45 @@ impl Booth {
             pending_since: None,
             pipes_settling: false,
             pipes_since: None,
+            uploads_since: None,
+            uploads_final: false,
             rigged: false,
             parked: false,
         }
     }
 
+    /// The uploads hold, once a frame before the camera gate reads `wake`: a budget deferral
+    /// (`deferring`) while the bake renders keeps the camera up until uploads are quiet, then one
+    /// final render, which arms no new hold. True when the hold gave up at
+    /// [`PENDING_LANDING_SECS`] with uploads still deferred.
+    fn hold_for_uploads(&mut self, deferring: bool, now: f64) -> bool {
+        if self.wake > 0 && deferring && !self.uploads_final {
+            self.uploads_since.get_or_insert(now);
+        }
+        if self.wake > 0 {
+            return false;
+        }
+        self.uploads_final = false;
+        let Some(since) = self.uploads_since else {
+            return false;
+        };
+        if deferring && now - since <= PENDING_LANDING_SECS {
+            self.wake = 1;
+            return false;
+        }
+        self.uploads_since = None;
+        self.uploads_final = true;
+        self.wake = 1;
+        deferring
+    }
+
     /// The bake is drawn and held: a half-drawn one handed over would freeze.
     fn settled(&self) -> bool {
-        self.baked.is_some() && self.wake == 0 && self.pending.is_empty() && !self.pipes_settling
+        self.baked.is_some()
+            && self.wake == 0
+            && self.pending.is_empty()
+            && !self.pipes_settling
+            && self.uploads_since.is_none()
     }
 }
 
@@ -511,6 +549,10 @@ const PENDING_LANDING_SECS: f64 = 10.0;
 
 /// How long a [`Booth::pipes_settling`] hold may keep the camera awake (wall secs).
 const PIPELINE_SETTLING_SECS: f64 = 15.0;
+
+/// Main-world frames the render world's budget-deferral count must stay unchanged before the
+/// uploads count as quiet: the render world runs a frame behind, so one still frame is not proof.
+const UPLOAD_QUIET_FRAMES: u32 = 3;
 
 /// `WOW_BOOTH_LOG=1`: is the booth instrument armed (read once)?
 fn booth_log() -> bool {
@@ -1702,8 +1744,19 @@ fn gate_booth_cameras(
     // `WOW_BOOTH_LOG` only: the marker's real state beside `booth.parked`.
     markers: Query<(), With<benilla_world::rig_anim::AnimParked>>,
     mut env_cache: Local<Option<bool>>,
+    // The budget-deferral count last seen and the frames it has stayed unchanged.
+    mut uploads: Local<(u64, u32)>,
 ) {
     let test = test_mode(&mut env_cache);
+    // On iOS the per-frame upload budget can push a booth's meshes and textures frames past the
+    // bake's render window, and the still would keep a portrait with nothing in it.
+    let deferrals = bevy::render::render_asset::budget_deferrals();
+    if deferrals != uploads.0 {
+        *uploads = (deferrals, 0);
+    } else {
+        uploads.1 = uploads.1.saturating_add(1);
+    }
+    let deferring = uploads.1 < UPLOAD_QUIET_FRAMES;
     // Only once the loading cover is on the glass: the flip frame owes it a loading screen,
     // not fifteen booth passes.
     let warming = !warm.satisfied() && cover.presented();
@@ -1759,6 +1812,13 @@ fn gate_booth_cameras(
             booth.pipes_since = None;
             false
         };
+        if booth.hold_for_uploads(deferring, time.elapsed_secs_f64()) {
+            warn!(
+                "booth {}: uploads still deferred after {PENDING_LANDING_SECS:.0}s — the still \
+                 as-is",
+                token.as_str(),
+            );
+        }
         // A hidden pane's scene stays up but undrawn: its camera sleeps, so its emitters freeze.
         let live_scene = token.as_str() == GLUE_SLOT && preview.scene.is_some() && !preview.hidden;
         // The glue screens publish no pane and stay on `live_scene`.
@@ -1993,6 +2053,76 @@ fn aim(
 mod tests {
     use super::*;
     use crate::entities::ItemModelKind;
+
+    /// One frame of the gate as the hold sees it: the hold, then the render's decrement.
+    fn frame(booth: &mut Booth, deferring: bool, now: f64) -> bool {
+        booth.hold_for_uploads(deferring, now);
+        let renders = booth.wake > 0;
+        booth.wake = booth.wake.saturating_sub(1);
+        renders
+    }
+
+    fn booth() -> Booth {
+        Booth::new(
+            RenderLayers::layer(1),
+            Entity::PLACEHOLDER,
+            Handle::default(),
+        )
+    }
+
+    #[test]
+    fn a_bake_with_deferred_uploads_renders_until_they_are_quiet_then_once_more() {
+        let mut b = booth();
+        b.wake = 2;
+        assert!(frame(&mut b, true, 0.0), "the bake's own frames render");
+        assert!(frame(&mut b, true, 0.1));
+        // Its window spent while uploads are still deferred: it stays up.
+        assert!(frame(&mut b, true, 0.2), "held while deferring");
+        assert!(frame(&mut b, true, 0.3));
+        assert!(!b.settled(), "a held bake is not handed over");
+        // Quiet: one final render, then sleep, and no new hold from that last frame.
+        assert!(
+            frame(&mut b, false, 0.4),
+            "the final render after uploads went quiet"
+        );
+        assert!(!frame(&mut b, false, 0.5), "then it sleeps");
+        assert!(
+            !frame(&mut b, true, 0.6),
+            "a deferral after the bake wakes nothing"
+        );
+    }
+
+    #[test]
+    fn a_bake_with_no_deferral_sleeps_on_its_own_window() {
+        let mut b = booth();
+        b.wake = 2;
+        assert!(frame(&mut b, false, 0.0));
+        assert!(frame(&mut b, false, 0.1));
+        assert!(!frame(&mut b, false, 0.2), "no hold, no extra frame");
+    }
+
+    #[test]
+    fn the_uploads_hold_gives_up_after_the_landing_bound() {
+        let mut b = booth();
+        b.wake = 1;
+        assert!(frame(&mut b, true, 0.0));
+        assert!(
+            frame(&mut b, true, PENDING_LANDING_SECS - 0.1),
+            "still held"
+        );
+        assert!(
+            b.hold_for_uploads(true, PENDING_LANDING_SECS + 0.5),
+            "gives up, said once"
+        );
+        assert!(
+            frame(&mut b, true, PENDING_LANDING_SECS + 0.5),
+            "one last render as-is"
+        );
+        assert!(
+            !frame(&mut b, true, PENDING_LANDING_SECS + 0.6),
+            "then it sleeps"
+        );
+    }
 
     /// The screen basis's aspect is `0x4901e0`'s: the display's width over height while
     /// `widescreen` is on, 4/3 when it is 0.

@@ -353,6 +353,8 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
             // in future we could also consider partial asset uploads.
             if bpf.exhausted() {
                 prepare_next_frame.assets.push((id, extracted_asset));
+                crate::render_asset::BUDGET_DEFERRALS
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 continue;
             }
             size
@@ -393,6 +395,8 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
         let write_bytes = if let Some(size) = A::byte_len(&extracted_asset) {
             if bpf.exhausted() {
                 prepare_next_frame.assets.push((id, extracted_asset));
+                crate::render_asset::BUDGET_DEFERRALS
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 continue;
             }
             size

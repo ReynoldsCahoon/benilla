@@ -333,6 +333,16 @@ pub(crate) fn extract_render_asset<A: RenderAsset>(
     );
 }
 
+/// benilla: every asset the per-frame byte budget ([`RenderAssetBytesPerFrame`]) pushed to a
+/// later frame, across asset types, ever. A reader that sees it unchanged for a few frames knows
+/// everything extracted before then is on the GPU (a booth's still waits for that).
+pub static BUDGET_DEFERRALS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// benilla: [`BUDGET_DEFERRALS`]' current count.
+pub fn budget_deferrals() -> u64 {
+    BUDGET_DEFERRALS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 // TODO: consider storing inside system?
 /// All assets that should be prepared next frame.
 #[derive(Resource)]
@@ -375,6 +385,7 @@ pub fn prepare_assets<A: RenderAsset>(
             // in future we could also consider partial asset uploads.
             if bpf.exhausted() {
                 prepare_next_frame.assets.push((id, extracted_asset));
+                BUDGET_DEFERRALS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 continue;
             }
             size
@@ -416,6 +427,7 @@ pub fn prepare_assets<A: RenderAsset>(
         let write_bytes = if let Some(size) = A::byte_len(&extracted_asset) {
             if bpf.exhausted() {
                 prepare_next_frame.assets.push((id, extracted_asset));
+                BUDGET_DEFERRALS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 continue;
             }
             size

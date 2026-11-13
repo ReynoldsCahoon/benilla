@@ -68,5 +68,14 @@ n-th call submits the pending writes (`queue.submit` with no command buffers), c
 asset types. Order is kept: writes after the submit go into the next pending batch. Off (0) by
 default, upstream's behaviour; benilla sets 4 on iOS (`benilla_world::world_plugins`).
 
+## The patch — a count of budget deferrals
+
+`RenderAssetBytesPerFrame` (benilla sets 4 MB on iOS) pushes an asset past the frame's budget to
+the next frame, and nothing outside the render world can tell. `src/render_asset.rs` adds
+`BUDGET_DEFERRALS` / `budget_deferrals()`, a count of every such push, incremented in the two
+`bpf.exhausted()` branches of `prepare_assets` and of `prepare_erased_assets`
+(`src/erased_render_asset.rs`). benilla's portrait booths read it so a still is not taken while
+its meshes or textures are still queued (`benilla_app::portrait`). No behaviour change.
+
 Check: `diff -r <registry>/bevy_render-0.18.1 third_party/bevy_render` shows only those lines, the shadow-sampling
-lines above, the slab node table, the single main texture, the pending-write flush, and this file.
+lines above, the slab node table, the single main texture, the pending-write flush, the deferral count, and this file.
