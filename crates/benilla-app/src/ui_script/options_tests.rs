@@ -1758,6 +1758,15 @@ fn the_touch_layout_swaps_the_desktop_video_rows_for_the_frame_rate_levers() {
             .unwrap(),
         "Automatic"
     );
+    // SMAA flickers on iOS: the touch dropdown offers Off and FXAA.
+    assert_eq!(
+        s.eval::<String>(&format!(
+            "local t = {{}} for _, e in ipairs({base}RowAntiAliasing.entries) do table.insert(t, e.value) end \
+             return table.concat(t, \",\")"
+        ))
+        .unwrap(),
+        "0,fxaa"
+    );
     for tip in [
         "BENILLA_TOOLTIP_RENDER_SCALE_TOUCH",
         "BENILLA_TOOLTIP_TARGET_FPS",

@@ -310,13 +310,25 @@ pub(crate) fn on_cvar(
     }
 }
 
+/// On iOS SMAA flickers (2026-11-13, iPad Air M3 on iOS 26; steady on an M1 Pro Mac, consecutive
+/// frames compared), so a saved SMAA choice runs as FXAA there; the touch page offers only Off and
+/// FXAA.
+fn ios_post_aa(aa: benilla_world::post_aa::PostAa) -> benilla_world::post_aa::PostAa {
+    match aa {
+        benilla_world::post_aa::PostAa::Smaa(_) if cfg!(target_os = "ios") => {
+            benilla_world::post_aa::PostAa::Fxaa
+        }
+        other => other,
+    }
+}
+
 /// The `postAntiAlias` change callback: an unknown spelling is off.
 pub(crate) fn on_post_aa_cvar(
     ev: &crate::cvars::CvarChanged,
     mut aa: bevy::prelude::Mut<'_, benilla_world::post_aa::PostAa>,
 ) {
     if ev.is("postAntiAlias") {
-        let want = benilla_world::post_aa::PostAa::parse(&ev.new).unwrap_or_default();
+        let want = ios_post_aa(benilla_world::post_aa::PostAa::parse(&ev.new).unwrap_or_default());
         if *aa != want {
             *aa = want;
         }

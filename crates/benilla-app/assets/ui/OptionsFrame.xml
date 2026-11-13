@@ -656,6 +656,7 @@
         -- window's) and Vertical Sync (the display always waits) mean nothing, and Render Scale
         -- stops at the screen's own resolution, since supersampling would cost an iPad more pixels
         -- and memory than it has; the frame-rate target and Dynamic Resolution take their place.
+        -- Anti-Aliasing offers Off and FXAA only: SMAA flickers on iOS.
         BENILLA_TOUCH_GRAPHICS_ROWS = {
             "RowUiScale", "RowFarclip", "RowWorldDetail", "RowSpellDetail", "RowBrightness",
             "RowWeatherDensity",
@@ -671,6 +672,11 @@
             local scale = getglobal(base .. "RowRenderScale")
             scale.tip = "BENILLA_TOOLTIP_RENDER_SCALE_TOUCH"
             BenillaOptionsSliderRow_Setup(scale, 0.5, 1.0, 0.05)
+            -- SMAA flickers on iOS (2026-11-13, iPad Air M3; steady on the Mac): FXAA only.
+            BenillaOptionsDropdownRow_Setup(getglobal(base .. "RowAntiAliasing"), {
+                { text = "Off", value = "0" },
+                { text = "FXAA", value = "fxaa" },
+            })
             BenillaOptionsPage_Layout("Graphics")
         end
 
