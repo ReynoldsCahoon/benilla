@@ -841,7 +841,10 @@ fn upload_rig_palettes(
 
 /// The widest gap, in bones, two dirty runs may leave and still upload as one `write_buffer`: a
 /// call's fixed cost (a staging buffer each) is about what re-sending this many live rows costs.
-const COALESCE_GAP_BONES: u32 = 256;
+/// On the iPad Air 2 a copy into a light buffer costs ~0.3-0.4 ms of GPU whatever its size, about
+/// what a few MB of copy does, so there a gap of 1.5 MB still pays (2026-11-13: one palette copy
+/// a target, -1.1 ms of `PendingWrites` a frame in Stormwind).
+const COALESCE_GAP_BONES: u32 = if cfg!(target_os = "ios") { 32_768 } else { 256 };
 
 /// Merge `(base, len)` bone ranges that overlap or lie within [`COALESCE_GAP_BONES`] into runs.
 fn coalesce_ranges(ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {

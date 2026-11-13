@@ -868,6 +868,7 @@ impl Plugin for PortraitPlugin {
                         .before(benilla_world::doodad_anim::sample_mat_anim),
                     // Last: it reads the wake/pending state every sync above may have armed.
                     gate_booth_cameras,
+                    sync_portrait_mirror,
                 )
                     .chain()
                     .after(GluePreviewFeed)
@@ -1011,7 +1012,6 @@ fn setup_booths(
     mut portraits: ResMut<PortraitImages>,
     mut booths: ResMut<Booths>,
     mut booth_light: ResMut<BoothLight>,
-    mut mirrors: ResMut<benilla_world::rig_palette::RigPaletteMirrors>,
     device: Res<bevy::render::renderer::RenderDevice>,
     queue: Res<bevy::render::renderer::RenderQueue>,
 ) {
@@ -1023,12 +1023,9 @@ fn setup_booths(
         buffer
     };
     booth_light.studio.buffer = Some(light_buffer("wow_portrait_light", studio_light()));
-    // Booth rigs skin from the palette regions of this buffer: register it as a mirror so the
-    // palette upload keeps its regions live. The character panes light through the UI model
+    // Booth rigs skin from the palette regions of this buffer, a palette mirror while a booth
+    // camera renders ([`sync_portrait_mirror`]). The character panes light through the UI model
     // tiles' pool, whose buffers are mirrors of their own (`crate::ui_models`).
-    if let Some(b) = &booth_light.studio.buffer {
-        mirrors.0.insert("portrait", b.clone());
-    }
 
     for (i, token) in SLOTS.iter().enumerate() {
         let image = images.add(new_target_image(PORTRAIT_SIZE));
@@ -1891,6 +1888,30 @@ fn gate_booth_cameras(
         }
         if active {
             booth.wake = booth.wake.saturating_sub(1);
+        }
+    }
+}
+
+/// The studio light's palette mirror follows its cameras: a mirror while any booth but the glue
+/// scene's renders, off the list while every one sleeps, so a slept portrait's buffer takes no
+/// writes (on the iPad Air 2 each costs ~0.3 ms of GPU). A camera that wakes joins it again in
+/// the same frame, and the upload writes a joining mirror whole before the camera draws.
+fn sync_portrait_mirror(
+    booth_light: Res<BoothLight>,
+    cams: Query<(&BoothCam, &Camera)>,
+    mut mirrors: ResMut<benilla_world::rig_palette::RigPaletteMirrors>,
+) {
+    let Some(buffer) = booth_light.studio.buffer.as_ref() else {
+        return;
+    };
+    let rendering = cams
+        .iter()
+        .any(|(BoothCam(token), cam)| token.as_str() != GLUE_SLOT && cam.is_active);
+    if mirrors.0.contains_key("portrait") != rendering {
+        if rendering {
+            mirrors.0.insert("portrait", buffer.clone());
+        } else {
+            mirrors.0.remove("portrait");
         }
     }
 }
