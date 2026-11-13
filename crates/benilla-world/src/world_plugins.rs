@@ -133,6 +133,17 @@ impl Plugin for WorldFoundation {
     fn build(&self, app: &mut App) {
         // One solver substep, not avian's 6: with no dynamic bodies, kinematic motion is exact at
         // any count. Revisit when a dynamic body enters the world.
+        // iOS: avian's collider-tree optimization in step on the main thread, not as an async task
+        // the frame then blocks on: the task clones the tree first, and on the iPad Air 2's three
+        // cores it ran late, so `block_on_optimize_trees` stalled 2-3 ms whenever many colliders
+        // moved (a teleport's landing, a crowd's arrival). In step: the optimization's mean cost
+        // 0.27 -> 0.08 ms a frame, the crowd's worst frame 430-480 -> 200-265 ms (2026-11-13,
+        // `tools/ipad_spike.sh`). Engine pacing, not a 1.12 behaviour.
+        #[cfg(target_os = "ios")]
+        app.insert_resource(avian3d::collider_tree::ColliderTreeOptimization {
+            use_async_tasks: false,
+            ..default()
+        });
         app.insert_resource(SubstepCount(1))
             // WoW's 19.29 yd/s² gravity for avian's 9.81; a feel knob, not a fidelity target.
             .insert_resource(Gravity(Vec3::NEG_Y * 19.291_105))
