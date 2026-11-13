@@ -2606,6 +2606,39 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
+    /// The options rows' writes reach the dynamic render scale at once, not at the next launch: its
+    /// callback runs for a Lua write as every other row's does.
+    #[test]
+    fn a_lua_write_reaches_the_dynamic_render_scale() {
+        let env = CvarEnv::hold();
+        let mut app = cvar_app_in(&env);
+        app.update();
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run(
+                r#"SetCVar("dynamicRenderScale", "0") SetCVar("dynamicRenderScaleFPS", "60")
+                   SetCVar("dynamicRenderScaleMin", "0.35")"#,
+            )
+            .unwrap();
+        app.update();
+        assert_eq!(
+            res::<crate::dynamic_scale::DynamicScaleConfig>(&app).settings(),
+            (false, 60.0, 0.35)
+        );
+        app.world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .run(r#"SetCVar("dynamicRenderScaleFPS", "0")"#)
+            .unwrap();
+        app.update();
+        assert_eq!(
+            res::<crate::dynamic_scale::DynamicScaleConfig>(&app)
+                .settings()
+                .1,
+            0.0,
+            "\"0\" is the device's own rate"
+        );
+    }
+
     /// The old `benilla-config/account` file moves into `config.toml`'s `accountName` once: the
     /// first boot reads it, the save writes the row and only then deletes the file, and the next
     /// boot reads the row.
@@ -2896,6 +2929,7 @@ mod tests {
             .init_resource::<crate::blob_shadow::ShadowSettings>()
             .init_resource::<crate::creature_anim::blood::ViolenceLevel>()
             .init_resource::<crate::player::Approach>()
+            .init_resource::<crate::dynamic_scale::DynamicScaleConfig>()
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
         app

@@ -38,7 +38,7 @@ const SETTLE_S: f32 = 1.5;
 
 /// The three CVars, as the controller reads them.
 #[derive(Resource, Clone, Copy, PartialEq, Debug)]
-struct DynamicScaleConfig {
+pub(crate) struct DynamicScaleConfig {
     /// `dynamicRenderScale`.
     on: bool,
     /// The frame rate held: [`Self::asked_fps`] resolved by [`resolve_target`].
@@ -116,6 +116,12 @@ fn resolve_target(
 }
 
 impl DynamicScaleConfig {
+    /// `dynamicRenderScale`, `dynamicRenderScaleFPS` as set, and `dynamicRenderScaleMin`.
+    #[cfg(test)]
+    pub(crate) fn settings(&self) -> (bool, f32, f32) {
+        (self.on, self.asked_fps, self.floor)
+    }
+
     /// The deepest index into [`LEVELS`] the floor allows.
     fn deepest(&self) -> usize {
         LEVELS
@@ -129,8 +135,11 @@ impl DynamicScaleConfig {
     }
 }
 
-/// The CVars' change callback.
-fn on_cvar(ev: On<crate::cvars::CvarChanged>, mut config: ResMut<DynamicScaleConfig>) {
+/// The CVars' change callback, run by [`crate::cvars::callbacks::CvarCallbacks`] for every write:
+/// a Lua verb's (the options rows, `/console`), the boot load's. (An observer of
+/// [`crate::cvars::CvarChanged`] alone saw only the boot load, so a write took effect at the next
+/// launch.)
+pub(crate) fn on_cvar(ev: &crate::cvars::CvarChanged, mut config: Mut<'_, DynamicScaleConfig>) {
     if ev.is("dynamicRenderScale") {
         config.on = ev.flag();
     } else if ev.is("dynamicRenderScaleFPS") {
@@ -258,8 +267,7 @@ pub(crate) struct DynamicScalePlugin;
 
 impl Plugin for DynamicScalePlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_cvar)
-            .init_resource::<DynamicScaleConfig>()
+        app.init_resource::<DynamicScaleConfig>()
             .init_resource::<DynamicScale>()
             // After the frame's world stages, and before the render size reads the factor.
             .add_systems(
