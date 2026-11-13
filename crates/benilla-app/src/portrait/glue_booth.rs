@@ -923,6 +923,19 @@ pub(super) fn sync_glue_scene(
         if scene.stand_down(&mut commands) {
             resize_target(&mut images, &booth.target, GLUE_SIZE, GLUE_SIZE);
         }
+        // The scene's light buffer leaves the mirror lists and is let go, so no upload writes a
+        // buffer nothing draws with in the world; the next glue visit makes a new one, which the
+        // uploads write whole as it joins.
+        if mirrors.0.contains_key("glue_scene") {
+            mirrors.0.remove("glue_scene");
+        }
+        if tint_mirrors.0.contains_key("glue_scene") {
+            tint_mirrors.0.remove("glue_scene");
+        }
+        if anim_mirrors.0.contains_key("glue_scene") {
+            anim_mirrors.0.remove("glue_scene");
+        }
+        scene.light = None;
         for root in scene.dropped.drain(..) {
             mats.forget_scene(root);
         }
