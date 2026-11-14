@@ -14,6 +14,11 @@
 //!   the server's item table. Without it the crowd is naked.
 //! - `WOW_PROBE_CROWD_SEED` (default 1): the same seed builds the same crowd, so two runs compare.
 //! - `WOW_PROBE_CROWD_REACH` (default 50): how far, in yards, the fan of players reaches.
+//! - `WOW_PROBE_CROWD_LINE="<yd>,<yd>,…"`: instead of the fan, one player per distance straight
+//!   down the camera's look, a step to either side in turn so a near one hides no far one (the
+//!   animation-LOD demo: a player at each tier's distance). `WOW_PROBE_CROWD` then names how many.
+//! - `WOW_PROBE_CROWD_EMOTE=<state>`: every player's `UNIT_NPC_EMOTESTATE`, a looping
+//!   `Emotes.dbc` state (10 dances), so their animation shows its update rate.
 //!
 //! Each player is a seeded draw: a race and sex, a class the race allows, appearance dials inside
 //! the race's ranges (`CharCreateCatalog::ranges`), one item per visible slot from the pool
@@ -54,6 +59,10 @@ struct ProbeCrowd {
     seed: u64,
     /// `WOW_PROBE_CROWD_REACH`: the fan's far edge, in yards from the probe.
     reach: f32,
+    /// `WOW_PROBE_CROWD_LINE`: distances down the look, one player each, in place of the fan.
+    line: Vec<f32>,
+    /// `WOW_PROBE_CROWD_EMOTE`: the looping emote state every player holds.
+    emote: Option<u32>,
     /// The gear pool by visible slot.
     pool: Vec<(u16, Vec<u32>)>,
     spawned: u32,
@@ -97,6 +106,14 @@ fn from_env() -> Option<ProbeCrowd> {
             .and_then(|s| s.parse().ok())
             .unwrap_or(1),
         reach: env_f32("WOW_PROBE_CROWD_REACH", 50.0),
+        line: std::env::var("WOW_PROBE_CROWD_LINE")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect(),
+        emote: std::env::var("WOW_PROBE_CROWD_EMOTE")
+            .ok()
+            .and_then(|s| s.trim().parse().ok()),
         pool,
         spawned: 0,
         next_step: 0,
@@ -164,6 +181,10 @@ fn player_create(
         (FIELD_PLAYER_BYTES, look),
         (FIELD_PLAYER_BYTES_2, u32::from(dial(8, ranges.facial_hair))),
     ];
+    if let Some(state) = crowd.emote {
+        // `UNIT_NPC_EMOTESTATE` (field 148).
+        pairs.push((148, state));
+    }
     let mut two_handed = false;
     for (slot, entries) in &crowd.pool {
         // A bare slot one time in four; an off hand only beside a one-handed main hand.
@@ -189,10 +210,21 @@ fn player_create(
     let share = (index as f32 + 0.5) / total as f32;
     let distance = NEAR + (crowd.reach - NEAR).max(0.0) * share.sqrt();
     let bearing = centre[3] + HALF_ARC * (2.0 * (index as f32 * 0.618_034).fract() - 1.0);
-    let (x, y) = (
-        centre[0] + distance * bearing.cos(),
-        centre[1] + distance * bearing.sin(),
-    );
+    let (x, y) = match crowd.line.get(index as usize) {
+        // The line: straight down the look, a step to the left or right in turn.
+        Some(&along) => {
+            let side = if index.is_multiple_of(2) { 1.5 } else { -1.5 };
+            let (fx, fy) = (centre[3].cos(), centre[3].sin());
+            (
+                centre[0] + along * fx - side * fy,
+                centre[1] + along * fy + side * fx,
+            )
+        }
+        None => (
+            centre[0] + distance * bearing.cos(),
+            centre[1] + distance * bearing.sin(),
+        ),
+    };
     // On the surface under the spot, else at the centre's height (nothing solid within reach).
     let position = [x, y, ground(x, y).unwrap_or(centre[2])];
     Some(SessionEvent::ObjectCreate {
@@ -200,8 +232,12 @@ fn player_create(
         kind: EntityKind::Player,
         display_id: Some(display),
         position,
-        // Facing back toward the camera.
-        orientation: bearing + std::f32::consts::PI,
+        // Facing back toward the camera (the line's along its axis).
+        orientation: if (index as usize) < crowd.line.len() {
+            centre[3]
+        } else {
+            bearing
+        } + std::f32::consts::PI,
         scale: 1.0,
         speeds: None,
         mover: None,

@@ -231,6 +231,16 @@ pub(crate) const PROBE_VARS: &[ProbeVar] = &[
         wall_clock: false,
     },
     ProbeVar {
+        name: "WOW_PROBE_CROWD_LINE",
+        purpose: "\"<yd>,<yd>,…\" — the crowd in a line down the camera's look, one player per distance",
+        wall_clock: false,
+    },
+    ProbeVar {
+        name: "WOW_PROBE_CROWD_EMOTE",
+        purpose: "<state> — every crowd player's looping emote state (10 dances)",
+        wall_clock: false,
+    },
+    ProbeVar {
         name: "WOW_PROBE_CROWD_SEED",
         purpose: "<n> — the crowd's seed (default 1): the same seed builds the same crowd",
         wall_clock: false,
