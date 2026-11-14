@@ -28,6 +28,7 @@ pub(crate) use twist::{wrap_pi, BodyTwist};
 /// Parks an off-frustum rig's pose while its clocks run, as the reference does not tick one
 /// (`0x683dd0`); a parked unit's events fire only for a `MORE_AUDIBLE` template.
 mod lod;
+pub(crate) use lod::{on_anim_detail_cvar, AnimDetail, AnimDetailStepped};
 
 /// Wielded `(item class, subclass)` per hand as worn (`GetWeapon(slot, 1)`, `0x605e30`, what the
 /// paperdoll shows); behaviour reads `armed_main`/`armed_off`, which apply the disarm ladder.

@@ -24,9 +24,94 @@ use crate::target::SelectionRadius;
 use benilla_world::view::WorldCamera;
 use benilla_world::wmo_portal::{room_pvs_visible, UnitWmoRoom, WmoPortalInstance};
 
-use benilla_world::rig_anim::{AnimParked, RigPose};
+use benilla_world::rig_anim::{AnimParked, AnimStride, RigPose};
 
 use crate::portrait::StageRig;
+
+/// `animationDetail`: Quality poses every on-screen body every frame (the reference's: every
+/// elected unit, every frame); Performance poses a body past [`HALF_RATE_YD`] every 2nd frame and
+/// past [`QUARTER_RATE_YD`] every 4th ([`AnimStride`]), its clocks running on so each pose lands on
+/// time; Dynamic is Quality until frames miss the frame-rate target, then Performance, back up when
+/// they keep up (`crate::dynamic_scale`). `$WOW_ANIM_DETAIL` (0-2) overrides it for the session.
+/// Deviation: benilla's own, for slow devices; the body we drive and its mount always pose every
+/// frame, and every body within ability range does.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum AnimDetail {
+    #[default]
+    Quality,
+    Performance,
+    Dynamic,
+}
+
+/// Past the longest ability reach (40 yd heals; 41 for a Hawk Eye hunter, at a body's edge) a body
+/// poses every 2nd frame, and past twice that every 4th.
+pub(crate) const HALF_RATE_YD: f32 = 42.0;
+pub(crate) const QUARTER_RATE_YD: f32 = 84.0;
+
+/// What Dynamic stands at now: whether it has stepped down to Performance (`crate::dynamic_scale`
+/// writes it).
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AnimDetailStepped(pub(crate) bool);
+
+impl AnimDetail {
+    /// A CVar value: 0 Quality, 1 Performance, 2 Dynamic; anything else Quality.
+    pub(crate) fn from_value(v: f32) -> Self {
+        match v.round() as i32 {
+            1 => Self::Performance,
+            2 => Self::Dynamic,
+            _ => Self::Quality,
+        }
+    }
+
+    /// The CVar value [`Self::from_value`] reads back.
+    pub(crate) fn value(self) -> &'static str {
+        match self {
+            Self::Quality => "0",
+            Self::Performance => "1",
+            Self::Dynamic => "2",
+        }
+    }
+
+    /// Whether bodies are tiered by distance now, with Dynamic's step.
+    pub(crate) fn tiered(self, stepped: bool) -> bool {
+        match self {
+            Self::Quality => false,
+            Self::Performance => true,
+            Self::Dynamic => stepped,
+        }
+    }
+}
+
+/// The stride for a body `distance` yards from the camera when tiered.
+pub(crate) fn every(distance: f32) -> u8 {
+    if distance >= QUARTER_RATE_YD {
+        4
+    } else if distance >= HALF_RATE_YD {
+        2
+    } else {
+        1
+    }
+}
+
+/// The `animationDetail` callback; `$WOW_ANIM_DETAIL` owns the session.
+pub(crate) fn on_anim_detail_cvar(
+    ev: &crate::cvars::CvarChanged,
+    mut detail: bevy::prelude::Mut<'_, AnimDetail>,
+) {
+    if ev.is("animationDetail") && std::env::var_os("WOW_ANIM_DETAIL").is_none() {
+        let want = AnimDetail::from_value(ev.num());
+        if *detail != want {
+            *detail = want;
+        }
+    }
+}
+
+fn anim_detail_from_env() -> AnimDetail {
+    std::env::var("WOW_ANIM_DETAIL")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .map_or(AnimDetail::Quality, AnimDetail::from_value)
+}
 
 /// Time out of view before a rig parks, so a camera swing does not churn; waking is instant.
 const PARK_AFTER_SECS: f32 = 0.5;
@@ -45,7 +130,9 @@ const FALLBACK_RADIUS: f32 = 6.0;
 #[allow(clippy::type_complexity)] // one Bevy system's full input set
 pub(super) fn gate_rig_animation(
     time: Res<Time>,
-    cam: Query<&Frustum, With<WorldCamera>>,
+    cam: Query<(&Frustum, Option<&GlobalTransform>), With<WorldCamera>>,
+    detail: Option<Res<AnimDetail>>,
+    stepped: Option<Res<AnimDetailStepped>>,
     rigs: Query<
         (
             Entity,
@@ -55,6 +142,7 @@ pub(super) fn gate_rig_animation(
             Has<Embodied>,
             Option<&MountBody>,
             Option<&UnitWmoRoom>,
+            Option<&AnimStride>,
         ),
         // Every rig, driver or not: a GameObject rig's looping player is its whole animation.
         // Doodads and booth stages are left out: their own gates own their `AnimParked`, and two
@@ -83,11 +171,16 @@ pub(super) fn gate_rig_animation(
     // the PVS rejects, even under `WOW_NO_ROOM_LOD`.
     let cost_on = benilla_world::rig_palette::rig_cost_enabled();
     let (mut n_rigs, mut n_parked, mut room_out) = (0u32, 0u32, 0u32);
-    let Ok(frustum) = cam.single() else {
+    // Visible rigs posing every 2nd and every 4th frame.
+    let (mut n_half, mut n_quarter) = (0u32, 0u32);
+    let Ok((frustum, cam_tf)) = cam.single() else {
         return;
     };
+    // No camera transform (a bare test camera): no distance, so no tier.
+    let tiered = cam_tf.is_some() && detail.is_some_and(|d| d.tiered(stepped.is_some_and(|s| s.0)));
+    let cam_at = cam_tf.map_or(Vec3::ZERO, GlobalTransform::translation);
     let now = time.elapsed_secs();
-    for (entity, tf, radius, parked, is_self, mount, room) in &rigs {
+    for (entity, tf, radius, parked, is_self, mount, room, stride) in &rigs {
         let exempt =
             disabled || is_self || mount.is_some_and(|m| self_hosts.get(m.host).unwrap_or(false));
         let visible = exempt
@@ -120,6 +213,30 @@ pub(super) fn gate_rig_animation(
             if parked {
                 commands.entity(entity).remove::<AnimParked>();
             }
+            // The distance tier ([`AnimDetail`]); the phase spreads a tier's rigs over its frames.
+            let every = if exempt || !tiered {
+                1
+            } else {
+                every(tf.translation().distance(cam_at))
+            };
+            if cost_on {
+                n_half += u32::from(every == 2);
+                n_quarter += u32::from(every == 4);
+            }
+            let want = (every > 1).then(|| AnimStride {
+                every,
+                phase: (entity.index_u32() % u32::from(every)) as u8,
+            });
+            if stride.copied() != want {
+                match want {
+                    Some(s) => {
+                        commands.entity(entity).insert(s);
+                    }
+                    None => {
+                        commands.entity(entity).remove::<AnimStride>();
+                    }
+                }
+            }
         } else if !parked {
             let since = *out_since.entry(entity).or_insert(now);
             if now - since >= PARK_AFTER_SECS {
@@ -129,7 +246,10 @@ pub(super) fn gate_rig_animation(
         }
     }
     if cost_on {
-        eprintln!("[rig-gate] rigs={n_rigs} parked={n_parked} room_out={room_out}");
+        eprintln!(
+            "[rig-gate] rigs={n_rigs} parked={n_parked} room_out={room_out} \
+             every2={n_half} every4={n_quarter} tiered={tiered}"
+        );
     }
     // Drop entries for rigs that despawned (or lost their model) before parking.
     out_since.retain(|e, _| rigs.contains(*e));
@@ -137,7 +257,9 @@ pub(super) fn gate_rig_animation(
 
 /// Register [`gate_rig_animation`] before the frame's pose evaluation.
 pub(super) fn plugin(app: &mut App) {
-    app.add_systems(PostUpdate, gate_rig_animation.before(AnimationSystems));
+    app.insert_resource(anim_detail_from_env())
+        .init_resource::<AnimDetailStepped>()
+        .add_systems(PostUpdate, gate_rig_animation.before(AnimationSystems));
 }
 
 #[cfg(test)]
@@ -579,5 +701,36 @@ mod tests {
         let before = bone(&app, behind_joint);
         advance(&mut app, DUR * 0.35, 2);
         assert_ne!(before, bone(&app, behind_joint), "its joints stay live");
+    }
+
+    #[test]
+    fn performance_tiers_bodies_past_ability_range() {
+        assert_eq!(every(41.9), 1, "within every ability's reach: every frame");
+        assert_eq!(every(HALF_RATE_YD), 2);
+        assert_eq!(every(83.9), 2);
+        assert_eq!(every(QUARTER_RATE_YD), 4);
+        assert!(!AnimDetail::Quality.tiered(true));
+        assert!(AnimDetail::Performance.tiered(false));
+        assert!(
+            !AnimDetail::Dynamic.tiered(false),
+            "Dynamic starts at Quality"
+        );
+        assert!(AnimDetail::Dynamic.tiered(true));
+        for d in [
+            AnimDetail::Quality,
+            AnimDetail::Performance,
+            AnimDetail::Dynamic,
+        ] {
+            assert_eq!(AnimDetail::from_value(d.value().parse().unwrap()), d);
+        }
+        assert_eq!(AnimDetail::from_value(9.0), AnimDetail::Quality);
+    }
+
+    #[test]
+    fn a_stride_poses_on_its_phase_only() {
+        let s = AnimStride { every: 4, phase: 1 };
+        let due: Vec<u32> = (0..12).filter(|&f| s.due(f)).collect();
+        assert_eq!(due, vec![3, 7, 11], "every 4th frame, offset by the phase");
+        assert!((0..5).all(|f| AnimStride { every: 1, phase: 0 }.due(f)));
     }
 }

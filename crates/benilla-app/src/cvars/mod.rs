@@ -900,6 +900,10 @@ fn session_values(world: &World) -> Vec<(&'static str, Option<String>)> {
         let v = world.get_resource::<crate::ui_script::UiScaleCvar>();
         out.push(("uiScale", v.map(|s| s.0.to_string())));
     }
+    if set("WOW_ANIM_DETAIL") {
+        let v = world.get_resource::<crate::creature_anim::AnimDetail>();
+        out.push(("animationDetail", v.map(|d| d.value().to_string())));
+    }
     if set("WOW_UI_RENDER_SCALE") {
         let v = world.get_resource::<crate::dynamic_scale::UiScaleChoice>();
         out.push((
@@ -2653,6 +2657,28 @@ mod tests {
         );
     }
 
+    /// The Animation Detail dropdown's writes reach the animation-LOD gate at once.
+    #[test]
+    fn a_lua_write_sets_the_animation_detail() {
+        use crate::creature_anim::AnimDetail;
+        let env = CvarEnv::hold();
+        let mut app = cvar_app_in(&env);
+        app.update();
+        for (value, want) in [
+            ("1", AnimDetail::Performance),
+            ("2", AnimDetail::Dynamic),
+            ("7", AnimDetail::Quality),
+            ("0", AnimDetail::Quality),
+        ] {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .run(&format!(r#"SetCVar("animationDetail", "{value}")"#))
+                .unwrap();
+            app.update();
+            assert_eq!(*res::<AnimDetail>(&app), want, "{value}");
+        }
+    }
+
     /// The Interface Resolution dropdown's writes reach the interface's scaler at once: "0" is
     /// Dynamic, anything else a fixed scale held to 50-100%.
     #[test]
@@ -2850,7 +2876,7 @@ mod tests {
     /// What a CVar host reads from the environment when it is built and when it loads
     /// ([`session_values`], [`crate::video::windowed_env`], [`crate::local_state::home`]); the
     /// persistence variables are `ENV_LOCK`'s own, the window ones are the capture tests'.
-    const HOST_ENV: [&str; 15] = [
+    const HOST_ENV: [&str; 16] = [
         "WOW_WIN",
         "WOW_CAPTURE",
         "WOW_CAPTURE_UI",
@@ -2864,6 +2890,7 @@ mod tests {
         "WOW_RENDER_SCALE",
         "WOW_POST_AA",
         "WOW_UI_RENDER_SCALE",
+        "WOW_ANIM_DETAIL",
         "WOW_HOST",
         "BENILLA_HOME",
     ];
@@ -2994,6 +3021,7 @@ mod tests {
             .init_resource::<crate::dynamic_scale::DynamicScaleConfig>()
             .insert_resource(benilla_world::post_aa::PostAa::Off)
             .insert_resource(crate::dynamic_scale::UiScaleChoice::Fixed(1.0))
+            .insert_resource(crate::creature_anim::AnimDetail::Quality)
             .add_plugins(CvarPlugin);
         app.insert_non_send_resource(UiScript::new().unwrap());
         app

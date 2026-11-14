@@ -30,6 +30,25 @@ pub struct SceneClock(pub f64);
 #[component(storage = "SparseSet")]
 pub struct AnimParked;
 
+/// Poses this rig only every `every`-th frame, on frames where `(frame + phase) % every == 0`
+/// (`bevy::diagnostic::FrameCount`); between, its pose holds while the sequence clocks, the driver
+/// and the event scanner run on, so each evaluation lands where the absolute clock says. benilla-app's
+/// animation-LOD gate sets it by distance under the `animationDetail` setting. Deviation: 1.12
+/// poses every elected unit every frame; this trades the smoothness of far bodies for frame time.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+#[component(storage = "SparseSet")]
+pub struct AnimStride {
+    pub every: u8,
+    pub phase: u8,
+}
+
+impl AnimStride {
+    /// Whether frame `frame` is one this rig poses on.
+    pub fn due(self, frame: u32) -> bool {
+        self.every <= 1 || (frame.wrapping_add(u32::from(self.phase))) % u32::from(self.every) == 0
+    }
+}
+
 /// Registers the rig machinery; `WorldPlugins` adds it, so a program with no game still poses its
 /// rigs.
 pub fn plugin(app: &mut App) {

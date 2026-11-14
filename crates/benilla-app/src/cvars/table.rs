@@ -887,6 +887,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "1",
         "benilla's own — the reference draws its interface at the backbuffer's size",
     ),
+    // benilla's own: on-screen bodies' pose rate by distance (`creature_anim::AnimDetail`), "0"
+    // Quality (every frame, the reference's), "1" Performance, "2" Dynamic; `$WOW_ANIM_DETAIL`
+    // overrides it for the session.
+    ours(
+        "animationDetail",
+        "0",
+        "benilla's own — the reference poses every elected unit every frame",
+    ),
     ours(
         "dynamicRenderScale",
         if cfg!(target_os = "ios") { "1" } else { "0" },

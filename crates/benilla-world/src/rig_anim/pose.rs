@@ -10,7 +10,7 @@ use bevy::math::Affine3A;
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 
-use super::AnimParked;
+use super::{AnimParked, AnimStride};
 use crate::vis_chain::VisChainOnly;
 
 /// A rig's pose buffer, one local per bone in skeleton order, on the `AnimationPlayer`'s entity;
@@ -178,70 +178,85 @@ struct Active {
 
 /// Pose every live rig where `animate_targets` runs, after `advance_animations`.
 fn evaluate_rig_poses(
-    mut rigs: Query<(&AnimationPlayer, &ModelAnimations, &mut RigPose), Without<AnimParked>>,
+    mut rigs: Query<
+        (
+            &AnimationPlayer,
+            &ModelAnimations,
+            &mut RigPose,
+            Option<&AnimStride>,
+        ),
+        Without<AnimParked>,
+    >,
+    frame: Option<Res<bevy::diagnostic::FrameCount>>,
 ) {
+    let frame = frame.map_or(0, |f| f.0);
     // Parallel: a rig reads shared clips and writes only its own pose.
-    rigs.par_iter_mut().for_each(|(player, anims, mut rig)| {
-        let src = &anims.pose;
-        // The contributing animations in node order, in one scratch per worker thread.
-        thread_local! {
-            static ACTIVE: std::cell::RefCell<Vec<Active>> =
-                const { std::cell::RefCell::new(Vec::new()) };
-        }
-        ACTIVE.with(|cell| {
-            let mut active = cell.borrow_mut();
-            active.clear();
-            for (&node, anim) in player.playing_animations() {
-                // Bevy's exact gate: a weight of literal 0.0 skips the node (paused does not).
-                if anim.weight() == 0.0 {
-                    continue;
-                }
-                let Some(pn) = src.node(node) else { continue };
-                if src.clips.get(pn.clip as usize).is_none() {
-                    continue;
-                }
-                active.push(Active {
-                    node: node.index(),
-                    clip: pn.clip as usize,
-                    mask: pn.mask,
-                    weight: anim.weight(),
-                    seek: anim.seek_time(),
-                    cursor: 0,
-                });
+    rigs.par_iter_mut()
+        .for_each(|(player, anims, mut rig, stride)| {
+            // A strided rig holds its pose between its frames ([`AnimStride`]).
+            if stride.is_some_and(|s| !s.due(frame)) {
+                return;
             }
-            active.sort_unstable_by_key(|a| a.node);
-            match active.as_mut_slice() {
-                [] => {}
-                [one] => {
-                    // One contribution commits at full value whatever its weight.
-                    rig.pose_dirty = true;
-                    for pb in &src.clips[one.clip].bones {
-                        if src.bone_masks.get(pb.bone as usize).copied().unwrap_or(0) & one.mask
-                            != 0
-                        {
-                            continue;
-                        }
-                        let Some(tf) = rig.locals.get_mut(pb.bone as usize) else {
-                            continue;
-                        };
-                        if let Some(v) = pb.translation.sample(one.seek) {
-                            tf.translation = v;
-                        }
-                        if let Some(v) = pb.rotation.sample(one.seek) {
-                            tf.rotation = v;
-                        }
-                        if let Some(v) = pb.scale.sample(one.seek) {
-                            tf.scale = v;
+            let src = &anims.pose;
+            // The contributing animations in node order, in one scratch per worker thread.
+            thread_local! {
+                static ACTIVE: std::cell::RefCell<Vec<Active>> =
+                    const { std::cell::RefCell::new(Vec::new()) };
+            }
+            ACTIVE.with(|cell| {
+                let mut active = cell.borrow_mut();
+                active.clear();
+                for (&node, anim) in player.playing_animations() {
+                    // Bevy's exact gate: a weight of literal 0.0 skips the node (paused does not).
+                    if anim.weight() == 0.0 {
+                        continue;
+                    }
+                    let Some(pn) = src.node(node) else { continue };
+                    if src.clips.get(pn.clip as usize).is_none() {
+                        continue;
+                    }
+                    active.push(Active {
+                        node: node.index(),
+                        clip: pn.clip as usize,
+                        mask: pn.mask,
+                        weight: anim.weight(),
+                        seek: anim.seek_time(),
+                        cursor: 0,
+                    });
+                }
+                active.sort_unstable_by_key(|a| a.node);
+                match active.as_mut_slice() {
+                    [] => {}
+                    [one] => {
+                        // One contribution commits at full value whatever its weight.
+                        rig.pose_dirty = true;
+                        for pb in &src.clips[one.clip].bones {
+                            if src.bone_masks.get(pb.bone as usize).copied().unwrap_or(0) & one.mask
+                                != 0
+                            {
+                                continue;
+                            }
+                            let Some(tf) = rig.locals.get_mut(pb.bone as usize) else {
+                                continue;
+                            };
+                            if let Some(v) = pb.translation.sample(one.seek) {
+                                tf.translation = v;
+                            }
+                            if let Some(v) = pb.rotation.sample(one.seek) {
+                                tf.rotation = v;
+                            }
+                            if let Some(v) = pb.scale.sample(one.seek) {
+                                tf.scale = v;
+                            }
                         }
                     }
+                    many => {
+                        rig.pose_dirty = true;
+                        blend_rig(src, many, &mut rig);
+                    }
                 }
-                many => {
-                    rig.pose_dirty = true;
-                    blend_rig(src, many, &mut rig);
-                }
-            }
+            });
         });
-    });
 }
 
 /// Several animations: merge-walk the bone-sorted clips, folding each property in node order.

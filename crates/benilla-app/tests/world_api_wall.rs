@@ -161,6 +161,8 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("post_aa::PostAa", "record"),
     ("ride_frame::RideFrame", "record"),
     ("rig_anim::AnimParked", "wall"),
+    // The pose stride the app's animation-LOD gate sets (`rig_anim`'s record on `AnimStride`).
+    ("rig_anim::AnimStride", "record"),
     ("rig_anim::GlobalSeqDrive", "wall"),
     ("rig_anim::PosePost", "wall"),
     ("rig_anim::RigAnchor", "wall"),

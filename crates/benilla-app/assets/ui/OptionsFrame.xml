@@ -465,6 +465,13 @@
             .. "frame; text and icons get slightly softer.\n\n"
             .. "Dynamic stays at 100% while the game keeps up with the Target Frame Rate, steps "
             .. "down to 75% and then 50% while it does not, and climbs back when it does."
+        BENILLA_TOOLTIP_ANIMATION_DETAIL =
+            "How smoothly distant characters move. Quality animates everyone every frame. "
+            .. "Performance updates characters beyond ability range (about 40 yards) every other "
+            .. "frame, and beyond 80 yards every fourth.\n\n"
+            .. "Dynamic stays at Quality while the game keeps up with the Target Frame Rate and "
+            .. "switches to Performance while it does not. Characters in range and your own "
+            .. "always move at full smoothness."
         BENILLA_TOOLTIP_MIN_RESOLUTION =
             "How far Dynamic Resolution may lower the 3D world's resolution. Lower keeps the "
             .. "frame rate up in busy scenes at the cost of a blurrier world."
@@ -666,8 +673,8 @@
         BENILLA_TOUCH_GRAPHICS_ROWS = {
             "RowUiScale", "RowFarclip", "RowWorldDetail", "RowSpellDetail", "RowBrightness",
             "RowWeatherDensity",
-            "RowRenderScale", "RowAntiAliasing", "RowInterfaceResolution", "RowTargetFps",
-            "RowDynamicResolution", "RowMinResolution",
+            "RowRenderScale", "RowAntiAliasing", "RowInterfaceResolution", "RowAnimationDetail",
+            "RowTargetFps", "RowDynamicResolution", "RowMinResolution",
         }
 
         function BenillaOptions_TouchLayout()
@@ -2169,6 +2176,23 @@
                                                     { text = "75%", value = "0.75" },
                                                     { text = "50%", value = "0.5" },
                                                     { text = "Dynamic", value = "0" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowAnimationDetail" inherits="BenillaOptionsDropdownRowTemplate" hidden="true">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowInterfaceResolution" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowInterfaceResolution" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- Deviation: our own row; the reference poses every
+                                                -- unit every frame (benilla-app creature_anim lod).
+                                                BenillaOptionsRow_OnLoad(this, "animationDetail",
+                                                    "Animation Detail", "BENILLA_TOOLTIP_ANIMATION_DETAIL")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = "Quality", value = "0" },
+                                                    { text = "Performance", value = "1" },
+                                                    { text = "Dynamic", value = "2" },
                                                 })
                                             </OnLoad></Scripts>
                                         </Frame>

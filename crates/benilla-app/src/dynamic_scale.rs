@@ -315,30 +315,79 @@ pub(crate) fn on_ui_scale_cvar(ev: &crate::cvars::CvarChanged, mut choice: Mut<'
     }
 }
 
+/// Whether the 3D's dynamic scale has nothing left to give: off, or at its floor.
+fn world_at_floor(config: &DynamicScaleConfig, world_scale: &DynamicScale) -> bool {
+    !config.on || world_scale.0 <= LEVELS[config.deepest()] + 1e-4
+}
+
+/// Animation Detail's Dynamic ([`crate::creature_anim::AnimDetail`]): Quality until missed
+/// seconds, then Performance ([`crate::creature_anim::AnimDetailStepped`]), with the 3D's stepping
+/// against the same target; it steps down only once the 3D's scale is off or at its floor, and
+/// climbs back on its own probes.
+fn hold_anim_budget(
+    time: Res<Time<bevy::time::Real>>,
+    config: Res<DynamicScaleConfig>,
+    detail: Option<Res<crate::creature_anim::AnimDetail>>,
+    world_scale: Res<DynamicScale>,
+    stepped: Option<ResMut<crate::creature_anim::AnimDetailStepped>>,
+    mut state: Local<Controller>,
+) {
+    let Some(mut stepped) = stepped else {
+        return;
+    };
+    let want = if detail.is_some_and(|d| *d == crate::creature_anim::AnimDetail::Dynamic) {
+        state.tick(
+            time.delta_secs(),
+            config.budget_ms(),
+            ANIM_LEVELS.len() - 1,
+            // Not in the frame the world itself stepped: one missed second, one step.
+            world_at_floor(&config, &world_scale) && !world_scale.is_changed(),
+            &ANIM_LEVELS,
+            "dynamic animation detail",
+        );
+        state.level > 0
+    } else {
+        *state = Controller::default();
+        false
+    };
+    if stepped.0 != want {
+        stepped.0 = want;
+    }
+}
+
+/// Animation Detail's two steps for the controller's log: Quality (1) and Performance (0.5).
+const ANIM_LEVELS: [f32; 2] = [1.0, 0.5];
+
 /// The interface's scale ([`crate::ui_pass::UiRenderScale`]): the fixed choice, or under Dynamic
 /// the same stepping as the 3D's against the same target, 100%, 75%, 50%. Dynamic steps down only
-/// once the 3D's dynamic scale is off or at its floor, so a missed second lowers one of them, the
-/// world first; it steps back up on its own probes.
+/// once the 3D's dynamic scale is off or at its floor and a Dynamic Animation Detail has stepped
+/// to Performance, so a missed second lowers one of them, the world first, then animation; it
+/// steps back up on its own probes.
+#[allow(clippy::too_many_arguments)] // one Bevy system's inputs
 fn hold_ui_budget(
     time: Res<Time<bevy::time::Real>>,
     config: Res<DynamicScaleConfig>,
     choice: Res<UiScaleChoice>,
     world_scale: Res<DynamicScale>,
+    anim: Option<Res<crate::creature_anim::AnimDetail>>,
+    anim_stepped: Option<Res<crate::creature_anim::AnimDetailStepped>>,
     mut ui: ResMut<crate::ui_pass::UiRenderScale>,
     mut state: Local<Controller>,
 ) {
+    // Animation has stepped, and not in this frame: one missed second, one step.
+    let anim_done = !anim.is_some_and(|d| *d == crate::creature_anim::AnimDetail::Dynamic)
+        || anim_stepped.is_some_and(|s| s.0 && !s.is_changed());
     let want = match *choice {
         UiScaleChoice::Fixed(s) => {
             *state = Controller::default();
             s
         }
         UiScaleChoice::Dynamic => {
-            let world_at_floor = !config.on || world_scale.0 <= LEVELS[config.deepest()] + 1e-4;
             state.tick(
                 time.delta_secs(),
                 config.budget_ms(),
                 UI_LEVELS.len() - 1,
-                world_at_floor,
+                world_at_floor(&config, &world_scale) && !world_scale.is_changed() && anim_done,
                 &UI_LEVELS,
                 "dynamic interface scale",
             );
@@ -351,8 +400,10 @@ fn hold_ui_budget(
 }
 
 /// Writes the level's factor, only when it moves: a write rebuilds nothing, but a moved factor
-/// rebuilds the 3D's targets ([`crate::world_backdrop`]).
-fn apply(scale: &mut DynamicScale, level: usize) {
+/// rebuilds the 3D's targets ([`crate::world_backdrop`]). Through the `ResMut`, so an unmoved
+/// factor leaves the resource unchanged (the later scalers read its change as "the world just
+/// stepped").
+fn apply(scale: &mut ResMut<DynamicScale>, level: usize) {
     let factor = LEVELS[level];
     if scale.0 != factor {
         scale.0 = factor;
@@ -371,7 +422,12 @@ impl Plugin for DynamicScalePlugin {
             // After the frame's world stages, and before the render size reads the factor.
             .add_systems(
                 Update,
-                (resolve_target, hold_budget, hold_ui_budget)
+                (
+                    resolve_target,
+                    hold_budget,
+                    hold_anim_budget,
+                    hold_ui_budget,
+                )
                     .chain()
                     .after(benilla_world::schedule::WorldStage::Present)
                     .before(crate::world_backdrop::track_render_size),
@@ -548,5 +604,53 @@ mod tests {
         assert_eq!(ui(&app), 0.75);
         assert_eq!(UiScaleChoice::from_value(0.0), UiScaleChoice::Dynamic);
         assert_eq!(UiScaleChoice::from_value(0.3), UiScaleChoice::Fixed(0.5));
+    }
+
+    #[test]
+    fn dynamic_animation_steps_after_the_world_and_before_the_interface() {
+        use crate::creature_anim::{AnimDetail, AnimDetailStepped};
+        let mut app = App::new();
+        app.init_resource::<Time<bevy::time::Real>>()
+            .insert_resource(DynamicScaleConfig {
+                on: true,
+                target_fps: 30.0,
+                asked_fps: 30.0,
+                floor: 0.5,
+            })
+            .init_resource::<DynamicScale>()
+            .insert_resource(UiScaleChoice::Dynamic)
+            .init_resource::<crate::ui_pass::UiRenderScale>()
+            .insert_resource(AnimDetail::Dynamic)
+            .init_resource::<AnimDetailStepped>()
+            .add_systems(
+                Update,
+                (hold_budget, hold_anim_budget, hold_ui_budget).chain(),
+            );
+        let stepped = |app: &App| app.world().resource::<AnimDetailStepped>().0;
+        let (mut anim_at, mut ui_at) = (None, None);
+        for s in 0..60 {
+            second(&mut app, 50.0);
+            if stepped(&app) && anim_at.is_none() {
+                assert!(
+                    factor(&app) <= 0.5 + 1e-4,
+                    "animation waits for the world's floor"
+                );
+                anim_at = Some(s);
+            }
+            if ui(&app) < 1.0 && ui_at.is_none() {
+                assert!(stepped(&app), "the interface waits for animation");
+                ui_at = Some(s);
+            }
+        }
+        assert!(
+            anim_at.is_some() && ui_at.is_some(),
+            "{anim_at:?} {ui_at:?}"
+        );
+        assert!(anim_at < ui_at, "animation first: {anim_at:?} {ui_at:?}");
+        for _ in 0..200 {
+            second(&mut app, 33.3);
+        }
+        assert!(!stepped(&app), "back to Quality on budget");
+        assert_eq!(ui(&app), 1.0);
     }
 }

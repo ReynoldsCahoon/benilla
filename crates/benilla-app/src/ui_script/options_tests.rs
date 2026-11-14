@@ -1696,6 +1696,7 @@ fn the_touch_layout_swaps_the_desktop_video_rows_for_the_frame_rate_levers() {
         ("RowVerticalSync", true),
         ("RowAntiAliasing", true),
         ("RowInterfaceResolution", false),
+        ("RowAnimationDetail", false),
         ("RowTargetFps", false),
         ("RowDynamicResolution", false),
         ("RowMinResolution", false),
@@ -1713,6 +1714,7 @@ fn the_touch_layout_swaps_the_desktop_video_rows_for_the_frame_rate_levers() {
         ("RowRenderScale", true),
         ("RowAntiAliasing", true),
         ("RowInterfaceResolution", true),
+        ("RowAnimationDetail", true),
         ("RowTargetFps", true),
         ("RowDynamicResolution", true),
         ("RowMinResolution", true),
@@ -1725,6 +1727,7 @@ fn the_touch_layout_swaps_the_desktop_video_rows_for_the_frame_rate_levers() {
         "RowRenderScale",
         "RowAntiAliasing",
         "RowInterfaceResolution",
+        "RowAnimationDetail",
         "RowTargetFps",
         "RowDynamicResolution",
         "RowMinResolution",
@@ -1771,6 +1774,7 @@ fn the_touch_layout_swaps_the_desktop_video_rows_for_the_frame_rate_levers() {
         "BENILLA_TOOLTIP_DYNAMIC_RESOLUTION",
         "BENILLA_TOOLTIP_MIN_RESOLUTION",
         "BENILLA_TOOLTIP_INTERFACE_RESOLUTION",
+        "BENILLA_TOOLTIP_ANIMATION_DETAIL",
     ] {
         assert!(
             s.eval::<bool>(&format!("return {tip} ~= nil")).unwrap(),
