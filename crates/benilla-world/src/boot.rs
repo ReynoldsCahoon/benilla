@@ -18,11 +18,16 @@ const LOG_LEVEL: bevy::log::Level = bevy::log::Level::INFO;
 const LOG_LEVEL: bevy::log::Level = bevy::log::Level::WARN;
 
 /// Per-target directives over [`LOG_LEVEL`]. On iOS, info stays on for what a session is read by:
-/// the memory governor, the `WOW_IOS_PERF` meter, login progress and the probes.
+/// the memory governor, the `WOW_IOS_PERF` meter, login progress and the probes. winit's iOS
+/// event loop warns on every frame that Bevy's runner handles `AboutToWait` while redraws are
+/// being processed ("processing non `RedrawRequested` event after the main event loop", 0.30.13
+/// `app_state.rs`): harmless, but ~25 os_log writes a second, each pretty-printing the event on
+/// the main thread (1129 in 45 s at the login screen, 2026-11-13). Errors only for that module.
 #[cfg(not(target_os = "ios"))]
 const LOG_FILTER: &str = "wgpu=error,naga=warn";
 #[cfg(target_os = "ios")]
-const LOG_FILTER: &str = "wgpu=error,naga=warn,benilla_world::memory_governor=info,\
+const LOG_FILTER: &str = "wgpu=error,naga=warn,winit::platform_impl::ios::app_state=error,\
+benilla_world::memory_governor=info,\
 benilla_world::ios_boot=info,\
 benilla_app::glue_session::login=info,benilla_app::run_mode=info,benilla_app::probe_route=info,\
 benilla_app::probe_chat=info,benilla_app::probe_crowd=info,benilla_app::probe_quest=info";
